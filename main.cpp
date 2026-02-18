@@ -743,6 +743,18 @@ int main(int argc, char* argv[]) {
 		scConfig.puzzleBits = range;
 		if (!lockStr.empty()) parseLockString(lockStr, &scConfig);
 		GPUEngine::PrecomputeStringCrackMasks(&scConfig);
+
+		// In StringCrack mode: -start is the seed offset, -range is the seed space size
+		scConfig.seedOffset = strtoull(start.c_str(), NULL, 16);
+		// seedCount = 2^numFreeBits (full space) unless range is smaller
+		if (scConfig.numFreeBits < 64) {
+			scConfig.seedCount = (1ULL << scConfig.numFreeBits);
+		} else {
+			scConfig.seedCount = 0xFFFFFFFFFFFFFFFFULL;
+		}
+		printf("[StringCrack] Seed offset: 0x%llX\n", (unsigned long long)scConfig.seedOffset);
+		printf("[StringCrack] Seed count:  0x%llX (2^%d)\n",
+			(unsigned long long)scConfig.seedCount, scConfig.numFreeBits);
 	}
 
 	{
@@ -751,7 +763,12 @@ int main(int argc, char* argv[]) {
 		fprintf(stdout, "[keyspace]  start=%s\n", bc->ksStart.GetBase16().c_str());
 		fprintf(stdout, "[keyspace]    end=%s\n", bc->ksFinish.GetBase16().c_str());
 		if (randomMode) fprintf(stdout, "Random Mode Enabled !\n");
-		if (scConfig.enabled) fprintf(stdout, "[StringCrack] Mode ENABLED\n");
+		if (scConfig.enabled) {
+			fprintf(stdout, "[StringCrack] Mode ENABLED\n");
+			fprintf(stdout, "[StringCrack] -start = seed offset 0x%llX\n",
+				(unsigned long long)scConfig.seedOffset);
+			fprintf(stdout, "[StringCrack] -range = 2^%d seed space\n", scConfig.numFreeBits);
+		}
 		fflush(stdout);
 
 

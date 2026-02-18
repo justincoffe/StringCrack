@@ -1005,7 +1005,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			}
 
 			if (useStringCrack) {
-				uint64_t batchOffset = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
+				uint64_t batchOffset = scConfig->seedOffset + (uint64_t)idxcount * (uint64_t)numThreadsGPU;
 				ok = g.LaunchOpenClaw(found, batchOffset, true);
 			} else {
 				ok = g.Launch(found, true);
@@ -1030,7 +1030,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 				if (useStringCrack) {
 					// Reconstruct key from seed via expand_bits (CPU side)
-					uint64_t prevBatch = (uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU;
+					uint64_t prevBatch = scConfig->seedOffset + (uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU;
 					uint64_t seed = prevBatch + (uint64_t)it.thId;
 					uint64_t keyBits[4];
 					keyBits[0] = scConfig->lockVals[0];
@@ -1091,7 +1091,26 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		
 
-		if (keycount.IsGreaterOrEqual(&taskSize) && (!randomMode))
+		// StringCrack stop condition: check if we've scanned all seeds
+		if (useStringCrack) {
+			uint64_t seedsScanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
+			if (seedsScanned >= scConfig->seedCount) {
+				double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0);
+				printf("\n");
+				printf("[StringCrack] Seed Range Finished! Offset: 0x%llX, Seeds: 0x%llX - Avg: %.1f [MK/s] - Found: %d\n",
+					(unsigned long long)scConfig->seedOffset,
+					(unsigned long long)scConfig->seedCount,
+					avg_speed, nbFoundKey);
+				fflush(stdout);
+				char* ctimeBuff;
+				time_t now = time(NULL);
+				ctimeBuff = ctime(&now);
+				printf("Current task END time: %s", ctimeBuff);
+				endOfSearch = true;
+			}
+		}
+
+		if (keycount.IsGreaterOrEqual(&taskSize) && (!randomMode) && !useStringCrack)
 		{
 			double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0); // Avg speed in MK/s
 			printf("\n");

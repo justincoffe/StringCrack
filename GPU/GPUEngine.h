@@ -69,6 +69,11 @@ typedef struct {
     int puzzleBits;
     uint64_t lockMask[4];
     uint64_t lockVals[4];
+
+    // Seed offset: -start HEX sets this as the starting seed
+    // -range N sets the power-of-two size of the seed space
+    uint64_t seedOffset;        // Starting seed (from -start)
+    uint64_t seedCount;         // Total seeds to scan (2^range or computed)
 } StringCrackConfig;
 
 // Second level lookup
