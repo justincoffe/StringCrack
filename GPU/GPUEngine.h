@@ -19,25 +19,24 @@
 #define GPUENGINEH
 
 #include <vector>
+#include <string>
+#include <cstdint>
 #include "../SECP256k1.h"
 
 #define SEARCH_COMPRESSED 0
 #define SEARCH_UNCOMPRESSED 1
 #define SEARCH_BOTH 2
 
-
 // Number of thread per block
-//#define NB_TRHEAD_PER_GROUP 128 ///////////////////////////////256
-#define ITEM_SIZE 28  ///28
+#define ITEM_SIZE 28
 #define ITEM_SIZE32 (ITEM_SIZE/4)
 #define _64K 65536
 
+// Maximum number of locked bit positions for StringCrack Bit Injection
+#define MAX_LOCKED_BITS 128
+
 static const char *searchModes[] = {"Compressed","Uncompressed","Compressed or Uncompressed"};
 
-// Number of key per thread (must be a multiple of GRP_SIZE) per kernel call
-
-	
-//typedef uint16_t address_t;
 typedef uint16_t address_t;
 typedef uint32_t addressl_t;
 
@@ -48,6 +47,29 @@ typedef struct {
   uint8_t  *hash;
   bool mode;
 } ITEM;
+
+// =====================================================================================
+// StringCrack Configuration for Bit Injection + Popcount Filtering
+// =====================================================================================
+
+typedef struct {
+    int position;
+    int value;
+} LockedBit;
+
+typedef struct {
+    bool enabled;
+    int numLockedBits;
+    LockedBit lockedBits[MAX_LOCKED_BITS];
+    int numFreeBits;
+    int freeBitPositions[256];
+    int popcountTarget;
+    int popcountMin;
+    int popcountMax;
+    int puzzleBits;
+    uint64_t lockMask[4];
+    uint64_t lockVals[4];
+} StringCrackConfig;
 
 // Second level lookup
 typedef struct {
@@ -74,20 +96,24 @@ public:
   int GetGroupSize();
   int GetStepSize();
 
+  // StringCrack: Configure and launch the Bit Injection + Popcount kernel
+  bool SetStringCrackConfig(const StringCrackConfig *config);
+  bool LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffset, bool spinWait=false);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 
   static void PrintCudaInfo();
   static void GenerateCode(Secp256K1 *secp, int size);
+  static void PrecomputeStringCrackMasks(StringCrackConfig *config);
 
 private:
 
   bool callKernel();
+  bool callOpenClawKernel(uint64_t batchOffset);
   static void ComputeIndex(std::vector<int> &s, int depth, int n);
   static void Browse(FILE *f,int depth, int max, int s);
   bool CheckHash(uint8_t *h, std::vector<ITEM>& found, int tid, int incr, int endo, int *ok);
-
-
 
   int nbThread;
   uint64_t *sub;
@@ -111,9 +137,9 @@ private:
   std::string pattern;
   bool hasPattern;
 
- 
-
-
+  // StringCrack state
+  bool stringCrackEnabled;
+  StringCrackConfig scConfig;
 };
 
 #endif // GPUENGINEH

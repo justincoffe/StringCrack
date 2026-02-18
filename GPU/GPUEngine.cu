@@ -368,6 +368,8 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     pattern = "";
     hasPattern = false;
     inputAddressLookUp = NULL;
+    stringCrackEnabled = false;
+    memset(&scConfig, 0, sizeof(StringCrackConfig));
 
 }
 
@@ -750,5 +752,254 @@ bool GPUEngine::CheckHash(uint8_t* h, vector<ITEM>& found, int tid, int incr, in
 
 bool GPUEngine::Check(Secp256K1* secp) {
 
+    return true;
+}
+
+// =====================================================================================
+// StringCrack: Bit Injection + Popcount Filtering + EC Point Multiplication
+// =====================================================================================
+
+__device__ __constant__ uint64_t d_lockMask[4];
+__device__ __constant__ uint64_t d_lockVals[4];
+__device__ __constant__ int      d_freeBitPos[256];
+__device__ __constant__ int      d_numFreeBits;
+__device__ __constant__ int      d_popcountMin;
+__device__ __constant__ int      d_popcountMax;
+__device__ __constant__ uint64_t d_batchOffset;
+
+// expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
+__device__ __forceinline__ void expand_bits(uint64_t seed, uint64_t key[4]) {
+    key[0] = d_lockVals[0];
+    key[1] = d_lockVals[1];
+    key[2] = d_lockVals[2];
+    key[3] = d_lockVals[3];
+    for (int i = 0; i < d_numFreeBits; i++) {
+        if (seed == 0ULL) break;
+        int bitVal = (int)(seed & 1ULL);
+        seed >>= 1;
+        if (bitVal) {
+            int pos = d_freeBitPos[i];
+            int limb = pos >> 6;
+            int bit  = pos & 63;
+            key[limb] |= (1ULL << bit);
+        }
+    }
+}
+
+// popcount256: Count set bits in 256-bit key
+__device__ __forceinline__ int popcount256(const uint64_t key[4]) {
+    return __popcll(key[0]) + __popcll(key[1]) + __popcll(key[2]) + __popcll(key[3]);
+}
+
+// G_POW2 table size (currently 71 entries in GPUGroup.h, user will expand)
+#define G_POW2_TABLE_SIZE 71
+
+// ec_point_mult_pow2: Compute key * G using precomputed G_POW2 table
+__device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64_t py[4]) {
+    bool pointSet = false;
+    uint64_t rx[4], ry[4];
+
+    for (int i = 0; i < G_POW2_TABLE_SIZE; i++) {
+        int limb = i >> 6;
+        int bit  = i & 63;
+        if ((key[limb] >> bit) & 1ULL) {
+            if (!pointSet) {
+                Load256(rx, (uint64_t*)G_POW2_X_EXTENDED[i]);
+                Load256(ry, (uint64_t*)G_POW2_Y_EXTENDED[i]);
+                pointSet = true;
+            } else {
+                uint64_t gx[4], gy[4];
+                Load256(gx, (uint64_t*)G_POW2_X_EXTENDED[i]);
+                Load256(gy, (uint64_t*)G_POW2_Y_EXTENDED[i]);
+
+                uint64_t dx_val[4], dy_val[4], s[4];
+                ModSub256(dx_val, gx, rx);
+                ModSub256(dy_val, gy, ry);
+
+                uint64_t inv[5];
+                Load256(inv, dx_val);
+                inv[4] = 0;
+                _ModInv(inv);
+
+                _ModMult(s, dy_val, inv);
+
+                uint64_t s2[4], new_x[4], new_y[4];
+                _ModSqr(s2, s);
+                ModSub256(new_x, s2, rx);
+                ModSub256(new_x, gx);
+
+                uint64_t tmp[4];
+                ModSub256(tmp, rx, new_x);
+                _ModMult(new_y, s, tmp);
+                ModSub256(new_y, ry);
+
+                Load256(rx, new_x);
+                Load256(ry, new_y);
+            }
+        }
+    }
+
+    if (pointSet) {
+        Load256(px, rx);
+        Load256(py, ry);
+    } else {
+        px[0] = px[1] = px[2] = px[3] = 0;
+        py[0] = py[1] = py[2] = py[3] = 0;
+    }
+}
+
+// comp_keys_openclaw: StringCrack kernel - Bit Injection + Popcount + EC Math
+__global__ void comp_keys_openclaw(
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t seed = d_batchOffset + (uint64_t)tid;
+
+    // Step 1: Bit Injection
+    uint64_t key[4];
+    expand_bits(seed, key);
+
+    // Step 2: Popcount filtering BEFORE expensive EC math
+    int pc = popcount256(key);
+    if (pc < d_popcountMin || pc > d_popcountMax) return;
+
+    // Step 3: EC Point Multiplication
+    uint64_t px[4], py[4];
+    ec_point_mult_pow2(key, px, py);
+
+    // Step 4: Hash160 + address check
+    uint8_t odd_py = (uint8_t)(py[0] & 1);
+    uint32_t h[5];
+    _GetHash160Comp(px, odd_py, (uint8_t*)h);
+    CheckPoint(h, 0, sAddress, lookup32, out);
+}
+
+// =====================================================================================
+// Host-side StringCrack methods
+// =====================================================================================
+
+void GPUEngine::PrecomputeStringCrackMasks(StringCrackConfig *config) {
+    for (int i = 0; i < 4; i++) { config->lockMask[i] = 0; config->lockVals[i] = 0; }
+
+    for (int i = 0; i < config->numLockedBits; i++) {
+        int pos = config->lockedBits[i].position;
+        int val = config->lockedBits[i].value;
+        int limb = pos >> 6;
+        int bit  = pos & 63;
+        config->lockMask[limb] |= (1ULL << bit);
+        if (val) config->lockVals[limb] |= (1ULL << bit);
+    }
+
+    // Lock MSB of puzzle range to 1
+    if (config->puzzleBits > 0 && config->puzzleBits <= 256) {
+        int msbPos = config->puzzleBits - 1;
+        int limb = msbPos >> 6;
+        int bit  = msbPos & 63;
+        if (!((config->lockMask[limb] >> bit) & 1)) {
+            config->lockMask[limb] |= (1ULL << bit);
+            config->lockVals[limb] |= (1ULL << bit);
+        }
+    }
+
+    // Lock all bits above puzzleBits to 0
+    if (config->puzzleBits > 0 && config->puzzleBits < 256) {
+        for (int pos = config->puzzleBits; pos < 256; pos++) {
+            int limb = pos >> 6;
+            int bit  = pos & 63;
+            config->lockMask[limb] |= (1ULL << bit);
+        }
+    }
+
+    // Compute free bit positions
+    config->numFreeBits = 0;
+    for (int pos = 0; pos < 256; pos++) {
+        int limb = pos >> 6;
+        int bit  = pos & 63;
+        if (!((config->lockMask[limb] >> bit) & 1)) {
+            config->freeBitPositions[config->numFreeBits++] = pos;
+        }
+    }
+
+    printf("[StringCrack] Locked bits: %d, Free bits: %d\n", config->numLockedBits, config->numFreeBits);
+    printf("[StringCrack] Lock mask: %016llX %016llX %016llX %016llX\n",
+           (unsigned long long)config->lockMask[3], (unsigned long long)config->lockMask[2],
+           (unsigned long long)config->lockMask[1], (unsigned long long)config->lockMask[0]);
+    printf("[StringCrack] Lock vals: %016llX %016llX %016llX %016llX\n",
+           (unsigned long long)config->lockVals[3], (unsigned long long)config->lockVals[2],
+           (unsigned long long)config->lockVals[1], (unsigned long long)config->lockVals[0]);
+    printf("[StringCrack] Popcount target: %d-%d\n", config->popcountMin, config->popcountMax);
+    printf("[StringCrack] Effective search space: 2^%d\n", config->numFreeBits);
+    fflush(stdout);
+}
+
+bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
+    scConfig = *config;
+    stringCrackEnabled = config->enabled;
+    if (!stringCrackEnabled) return true;
+
+    cudaError_t err;
+    err = cudaMemcpyToSymbol(d_lockMask, config->lockMask, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_lockMask: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_lockVals, config->lockVals, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_lockVals: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_freeBitPos, config->freeBitPositions, sizeof(int) * 256);
+    if (err != cudaSuccess) { printf("GPUEngine: d_freeBitPos: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_numFreeBits, &config->numFreeBits, sizeof(int));
+    if (err != cudaSuccess) { printf("GPUEngine: d_numFreeBits: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_popcountMin, &config->popcountMin, sizeof(int));
+    if (err != cudaSuccess) { printf("GPUEngine: d_popcountMin: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_popcountMax, &config->popcountMax, sizeof(int));
+    if (err != cudaSuccess) { printf("GPUEngine: d_popcountMax: %s\n", cudaGetErrorString(err)); return false; }
+
+    printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
+    return true;
+}
+
+bool GPUEngine::callOpenClawKernel(uint64_t batchOffset) {
+    cudaMemset(outputBuffer, 0, 4);
+    cudaError_t err = cudaMemcpyToSymbol(d_batchOffset, &batchOffset, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffset: %s\n", cudaGetErrorString(err)); return false; }
+
+    comp_keys_openclaw<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP>>>(
+        inputAddress, inputAddressLookUp, outputBuffer);
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess) { printf("GPUEngine: OpenClaw Kernel: %s\n", cudaGetErrorString(err)); return false; }
+    return true;
+}
+
+bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffset, bool spinWait) {
+    addressFound.clear();
+    if (!callOpenClawKernel(batchOffset)) return false;
+
+    if (spinWait) {
+        cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
+    } else {
+        cudaEvent_t evt;
+        cudaEventCreate(&evt);
+        cudaMemcpyAsync(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost, 0);
+        cudaEventRecord(evt, 0);
+        while (cudaEventQuery(evt) == cudaErrorNotReady) Timer::SleepMillis(1);
+        cudaEventDestroy(evt);
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { printf("GPUEngine: LaunchOpenClaw: %s\n", cudaGetErrorString(err)); return false; }
+
+    uint32_t nbFound = outputBufferPinned[0];
+    if (nbFound > maxFound) { nbFound = maxFound; }
+    cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE + 4, cudaMemcpyDeviceToHost);
+
+    for (uint32_t i = 0; i < nbFound; i++) {
+        uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE32 + 1);
+        ITEM it;
+        it.thId = itemPtr[0];
+        int16_t* ptr = (int16_t*)&(itemPtr[1]);
+        it.endo = ptr[0] & 0x7FFF;
+        it.mode = (ptr[0] & 0x8000) != 0;
+        it.incr = ptr[1];
+        it.hash = (uint8_t*)(itemPtr + 2);
+        addressFound.push_back(it);
+    }
     return true;
 }

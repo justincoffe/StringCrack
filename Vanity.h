@@ -92,7 +92,8 @@ class VanitySearch {
 public:
 
 	VanitySearch(Secp256K1* secp, std::vector<std::string>& address, int searchMode,
-		bool stop, std::string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc);
+		bool stop, std::string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc,
+		StringCrackConfig* scConfig = NULL);
 
 	void Search(std::vector<int> gpuId, std::vector<int> gridSize);
 	void FindKeyGPU(TH_PARAM* p);
@@ -158,6 +159,9 @@ private:
 	Int lambda;
 	Int beta2;
 	Int lambda2;
+
+	// StringCrack configuration
+	StringCrackConfig* scConfig;
 };
 
 #endif // VANITYH

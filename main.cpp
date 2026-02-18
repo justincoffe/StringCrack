@@ -16,10 +16,12 @@
 */
 
 
-#include <sstream> 
+#include <sstream>
+#include <cstring>
 #include "Timer.h"
 #include "Vanity.h"
 #include "SECP256k1.h"
+#include "GPU/GPUEngine.h"
 #include <fstream>
 #include <string>
 #include <string.h>
@@ -76,16 +78,16 @@ void setTerminalRawMode(bool enable) {
 void setNonBlockingInput(bool enable) {
 	int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
 	if (enable) {
-		fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK); // Modalità non bloccante
+		fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK); // Modalitï¿½ non bloccante
 	}
 	else {
-		fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK); // Ripristina modalità bloccante
+		fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK); // Ripristina modalitï¿½ bloccante
 	}
 }
 
 void monitorKeypress() {
 	setTerminalRawMode(true);
-	setNonBlockingInput(true);  // Imposta stdin in modalità non bloccante
+	setNonBlockingInput(true);  // Imposta stdin in modalitï¿½ non bloccante
 
 	while (!stopMonitorKey) {
 		Timer::SleepMillis(1);
@@ -97,13 +99,13 @@ void monitorKeypress() {
 		}
 	}
 
-	setNonBlockingInput(false);  // Ripristina modalità normale
+	setNonBlockingInput(false);  // Ripristina modalitï¿½ normale
 	setTerminalRawMode(false);
 }
 #endif
 
 
-#define RELEASE "2.2 by FixedPaul"
+#define RELEASE "2.2-StringCrack by FixedPaul"
 
 using namespace std;
 
@@ -111,7 +113,8 @@ using namespace std;
 
 void printUsage() {
 
-	printf("VanitySeacrh [-v] [-gpuId] [-i inputfile] [-o outputfile] [-start HEX] [-range] [-m] [-stop] [-random]\n \n");
+	printf("StringCrack [-v] [-gpuId] [-i inputfile] [-o outputfile] [-start HEX] [-range] [-m] [-stop] [-random]\n");
+	printf("            [-lock \"pos:val,...\"] [-popcount N] [-poprange min:max]\n \n");
 	printf(" -v: Print version\n");
 	printf(" -i inputfile: Get list of addresses to search from specified file\n");
 	printf(" -o outputfile: Output results to the specified file\n");
@@ -120,10 +123,42 @@ void printUsage() {
 	printf(" -range bit range dimension. start -> (start + 2^range).\n");
 	printf(" -m: Max number of prefixes found by each kernel call, default is 262144 (use multiple of 65536)\n");
 	printf(" -stop: Stop when all prefixes are found\n");
-	printf(" -random: Random mode active. Each GPU thread scan 1024 random sequentally keys at each step. Not active by default\n");
-	printf(" -backup: Backup mode allows resuming from the progress percentage of the last sequential search. It does not work with random mode. \n");
+	printf(" -random: Random mode active.\n");
+	printf(" -backup: Backup mode.\n");
+	printf("\n === StringCrack Mode ===\n");
+	printf(" -lock \"pos:val,...\": Lock bit positions. Example: -lock \"93:0,98:0,99:0,78:0\"\n");
+	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
+	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
 	exit(-1);
 
+}
+
+// Parse -lock argument: "93:0,98:0,99:0,78:0"
+void parseLockString(const string& lockStr, StringCrackConfig* config) {
+	config->numLockedBits = 0;
+	if (lockStr.empty()) return;
+	stringstream ss(lockStr);
+	string token;
+	while (getline(ss, token, ',')) {
+		size_t start = token.find_first_not_of(" \t");
+		size_t end = token.find_last_not_of(" \t");
+		if (start == string::npos) continue;
+		token = token.substr(start, end - start + 1);
+		size_t colonPos = token.find(':');
+		if (colonPos == string::npos) { fprintf(stderr, "[ERROR] Invalid lock: '%s'\n", token.c_str()); exit(-1); }
+		int pos = stoi(token.substr(0, colonPos));
+		int val = stoi(token.substr(colonPos + 1));
+		if (pos < 0 || pos > 255) { fprintf(stderr, "[ERROR] Lock pos %d out of range\n", pos); exit(-1); }
+		if (val != 0 && val != 1) { fprintf(stderr, "[ERROR] Lock val must be 0 or 1\n"); exit(-1); }
+		if (config->numLockedBits >= MAX_LOCKED_BITS) { fprintf(stderr, "[ERROR] Too many locked bits\n"); exit(-1); }
+		config->lockedBits[config->numLockedBits].position = pos;
+		config->lockedBits[config->numLockedBits].value = val;
+		config->numLockedBits++;
+	}
+	printf("[StringCrack] Parsed %d locked bits\n", config->numLockedBits);
+	for (int i = 0; i < config->numLockedBits; i++)
+		printf("  Bit %d = %d\n", config->lockedBits[i].position, config->lockedBits[i].value);
+	fflush(stdout);
 }
 
 
@@ -561,6 +596,15 @@ int main(int argc, char* argv[]) {
 	uint32_t maxFound = 65536*4;
 	int range = 30;
 	string start = "0";
+
+	// StringCrack configuration
+	StringCrackConfig scConfig;
+	memset(&scConfig, 0, sizeof(StringCrackConfig));
+	scConfig.enabled = false;
+	scConfig.popcountTarget = -1;
+	scConfig.popcountMin = 0;
+	scConfig.popcountMax = 256;
+	string lockStr = "";
 	
 	// bitcrack mod
 	BITCRACK_PARAM bitcrack, *bc;
@@ -623,6 +667,31 @@ int main(int argc, char* argv[]) {
 			maxFound = getInt("maxFound", argv[a]);
 			a++;
 		}
+		else if (strcmp(argv[a], "-lock") == 0) {
+			a++;
+			lockStr = string(argv[a]);
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-popcount") == 0) {
+			a++;
+			int pc = getInt("popcount", argv[a]);
+			scConfig.popcountTarget = pc;
+			scConfig.popcountMin = pc;
+			scConfig.popcountMax = pc;
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-poprange") == 0) {
+			a++;
+			string prStr = string(argv[a]);
+			size_t colonPos = prStr.find(':');
+			if (colonPos == string::npos) { fprintf(stderr, "[ERROR] -poprange format: min:max\n"); exit(-1); }
+			scConfig.popcountMin = stoi(prStr.substr(0, colonPos));
+			scConfig.popcountMax = stoi(prStr.substr(colonPos + 1));
+			scConfig.enabled = true;
+			a++;
+		}
 
 		else if (a == argc - 1) {
 			address.push_back(string(argv[a]));
@@ -669,14 +738,20 @@ int main(int argc, char* argv[]) {
 	checkKeySpace(bc, maxKey);
 
 
+	// StringCrack: Parse lock string and precompute masks
+	if (scConfig.enabled) {
+		scConfig.puzzleBits = range;
+		if (!lockStr.empty()) parseLockString(lockStr, &scConfig);
+		GPUEngine::PrecomputeStringCrackMasks(&scConfig);
+	}
+
 	{
 
 		fprintf(stdout, "[keyspace]  range=2^%d\n", range);
 		fprintf(stdout, "[keyspace]  start=%s\n", bc->ksStart.GetBase16().c_str());
 		fprintf(stdout, "[keyspace]    end=%s\n", bc->ksFinish.GetBase16().c_str());
-		if (randomMode) {
-			fprintf(stdout, "Random Mode Enabled !\n");
-		}
+		if (randomMode) fprintf(stdout, "Random Mode Enabled !\n");
+		if (scConfig.enabled) fprintf(stdout, "[StringCrack] Mode ENABLED\n");
 		fflush(stdout);
 
 
@@ -690,7 +765,8 @@ int main(int argc, char* argv[]) {
 		}
 	repeatP:
 		Paused = false;
-		VanitySearch* v = new VanitySearch(secp, address, searchMode, stop, outputFile, maxFound, bc);
+		VanitySearch* v = new VanitySearch(secp, address, searchMode, stop, outputFile, maxFound, bc,
+			scConfig.enabled ? &scConfig : NULL);
 		v->Search(gpuId, gridSize);
 
 		while (Paused) {

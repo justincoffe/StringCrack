@@ -43,7 +43,8 @@ using namespace std;
 //Point _2Gn;
 
 VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses, int searchMode,
-	bool stop, string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc):inputAddresses(inputAddresses) 
+	bool stop, string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc,
+	StringCrackConfig* scConfig):inputAddresses(inputAddresses) 
 {
 	this->secp = secp;
 	this->searchMode = searchMode;
@@ -52,7 +53,8 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 	this->numGPUs = 0;
 	this->maxFound = maxFound;	
 	this->searchType = -1;
-	this->bc = bc;	
+	this->bc = bc;
+	this->scConfig = scConfig;
 
 	rseed(static_cast<unsigned long>(time(NULL)));
 	
@@ -921,6 +923,18 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		g.SetAddress(usedAddress);
 	}
 
+	// StringCrack: Upload configuration to GPU if enabled
+	bool useStringCrack = (scConfig != NULL && scConfig->enabled);
+	if (useStringCrack) {
+		if (!g.SetStringCrackConfig(scConfig)) {
+			printf("[StringCrack] Failed to upload config to GPU!\n");
+			useStringCrack = false;
+		} else {
+			printf("[StringCrack] GPU kernel ready\n");
+			fflush(stdout);
+		}
+	}
+
 	Int stepThread;
 	Int taskSize;
 	Int numthread;
@@ -938,10 +952,15 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 	t0 = Timer::get_tick();
 
-	getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * idxcount * g.GetStepSize()));
-
-	ok = g.SetKeys(publicKeys);
-	delete[] publicKeys;
+	if (useStringCrack) {
+		printf("[StringCrack] Skipping traditional key setup (Bit Injection mode)\n");
+		delete[] publicKeys;
+		ok = true;
+	} else {
+		getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * idxcount * g.GetStepSize()));
+		ok = g.SetKeys(publicKeys);
+		delete[] publicKeys;
+	}
 
 	ttot = Timer::get_tick() - t0;
 
@@ -964,7 +983,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		if (!Pause) {	
 
 
-			if (randomMode) {
+			if (randomMode && !useStringCrack) {
 				RandomJump_K_last.Set(&RandomJump_K);
 				RandomJump_K_tot.Add(&RandomJump_K);
 
@@ -985,7 +1004,12 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				ok = g.SetRandomJump(RandomJump_P);
 			}
 
-			ok = g.Launch(found, true);
+			if (useStringCrack) {
+				uint64_t batchOffset = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
+				ok = g.LaunchOpenClaw(found, batchOffset, true);
+			} else {
+				ok = g.Launch(found, true);
+			}
 			idxcount += 1;
 
 			if (!randomMode && idxcount%60==0) {
@@ -1003,21 +1027,43 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
 
 				ITEM it = found[i];
-				part_key.Set(&stepThread);
-				part_key.Mult(it.thId);
-	
-				privkey.Set(&bc->ksStart);
-				privkey.Add(&part_key);
 
-				if (randomMode) {
-					privkey.Add(&RandomJump_K_tot);
-					privkey.Sub(&RandomJump_K_last);
+				if (useStringCrack) {
+					// Reconstruct key from seed via expand_bits (CPU side)
+					uint64_t prevBatch = (uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU;
+					uint64_t seed = prevBatch + (uint64_t)it.thId;
+					uint64_t keyBits[4];
+					keyBits[0] = scConfig->lockVals[0];
+					keyBits[1] = scConfig->lockVals[1];
+					keyBits[2] = scConfig->lockVals[2];
+					keyBits[3] = scConfig->lockVals[3];
+					uint64_t seedTmp = seed;
+					for (int fb = 0; fb < scConfig->numFreeBits && seedTmp != 0; fb++) {
+						if (seedTmp & 1ULL) {
+							int pos = scConfig->freeBitPositions[fb];
+							keyBits[pos >> 6] |= (1ULL << (pos & 63));
+						}
+						seedTmp >>= 1;
+					}
+					privkey.SetInt32(0);
+					privkey.bits64[0] = keyBits[0];
+					privkey.bits64[1] = keyBits[1];
+					privkey.bits64[2] = keyBits[2];
+					privkey.bits64[3] = keyBits[3];
+					checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
+				} else {
+					part_key.Set(&stepThread);
+					part_key.Mult(it.thId);
+					privkey.Set(&bc->ksStart);
+					privkey.Add(&part_key);
+					if (randomMode) {
+						privkey.Add(&RandomJump_K_tot);
+						privkey.Sub(&RandomJump_K_last);
+					} else {
+						privkey.Add(&keycount);
+					}
+					checkAddr(*(address_t*)(it.hash), it.hash, privkey, it.incr, it.endo, it.mode);
 				}
-				else {				
-					privkey.Add(&keycount);
-				}
-			
-				checkAddr(*(address_t*)(it.hash), it.hash, privkey, it.incr, it.endo, it.mode);
 			}
 
 			keycount.Add(STEP_SIZE);
