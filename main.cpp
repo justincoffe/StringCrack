@@ -744,17 +744,30 @@ int main(int argc, char* argv[]) {
 		if (!lockStr.empty()) parseLockString(lockStr, &scConfig);
 		GPUEngine::PrecomputeStringCrackMasks(&scConfig);
 
+
 		// In StringCrack mode: -start is the seed offset, -range is the seed space size
-		scConfig.seedOffset = strtoull(start.c_str(), NULL, 16);
-		// seedCount = 2^numFreeBits (full space) unless range is smaller
-		if (scConfig.numFreeBits < 64) {
-			scConfig.seedCount = (1ULL << scConfig.numFreeBits);
-		} else {
-			scConfig.seedCount = 0xFFFFFFFFFFFFFFFFULL;
+		// Use Int for full 256-bit support
+		Int seedOffsetInt;
+		seedOffsetInt.SetBase16((char*)start.c_str());
+		
+		// seedCount = 2^numFreeBits (full space unless range > 256)
+		Int seedCountInt;
+		seedCountInt.SetInt32(1);
+		if (scConfig.numFreeBits < 256) {
+			seedCountInt.ShiftLeft(scConfig.numFreeBits);
 		}
-		printf("[StringCrack] Seed offset: 0x%llX\n", (unsigned long long)scConfig.seedOffset);
-		printf("[StringCrack] Seed count:  0x%llX (2^%d)\n",
-			(unsigned long long)scConfig.seedCount, scConfig.numFreeBits);
+		
+		// Store 64-bit truncated versions for GPU
+		scConfig.seedOffset = seedOffsetInt.Get64();
+		scConfig.seedCount = seedCountInt.Get64();
+		
+		// Store full 256-bit versions for CPU calculations
+		scConfig.seedOffsetInt.Set(&seedOffsetInt);
+		scConfig.seedCountInt.Set(&seedCountInt);
+		
+		printf("[StringCrack] Seed offset: %s\n", seedOffsetInt.GetBase16().c_str());
+		printf("[StringCrack] Seed count:  %s (2^%d)\n",
+			seedCountInt.GetBase16().c_str(), scConfig.numFreeBits);
 	}
 
 	{

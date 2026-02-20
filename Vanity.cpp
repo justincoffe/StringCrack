@@ -1005,7 +1005,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			}
 
 			if (useStringCrack) {
-				uint64_t batchOffset = scConfig->seedOffset + (uint64_t)idxcount * (uint64_t)numThreadsGPU;
+				// Use Int for full 256-bit batch offset calculation
+				Int batchOffsetInt;
+				batchOffsetInt.Set(&scConfig->seedOffsetInt);
+				batchOffsetInt.Add64((uint64_t)idxcount * (uint64_t)numThreadsGPU);
+				uint64_t batchOffset = batchOffsetInt.Get64();
 				ok = g.LaunchOpenClaw(found, batchOffset, true);
 			} else {
 				ok = g.Launch(found, true);
@@ -1030,7 +1034,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 				if (useStringCrack) {
 					// Reconstruct key from seed via expand_bits (CPU side)
-					uint64_t prevBatch = scConfig->seedOffset + (uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU;
+					// Use Int for full 256-bit support
+					Int prevBatchInt;
+					prevBatchInt.Set(&scConfig->seedOffsetInt);
+					prevBatchInt.Add64((uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU);
+					uint64_t prevBatch = prevBatchInt.Get64();
 					uint64_t seed = prevBatch + (uint64_t)it.thId;
 					uint64_t keyBits[4];
 					keyBits[0] = scConfig->lockVals[0];
@@ -1087,19 +1095,47 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		}
 		
 
-		PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
+		// StringCrack: Use custom progress display
+		if (useStringCrack) {
+			// Calculate current seed position
+			Int seedsScanned;
+			seedsScanned.Set64((uint64_t)idxcount);
+			seedsScanned.Mul64((uint64_t)numThreadsGPU);
+			
+			Int currentSeed;
+			currentSeed.Set(&scConfig->seedOffsetInt);
+			currentSeed.Add(&seedsScanned);
+			
+			PrintStatsStringCrack(keys_n, keys_n_prev, ttot, tprev,
+				currentSeed, scConfig->seedCountInt,
+				scConfig->numLockedBits, nbFoundKey);
+		} else {
+			PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
+		}
 
 		
 
 		// StringCrack stop condition: check if we've scanned all seeds
 		if (useStringCrack) {
-			uint64_t seedsScanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
-			if (seedsScanned >= scConfig->seedCount) {
+			// Use Int for full 256-bit comparison
+			Int seedsScanned;
+			seedsScanned.Set64((uint64_t)idxcount);
+			seedsScanned.Mul64((uint64_t)numThreadsGPU);
+			
+			// Current seed = offset + scanned
+			Int currentSeed;
+			currentSeed.Set(&scConfig->seedOffsetInt);
+			currentSeed.Add(&seedsScanned);
+			
+			if (currentSeed.IsGreaterOrEqual(&scConfig->seedCountInt)) {
 				double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0);
 				printf("\n");
-				printf("[StringCrack] Seed Range Finished! Offset: 0x%llX, Seeds: 0x%llX - Avg: %.1f [MK/s] - Found: %d\n",
-					(unsigned long long)scConfig->seedOffset,
-					(unsigned long long)scConfig->seedCount,
+				char offsetStr[128];
+				char countStr[128];
+				scConfig->seedOffsetInt.GetBase16(offsetStr);
+				scConfig->seedCountInt.GetBase16(countStr);
+				printf("[StringCrack] Seed Range Finished! Offset: 0x%s, Seeds: 0x%s - Avg: %.1f [MK/s] - Found: %d\n",
+					offsetStr, countStr,
 					avg_speed, nbFoundKey);
 				fflush(stdout);
 				char* ctimeBuff;
@@ -1140,6 +1176,46 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	ph->isRunning = false;
 
 	endOfSearch = true;
+}
+
+
+// Custom stats display for StringCrack mode
+void VanitySearch::PrintStatsStringCrack(
+    uint64_t keys_n, uint64_t keys_n_prev, 
+    double ttot, double tprev, 
+    Int& seedsScanned, Int& seedCount,
+    int numLockedBits, int nbFound) 
+{
+	double speed;
+	double perc;
+	double bkeys;
+	double totalBKeys;
+	
+	// Get 64-bit versions for display calculations
+	uint64_t seedsScanned64 = seedsScanned.Get64();
+	uint64_t seedCount64 = seedCount.Get64();
+	
+	if (seedCount64 > 0) {
+		perc = (double)seedsScanned64 / (double)seedCount64 * 100.0;
+	} else {
+		perc = 0.0;
+	}
+
+	if (ttot > 0.0001) {
+		speed = (double)keys_n / (ttot * 1000000.0);
+	} else {
+		speed = 0.0;
+	}
+
+	bkeys = (double)keys_n / 1000000000.0;
+
+	printf("%.1f MK/s - %.2f BKeys - %s/%s [%.2f%%] - Found: %d     ",
+		speed, bkeys,
+		seedsScanned.GetBase16().c_str(),
+		seedCount.GetBase16().c_str(),
+		perc, nbFound);
+
+	fflush(stdout);
 }
 
 

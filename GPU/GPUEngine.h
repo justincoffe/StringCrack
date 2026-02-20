@@ -22,6 +22,7 @@
 #include <string>
 #include <cstdint>
 #include "../SECP256k1.h"
+#include "../Int.h"
 
 #define SEARCH_COMPRESSED 0
 #define SEARCH_UNCOMPRESSED 1
@@ -74,6 +75,10 @@ typedef struct {
     // -range N sets the power-of-two size of the seed space
     uint64_t seedOffset;        // Starting seed (from -start)
     uint64_t seedCount;         // Total seeds to scan (2^range or computed)
+    
+    // Full 256-bit versions for CPU calculations
+    Int seedOffsetInt;          // Full 256-bit seed offset
+    Int seedCountInt;           // Full 256-bit seed count
 } StringCrackConfig;
 
 // Second level lookup
