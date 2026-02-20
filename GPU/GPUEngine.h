@@ -120,7 +120,7 @@ public:
 private:
 
   bool callKernel();
-  bool callOpenClawKernel(uint64_t batchOffset);
+  bool callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi);
   static void ComputeIndex(std::vector<int> &s, int depth, int n);
   static void Browse(FILE *f,int depth, int max, int s);
   bool CheckHash(uint8_t *h, std::vector<ITEM>& found, int tid, int incr, int endo, int *ok);
