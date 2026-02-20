@@ -767,15 +767,16 @@ int main(int argc, char* argv[]) {
 		
 		printf("[StringCrack] Seed offset: %s\n", seedOffsetInt.GetBase16().c_str());
 		
-		// Print seed count in readable format
-		if (scConfig.numFreeBits <= 64) {
-			// Fits in 64 bits - show hex
-			printf("[StringCrack] Seed count:  %s (2^%d)\n",
-				seedCountInt.GetBase16().c_str(), scConfig.numFreeBits);
-		} else {
-			// Large value - just show the bit size
-			printf("[StringCrack] Seed count:  2^%d\n", scConfig.numFreeBits);
+		// Print seed count - trim to actual bit length
+		int bitLen = seedCountInt.GetBitLength();
+		std::string countHex = seedCountInt.GetBase16();
+		// Trim leading zeros to match actual bit length
+		int expectedHexLen = (bitLen + 3) / 4;  // bits to hex chars
+		if ((int)countHex.length() > expectedHexLen) {
+			countHex = countHex.substr(countHex.length() - expectedHexLen);
 		}
+		printf("[StringCrack] Seed count:  %s (2^%d)\n",
+				countHex.c_str(), scConfig.numFreeBits);
 	}
 
 	{
