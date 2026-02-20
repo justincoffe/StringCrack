@@ -1123,12 +1123,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			if (currentSeed.IsGreaterOrEqual(&scConfig->seedCountInt)) {
 				double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0);
 				printf("\n");
-				char offsetStr[128];
-				char countStr[128];
-				scConfig->seedOffsetInt.GetBase16(offsetStr);
-				scConfig->seedCountInt.GetBase16(countStr);
+				std::string offsetStr = scConfig->seedOffsetInt.GetBase16();
+				std::string countStr = scConfig->seedCountInt.GetBase16();
 				printf("[StringCrack] Seed Range Finished! Offset: 0x%s, Seeds: 0x%s - Avg: %.1f [MK/s] - Found: %d\n",
-					offsetStr, countStr,
+					offsetStr.c_str(), countStr.c_str(),
 					avg_speed, nbFoundKey);
 				fflush(stdout);
 				char* ctimeBuff;
