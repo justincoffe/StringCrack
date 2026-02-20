@@ -73,12 +73,15 @@ typedef struct {
 
     // Seed offset: -start HEX sets this as the starting seed
     // -range N sets the power-of-two size of the seed space
+    // -end N (optional) limits the scan to a subset of the range
     uint64_t seedOffset;        // Starting seed (from -start)
     uint64_t seedCount;         // Total seeds to scan (2^range or computed)
+    int endBits;                // Sub-range size in bits (from -end), -1 if not set
     
     // Full 256-bit versions for CPU calculations
     Int seedOffsetInt;          // Full 256-bit seed offset
     Int seedCountInt;           // Full 256-bit seed count
+    Int seedEndInt;             // Full 256-bit end offset (start + 2^endBits)
 } StringCrackConfig;
 
 // Second level lookup

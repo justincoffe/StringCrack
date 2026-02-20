@@ -1117,8 +1117,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			currentSeed.Set(&scConfig->seedOffsetInt);
 			currentSeed.Add(scanned);
 			
+			// Use seedEndInt for progress if -end was specified, otherwise use seedCountInt
+			Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
+			
 			PrintStatsStringCrack(keys_n, keys_n_prev, ttot, tprev,
-				currentSeed, scConfig->seedCountInt,
+				currentSeed, limitSeed, scConfig->seedOffsetInt,
 				scConfig->numLockedBits, nbFoundKey);
 		} else {
 			PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
@@ -1134,7 +1137,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			currentSeed.Set(&scConfig->seedOffsetInt);
 			currentSeed.Add(scanned);
 			
-			if (currentSeed.IsGreaterOrEqual(&scConfig->seedCountInt)) {
+			// Use seedEndInt for stop condition if -end was specified
+			Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
+			
+			if (currentSeed.IsGreaterOrEqual(&limitSeed)) {
 				double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0);
 				printf("\n");
 				std::string offsetStr = scConfig->seedOffsetInt.GetBase16();
@@ -1188,7 +1194,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 void VanitySearch::PrintStatsStringCrack(
     uint64_t keys_n, uint64_t keys_n_prev, 
     double ttot, double tprev, 
-    Int& seedsScanned, Int& seedCount,
+    Int& seedsScanned, Int& seedCount, Int& seedStart,
     int numLockedBits, int nbFound) 
 {
 	double speed;
@@ -1196,12 +1202,29 @@ void VanitySearch::PrintStatsStringCrack(
 	double bkeys;
 	double totalBKeys;
 	
-	// Get 64-bit versions for display calculations
-	uint64_t seedsScanned64 = seedsScanned.bits64[0];
-	uint64_t seedCount64 = seedCount.bits64[0];
+	// Calculate progress as: (current - start) / (end - start) * 100
+	// This gives accurate percentage based on distance traveled
+	Int distance;
+	distance.Set(&seedsScanned);
+	distance.Sub(&seedStart);
 	
-	if (seedCount64 > 0) {
-		perc = (double)seedsScanned64 / (double)seedCount64 * 100.0;
+	Int totalRange;
+	totalRange.Set(&seedCount);
+	totalRange.Sub(&seedStart);
+	
+	// Use 128-bit arithmetic for accurate percentage
+	const double TWO_TO_64 = 18446744073709551616.0;
+	
+	double distanceHi = (double)distance.bits64[1] * TWO_TO_64;
+	double distanceLo = (double)distance.bits64[0];
+	double distanceFull = distanceHi + distanceLo;
+	
+	double rangeHi = (double)totalRange.bits64[1] * TWO_TO_64;
+	double rangeLo = (double)totalRange.bits64[0];
+	double rangeFull = rangeHi + rangeLo;
+	
+	if (rangeFull > 0.0) {
+		perc = distanceFull / rangeFull * 100.0;
 	} else {
 		perc = 0.0;
 	}

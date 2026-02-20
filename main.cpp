@@ -113,7 +113,7 @@ using namespace std;
 
 void printUsage() {
 
-	printf("StringCrack [-v] [-gpuId] [-i inputfile] [-o outputfile] [-start HEX] [-range] [-m] [-stop] [-random]\n");
+	printf("StringCrack [-v] [-gpuId] [-i inputfile] [-o outputfile] [-start HEX] [-range] [-end] [-m] [-stop] [-random]\n");
 	printf("            [-lock \"pos:val,...\"] [-popcount N] [-poprange min:max]\n \n");
 	printf(" -v: Print version\n");
 	printf(" -i inputfile: Get list of addresses to search from specified file\n");
@@ -121,6 +121,7 @@ void printUsage() {
 	printf(" -gpuId: GPU to use, default is 0\n");
 	printf(" -start start Private Key HEX\n");
 	printf(" -range bit range dimension. start -> (start + 2^range).\n");
+	printf(" -end bit sub-range limit. scan 2^end seeds from start (for parallelization).\n");
 	printf(" -m: Max number of prefixes found by each kernel call, default is 262144 (use multiple of 65536)\n");
 	printf(" -stop: Stop when all prefixes are found\n");
 	printf(" -random: Random mode active.\n");
@@ -595,7 +596,8 @@ int main(int argc, char* argv[]) {
 	string outputFile = "";
 	uint32_t maxFound = 65536*4;
 	int range = 30;
-	string start = "0";
+	std::string start = "0";
+	int endBits = -1;
 
 	// StringCrack configuration
 	StringCrackConfig scConfig;
@@ -660,6 +662,11 @@ int main(int argc, char* argv[]) {
 		else if (strcmp(argv[a], "-range") == 0) {
 			a++;
 			range = (uint64_t)getInt("range", argv[a]);
+			a++;
+		}
+		else if (strcmp(argv[a], "-end") == 0) {
+			a++;
+			endBits = getInt("end", argv[a]);
 			a++;
 		}
 		else if (strcmp(argv[a], "-m") == 0) {
@@ -746,6 +753,7 @@ int main(int argc, char* argv[]) {
 
 
 		// In StringCrack mode: -start is the seed offset, -range is the seed space size
+		// -end N limits the scan to a subset (2^endBits seeds from start)
 		// Use Int for full 256-bit support
 		Int seedOffsetInt;
 		seedOffsetInt.SetBase16((char*)start.c_str());
@@ -757,6 +765,19 @@ int main(int argc, char* argv[]) {
 			seedCountInt.ShiftL(scConfig.numFreeBits);
 		}
 		
+		// Calculate end offset based on -end argument
+		// If -end is set, limit the scan to 2^endBits from start
+		Int seedEndInt;
+		seedEndInt.Set(&seedOffsetInt);
+		scConfig.endBits = endBits;
+		if (endBits > 0 && endBits <= 256) {
+			Int endCount;
+			endCount.SetInt32(1);
+			endCount.ShiftL(endBits);
+			seedEndInt.Add(&endCount);
+			printf("[StringCrack] Sub-range: 2^%d from offset\n", endBits);
+		}
+		
 		// Store 64-bit truncated versions for GPU
 		scConfig.seedOffset = seedOffsetInt.bits64[0];
 		scConfig.seedCount = seedCountInt.bits64[0];
@@ -764,6 +785,7 @@ int main(int argc, char* argv[]) {
 		// Store full 256-bit versions for CPU calculations
 		scConfig.seedOffsetInt.Set(&seedOffsetInt);
 		scConfig.seedCountInt.Set(&seedCountInt);
+		scConfig.seedEndInt.Set(&seedEndInt);
 		
 		printf("[StringCrack] Seed offset: %s\n", seedOffsetInt.GetBase16().c_str());
 		
@@ -783,7 +805,14 @@ int main(int argc, char* argv[]) {
 
 		fprintf(stdout, "[keyspace]  range=2^%d\n", range);
 		fprintf(stdout, "[keyspace]  start=%s\n", bc->ksStart.GetBase16().c_str());
-		fprintf(stdout, "[keyspace]    end=%s\n", bc->ksFinish.GetBase16().c_str());
+		
+		// If -end is specified, use seedEndInt for the keyspace end
+		if (scConfig.enabled && endBits > 0) {
+			fprintf(stdout, "[keyspace]    end=%s\n", scConfig.seedEndInt.GetBase16().c_str());
+		} else {
+			fprintf(stdout, "[keyspace]    end=%s\n", bc->ksFinish.GetBase16().c_str());
+		}
+		
 		if (randomMode) fprintf(stdout, "Random Mode Enabled !\n");
 		if (scConfig.enabled) {
 			fprintf(stdout, "[StringCrack] Mode ENABLED\n");
