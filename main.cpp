@@ -787,8 +787,8 @@ int main(int argc, char* argv[]) {
 		if (randomMode) fprintf(stdout, "Random Mode Enabled !\n");
 		if (scConfig.enabled) {
 			fprintf(stdout, "[StringCrack] Mode ENABLED\n");
-			fprintf(stdout, "[StringCrack] -start = seed offset 0x%llX\n",
-				(unsigned long long)scConfig.seedOffset);
+			fprintf(stdout, "[StringCrack] -start = seed offset 0x%s\n",
+				seedOffsetInt.GetBase16().c_str());
 			fprintf(stdout, "[StringCrack] -range = 2^%d seed space\n", scConfig.numFreeBits);
 		}
 		fflush(stdout);
