@@ -1200,10 +1200,14 @@ void VanitySearch::PrintStatsStringCrack(
 
 	bkeys = (double)keys_n / 1000000000.0;
 
+	// Format: show hex if <= 64 bits, otherwise show hex for now
+	std::string seedStr = seedsScanned.GetBase16();
+	std::string countStr = seedCount.GetBase16();
+
 	printf("%.1f MK/s - %.2f BKeys - %s/%s [%.2f%%] - Found: %d     \r",
 		speed, bkeys,
-		seedsScanned.GetBase16().c_str(),
-		seedCount.GetBase16().c_str(),
+		seedStr.c_str(),
+		countStr.c_str(),
 		perc, nbFound);
 
 	fflush(stdout);

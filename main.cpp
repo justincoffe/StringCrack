@@ -766,8 +766,16 @@ int main(int argc, char* argv[]) {
 		scConfig.seedCountInt.Set(&seedCountInt);
 		
 		printf("[StringCrack] Seed offset: %s\n", seedOffsetInt.GetBase16().c_str());
-		printf("[StringCrack] Seed count:  %s (2^%d)\n",
-			seedCountInt.GetBase16().c_str(), scConfig.numFreeBits);
+		
+		// Print seed count in readable format
+		if (scConfig.numFreeBits <= 64) {
+			// Fits in 64 bits - show hex
+			printf("[StringCrack] Seed count:  %s (2^%d)\n",
+				seedCountInt.GetBase16().c_str(), scConfig.numFreeBits);
+		} else {
+			// Large value - just show the bit size
+			printf("[StringCrack] Seed count:  2^%d\n", scConfig.numFreeBits);
+		}
 	}
 
 	{
