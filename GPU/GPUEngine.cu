@@ -789,14 +789,13 @@ __device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, 
             key[limb] |= (1ULL << bit);
         }
     }
-    // Continue with upper 64 bits (bits 64-127)
+    // Continue with upper 64 bits if needed
     for (int i = 64; i < d_numFreeBits; i++) {
         if (seed_hi == 0ULL) break;
         int bitVal = (int)(seed_hi & 1ULL);
         seed_hi >>= 1;
         if (bitVal) {
-            // Use index i-64 to look up the correct free bit position
-            int pos = d_freeBitPos[i - 64];
+            int pos = d_freeBitPos[i];
             int limb = pos >> 6;
             int bit  = pos & 63;
             key[limb] |= (1ULL << bit);

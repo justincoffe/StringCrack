@@ -1039,20 +1039,33 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 					Int prevBatchInt;
 					prevBatchInt.Set(&scConfig->seedOffsetInt);
 					prevBatchInt.Add((uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU);
-					uint64_t prevBatch = prevBatchInt.bits64[0];
-					uint64_t seed = prevBatch + (uint64_t)it.thId;
+					Int seedInt;
+					seedInt.Set(&prevBatchInt);
+					seedInt.Add((uint64_t)it.thId);
+					
 					uint64_t keyBits[4];
 					keyBits[0] = scConfig->lockVals[0];
 					keyBits[1] = scConfig->lockVals[1];
 					keyBits[2] = scConfig->lockVals[2];
 					keyBits[3] = scConfig->lockVals[3];
-					uint64_t seedTmp = seed;
-					for (int fb = 0; fb < scConfig->numFreeBits && seedTmp != 0; fb++) {
-						if (seedTmp & 1ULL) {
+					
+					// Process lower 64 bits of seed
+					uint64_t seedLo = seedInt.bits64[0];
+					for (int fb = 0; fb < 64 && fb < scConfig->numFreeBits; fb++) {
+						if (seedLo & 1ULL) {
 							int pos = scConfig->freeBitPositions[fb];
 							keyBits[pos >> 6] |= (1ULL << (pos & 63));
 						}
-						seedTmp >>= 1;
+						seedLo >>= 1;
+					}
+					// Process upper bits (64+) of seed
+					uint64_t seedHi = seedInt.bits64[1];
+					for (int fb = 64; fb < scConfig->numFreeBits; fb++) {
+						if (seedHi & 1ULL) {
+							int pos = scConfig->freeBitPositions[fb];
+							keyBits[pos >> 6] |= (1ULL << (pos & 63));
+						}
+						seedHi >>= 1;
 					}
 					privkey.SetInt32(0);
 					privkey.bits64[0] = keyBits[0];
