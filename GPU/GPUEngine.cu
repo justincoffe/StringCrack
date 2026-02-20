@@ -765,18 +765,35 @@ __device__ __constant__ int      d_freeBitPos[256];
 __device__ __constant__ int      d_numFreeBits;
 __device__ __constant__ int      d_popcountMin;
 __device__ __constant__ int      d_popcountMax;
-__device__ __constant__ uint64_t d_batchOffset;
+__device__ __constant__ uint64_t d_batchOffsetLo;
+__device__ __constant__ uint64_t d_batchOffsetHi;
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
-__device__ __forceinline__ void expand_bits(uint64_t seed, uint64_t key[4]) {
+// Now supports 128-bit seed (seed_lo + seed_hi)
+__device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, uint64_t key[4]) {
     key[0] = d_lockVals[0];
     key[1] = d_lockVals[1];
     key[2] = d_lockVals[2];
     key[3] = d_lockVals[3];
-    for (int i = 0; i < d_numFreeBits; i++) {
-        if (seed == 0ULL) break;
-        int bitVal = (int)(seed & 1ULL);
-        seed >>= 1;
+    
+    // Combine 128-bit seed into single value for bit iteration
+    // Process seed_lo first (lower 64 bits), then seed_hi
+    for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
+        if (seed_lo == 0ULL) break;
+        int bitVal = (int)(seed_lo & 1ULL);
+        seed_lo >>= 1;
+        if (bitVal) {
+            int pos = d_freeBitPos[i];
+            int limb = pos >> 6;
+            int bit  = pos & 63;
+            key[limb] |= (1ULL << bit);
+        }
+    }
+    // Continue with upper 64 bits if needed
+    for (int i = 64; i < d_numFreeBits; i++) {
+        if (seed_hi == 0ULL) break;
+        int bitVal = (int)(seed_hi & 1ULL);
+        seed_hi >>= 1;
         if (bitVal) {
             int pos = d_freeBitPos[i];
             int limb = pos >> 6;
@@ -853,11 +870,23 @@ __global__ void comp_keys_openclaw(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t seed = d_batchOffset + (uint64_t)tid;
+    
+    // Use PTX add.cc/addc for 128-bit seed calculation
+    // seed = batchOffset + tid (with carry propagation)
+    uint64_t seed_lo = d_batchOffsetLo;
+    uint64_t seed_hi = d_batchOffsetHi;
+    
+    // Add tid to lower 64 bits
+    asm volatile ("add.cc.u64 %0, %0, %1;" 
+                 : "+l"(seed_lo) 
+                 : "l"((uint64_t)tid));
+    // Add carry to upper 64 bits
+    asm volatile ("addc.u64 %0, %0, 0;" 
+                 : "+l"(seed_hi));
 
     // Step 1: Bit Injection
     uint64_t key[4];
-    expand_bits(seed, key);
+    expand_bits(seed_lo, seed_hi, key);
 
     // Step 2: Popcount filtering BEFORE expensive EC math
     int pc = popcount256(key);
@@ -955,10 +984,12 @@ bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
     return true;
 }
 
-bool GPUEngine::callOpenClawKernel(uint64_t batchOffset) {
+bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi) {
     cudaMemset(outputBuffer, 0, 4);
-    cudaError_t err = cudaMemcpyToSymbol(d_batchOffset, &batchOffset, sizeof(uint64_t));
-    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffset: %s\n", cudaGetErrorString(err)); return false; }
+    cudaError_t err = cudaMemcpyToSymbol(d_batchOffsetLo, &batchOffsetLo, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetLo: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_batchOffsetHi, &batchOffsetHi, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetHi: %s\n", cudaGetErrorString(err)); return false; }
 
     comp_keys_openclaw<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP>>>(
         inputAddress, inputAddressLookUp, outputBuffer);
@@ -968,9 +999,9 @@ bool GPUEngine::callOpenClawKernel(uint64_t batchOffset) {
     return true;
 }
 
-bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffset, bool spinWait) {
+bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait) {
     addressFound.clear();
-    if (!callOpenClawKernel(batchOffset)) return false;
+    if (!callOpenClawKernel(batchOffsetLo, batchOffsetHi)) return false;
 
     if (spinWait) {
         cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);

@@ -1009,8 +1009,9 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				Int batchOffsetInt;
 				batchOffsetInt.Set(&scConfig->seedOffsetInt);
 				batchOffsetInt.Add((uint64_t)idxcount * (uint64_t)numThreadsGPU);
-				uint64_t batchOffset = batchOffsetInt.bits64[0];
-				ok = g.LaunchOpenClaw(found, batchOffset, true);
+				uint64_t batchOffsetLo = batchOffsetInt.bits64[0];
+				uint64_t batchOffsetHi = batchOffsetInt.bits64[1];
+				ok = g.LaunchOpenClaw(found, batchOffsetLo, batchOffsetHi, true);
 			} else {
 				ok = g.Launch(found, true);
 			}

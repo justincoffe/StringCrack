@@ -108,7 +108,7 @@ public:
 
   // StringCrack: Configure and launch the Bit Injection + Popcount kernel
   bool SetStringCrackConfig(const StringCrackConfig *config);
-  bool LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffset, bool spinWait=false);
+  bool LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait=false);
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;
