@@ -754,12 +754,12 @@ int main(int argc, char* argv[]) {
 		Int seedCountInt;
 		seedCountInt.SetInt32(1);
 		if (scConfig.numFreeBits < 256) {
-			seedCountInt.ShiftLeft(scConfig.numFreeBits);
+			seedCountInt.ShiftL(scConfig.numFreeBits);
 		}
 		
 		// Store 64-bit truncated versions for GPU
-		scConfig.seedOffset = seedOffsetInt.Get64();
-		scConfig.seedCount = seedCountInt.Get64();
+		scConfig.seedOffset = seedOffsetInt.bits64[0];
+		scConfig.seedCount = seedCountInt.bits64[0];
 		
 		// Store full 256-bit versions for CPU calculations
 		scConfig.seedOffsetInt.Set(&seedOffsetInt);

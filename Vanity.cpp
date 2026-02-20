@@ -1008,8 +1008,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				// Use Int for full 256-bit batch offset calculation
 				Int batchOffsetInt;
 				batchOffsetInt.Set(&scConfig->seedOffsetInt);
-				batchOffsetInt.Add64((uint64_t)idxcount * (uint64_t)numThreadsGPU);
-				uint64_t batchOffset = batchOffsetInt.Get64();
+				batchOffsetInt.Add((uint64_t)idxcount * (uint64_t)numThreadsGPU);
+				uint64_t batchOffset = batchOffsetInt.bits64[0];
 				ok = g.LaunchOpenClaw(found, batchOffset, true);
 			} else {
 				ok = g.Launch(found, true);
@@ -1037,8 +1037,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 					// Use Int for full 256-bit support
 					Int prevBatchInt;
 					prevBatchInt.Set(&scConfig->seedOffsetInt);
-					prevBatchInt.Add64((uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU);
-					uint64_t prevBatch = prevBatchInt.Get64();
+					prevBatchInt.Add((uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU);
+					uint64_t prevBatch = prevBatchInt.bits64[0];
 					uint64_t seed = prevBatch + (uint64_t)it.thId;
 					uint64_t keyBits[4];
 					keyBits[0] = scConfig->lockVals[0];
@@ -1097,14 +1097,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		// StringCrack: Use custom progress display
 		if (useStringCrack) {
-			// Calculate current seed position
-			Int seedsScanned;
-			seedsScanned.Set64((uint64_t)idxcount);
-			seedsScanned.Mul64((uint64_t)numThreadsGPU);
-			
+			// Calculate current seed position = offset + (idxcount * numThreadsGPU)
+			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
 			Int currentSeed;
 			currentSeed.Set(&scConfig->seedOffsetInt);
-			currentSeed.Add(&seedsScanned);
+			currentSeed.Add(scanned);
 			
 			PrintStatsStringCrack(keys_n, keys_n_prev, ttot, tprev,
 				currentSeed, scConfig->seedCountInt,
@@ -1117,15 +1114,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		// StringCrack stop condition: check if we've scanned all seeds
 		if (useStringCrack) {
-			// Use Int for full 256-bit comparison
-			Int seedsScanned;
-			seedsScanned.Set64((uint64_t)idxcount);
-			seedsScanned.Mul64((uint64_t)numThreadsGPU);
-			
-			// Current seed = offset + scanned
+			// Calculate current seed = offset + (idxcount * numThreadsGPU)
+			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
 			Int currentSeed;
 			currentSeed.Set(&scConfig->seedOffsetInt);
-			currentSeed.Add(&seedsScanned);
+			currentSeed.Add(scanned);
 			
 			if (currentSeed.IsGreaterOrEqual(&scConfig->seedCountInt)) {
 				double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0);
@@ -1192,8 +1185,8 @@ void VanitySearch::PrintStatsStringCrack(
 	double totalBKeys;
 	
 	// Get 64-bit versions for display calculations
-	uint64_t seedsScanned64 = seedsScanned.Get64();
-	uint64_t seedCount64 = seedCount.Get64();
+	uint64_t seedsScanned64 = seedsScanned.bits64[0];
+	uint64_t seedCount64 = seedCount.bits64[0];
 	
 	if (seedCount64 > 0) {
 		perc = (double)seedsScanned64 / (double)seedCount64 * 100.0;
