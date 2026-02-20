@@ -105,7 +105,7 @@ void monitorKeypress() {
 #endif
 
 
-#define RELEASE "2.2-StringCrack by FixedPaul"
+#define RELEASE "2.2"
 
 using namespace std;
 
@@ -704,7 +704,7 @@ int main(int argc, char* argv[]) {
 
 	}
 
-	fprintf(stdout, "VanitySearch-Bitcrack v" RELEASE "\n");
+	fprintf(stdout, "StringCracker v" RELEASE "\n");
 
 	if (gridSize.size() == 0) {
 		for (int i = 0; i < gpuId.size(); i++) {
