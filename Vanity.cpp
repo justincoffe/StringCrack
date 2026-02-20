@@ -1200,7 +1200,7 @@ void VanitySearch::PrintStatsStringCrack(
 
 	bkeys = (double)keys_n / 1000000000.0;
 
-	printf("%.1f MK/s - %.2f BKeys - %s/%s [%.2f%%] - Found: %d     ",
+	printf("%.1f MK/s - %.2f BKeys - %s/%s [%.2f%%] - Found: %d     \r",
 		speed, bkeys,
 		seedsScanned.GetBase16().c_str(),
 		seedCount.GetBase16().c_str(),
