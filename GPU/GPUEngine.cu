@@ -811,10 +811,145 @@ __device__ __forceinline__ int popcount256(const uint64_t key[4]) {
 // G_POW2 table size (currently 71 entries in GPUGroup.h, user will expand)
 #define G_POW2_TABLE_SIZE 71
 
+// Mixed Jacobian-Affine Addition
+// Adds affine point Q(x2, y2) to Jacobian point P(X1, Y1, Z1)
+// Result in Jacobian coordinates: (X3, Y3, Z3)
+// This avoids modular inversions - only needs multiplications!
+__device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[4],
+                                     const uint64_t x2[4], const uint64_t y2[4],
+                                     uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4]) {
+    uint64_t z1z1[4], z1z1_sq[4];
+    uint64_t u2[4], s2[4];
+    uint64_t h[4], r[4];
+    uint64_t i[4], j[4], v[4];
+    uint64_t new_X[4], new_Y[4], new_Z[4];
+    
+    // z1z1 = Z1^2
+    _ModSqr(z1z1, Z1);
+    _ModSqr(z1z1_sq, z1z1);
+    
+    // u2 = x2 * z1z1
+    _ModMult(u2, z1z1_sq, x2);
+    
+    // s2 = y2 * z1z1 * Z1 = y2 * z1z1^3
+    uint64_t z1z1_z1[4];
+    _ModMult(z1z1_z1, z1z1_sq, Z1);
+    _ModMult(s2, z1z1_z1, y2);
+    
+    // h = u2 - X1
+    ModSub256(h, u2, X1);
+    
+    // r = s2 - Y1  
+    ModSub256(r, s2, Y1);
+    
+    // i = 4 * h^2
+    uint64_t h_sq[4];
+    _ModSqr(h_sq, h);
+    _ModMult(i, h_sq, (uint64_t*)4);  // i = 4 * h^2
+    
+    // j = i * h
+    _ModMult(j, i, h);
+    
+    // v = X1 * i
+    _ModMult(v, X1, i);
+    
+    // new_X = r^2 - j - 2*v
+    uint64_t r_sq[4];
+    _ModSqr(r_sq, r);
+    uint64_t two_v[4];
+    _ModMult(two_v, v, (uint64_t*)2);  // 2*v
+    ModSub256(new_X, r_sq, j);
+    ModSub256(new_X, two_v);
+    
+    // new_Y = r * (v - new_X) - Y1 * j
+    uint64_t v_minus_X[4];
+    ModSub256(v_minus_X, v, new_X);
+    uint64_t r_vmx[4];
+    _ModMult(r_vmx, r, v_minus_X);
+    uint64_t Y1_j[4];
+    _ModMult(Y1_j, Y1, j);
+    ModSub256(new_Y, r_vmx, Y1_j);
+    
+    // new_Z = Z1 * h
+    _ModMult(new_Z, Z1, h);
+    
+    Load256(X3, new_X);
+    Load256(Y3, new_Y);
+    Load256(Z3, new_Z);
+}
+
+// Convert Jacobian (X, Y, Z) to Affine (x, y)
+__device__ void jacobian_to_affine(uint64_t X[4], uint64_t Y[4], uint64_t Z[4], uint64_t x[4], uint64_t y[4]) {
+    // Check if Z == 0 (point at infinity)
+    if (Z[0] == 0 && Z[1] == 0 && Z[2] == 0 && Z[3] == 0) {
+        x[0] = x[1] = x[2] = x[3] = 0;
+        y[0] = y[1] = y[2] = y[3] = 0;
+        return;
+    }
+    
+    // Compute Z^-1
+    uint64_t Z_inv[5];
+    Load256(Z_inv, Z);
+    Z_inv[4] = 0;
+    _ModInv(Z_inv);
+    
+    // Compute Z^-2
+    uint64_t Z_inv_sq[4];
+    _ModSqr(Z_inv_sq, Z_inv);
+    
+    // x = X * Z^-2
+    _ModMult(x, Z_inv_sq, X);
+    
+    // Compute Z^-3 = Z^-2 * Z^-1
+    uint64_t Z_inv_cb[4];
+    _ModMult(Z_inv_cb, Z_inv_sq, Z_inv);
+    
+    // y = Y * Z^-3
+    _ModMult(y, Z_inv_cb, Y);
+}
+
 // ec_point_mult_pow2: Compute key * G using precomputed G_POW2 table
+// Uses Jacobian coordinates for fast addition (no modular inversions inside loop)
 __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64_t py[4]) {
     bool pointSet = false;
-    uint64_t rx[4], ry[4];
+    
+    // Jacobian accumulator: (X, Y, Z) where Z=1 initially (affine point)
+    uint64_t accX[4] = {0}, accY[4] = {0}, accZ[4] = {1,0,0,0};
+
+    for (int i = 0; i < G_POW2_TABLE_SIZE; i++) {
+        int limb = i >> 6;
+        int bit  = i & 63;
+        if ((key[limb] >> bit) & 1ULL) {
+            // Load affine point from G_POW2 table
+            uint64_t gx[4], gy[4];
+            Load256(gx, (uint64_t*)G_POW2_X_EXTENDED[i]);
+            Load256(gy, (uint64_t*)G_POW2_Y_EXTENDED[i]);
+            
+            if (!pointSet) {
+                // First point: initialize Jacobian accumulator with Z=1
+                Load256(accX, gx);
+                Load256(accY, gy);
+                accZ[0] = 1; accZ[1] = accZ[2] = accZ[3] = 0;  // Z=1
+                pointSet = true;
+            } else {
+                // Add affine point to Jacobian accumulator using mixed addition
+                uint64_t newX[4], newY[4], newZ[4];
+                jacobian_add_affine(accX, accY, accZ, gx, gy, newX, newY, newZ);
+                Load256(accX, newX);
+                Load256(accY, newY);
+                Load256(accZ, newZ);
+            }
+        }
+    }
+
+    if (pointSet) {
+        // Convert Jacobian to affine coordinates for hashing
+        jacobian_to_affine(accX, accY, accZ, px, py);
+    } else {
+        px[0] = px[1] = px[2] = px[3] = 0;
+        py[0] = py[1] = py[2] = py[3] = 0;
+    }
+}
 
     for (int i = 0; i < G_POW2_TABLE_SIZE; i++) {
         int limb = i >> 6;
