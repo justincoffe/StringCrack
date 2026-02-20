@@ -777,7 +777,7 @@ __device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, 
     key[3] = d_lockVals[3];
     
     // Combine 128-bit seed into single value for bit iteration
-    // Process seed_lo first (lower 64 bits), then seed_hi
+    // Process seed_lo first (lower 64 bits), then seed_hi (upper bits)
     for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
         if (seed_lo == 0ULL) break;
         int bitVal = (int)(seed_lo & 1ULL);
@@ -789,13 +789,14 @@ __device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, 
             key[limb] |= (1ULL << bit);
         }
     }
-    // Continue with upper 64 bits if needed
+    // Continue with upper 64 bits (bits 64-127)
     for (int i = 64; i < d_numFreeBits; i++) {
         if (seed_hi == 0ULL) break;
         int bitVal = (int)(seed_hi & 1ULL);
         seed_hi >>= 1;
         if (bitVal) {
-            int pos = d_freeBitPos[i];
+            // Use index i-64 to look up the correct free bit position
+            int pos = d_freeBitPos[i - 64];
             int limb = pos >> 6;
             int bit  = pos & 63;
             key[limb] |= (1ULL << bit);
