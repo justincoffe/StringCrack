@@ -770,10 +770,12 @@ __device__ __constant__ int      d_popcountMax;
 __device__ __constant__ uint64_t d_batchOffsetLo;
 __device__ __constant__ uint64_t d_batchOffsetHi;
 
-// Precomputed base point in Jacobian coordinates (from locked bits)
+// New Constant Memory for Direct Seed Iteration
 __device__ __constant__ uint64_t d_basePointX[4];
 __device__ __constant__ uint64_t d_basePointY[4];
-__device__ __constant__ uint64_t d_basePointZ[4];
+__device__ __constant__ uint64_t d_free_GX[256][4];
+__device__ __constant__ uint64_t d_free_GY[256][4];
+__device__ __constant__ int      d_lockedPopcount;
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
@@ -972,14 +974,13 @@ __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64
     }
 }
 
-// comp_keys_openclaw: StringCrack kernel - Bit Injection + Popcount + EC Math
+// comp_keys_openclaw: StringCrack kernel - Direct Seed Iteration + Popcount + EC Math
 __global__ void comp_keys_openclaw(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // Use PTX add.cc/addc for 128-bit seed calculation
-    // seed = batchOffset + tid (with carry propagation)
+    // 128-bit Seed Generation with carry propagation
     uint64_t seed_lo = d_batchOffsetLo;
     uint64_t seed_hi = d_batchOffsetHi;
     
@@ -991,88 +992,49 @@ __global__ void comp_keys_openclaw(
     asm volatile ("addc.u64 %0, %0, 0;" 
                  : "+l"(seed_hi));
 
-    // Step 1: Bit Injection
-    uint64_t key[4];
-    expand_bits(seed_lo, seed_hi, key);
-
-    // Step 2: Popcount filtering BEFORE expensive EC math
-    int pc = popcount256(key);
+    // 1. O(1) Popcount Filtering BEFORE any arrays are built
+    int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
     if (pc < d_popcountMin || pc > d_popcountMax) return;
 
-    // Step 3: EC Point Multiplication
-    uint64_t px[4], py[4];
-    ec_point_mult_pow2(key, px, py);
-
-    // Step 4: Hash160 + address check
-    uint8_t odd_py = (uint8_t)(py[0] & 1);
-    uint32_t h[5];
-    _GetHash160Comp(px, odd_py, (uint8_t*)h);
-    CheckPoint(h, 0, sAddress, lookup32, out);
-}
-
-// =====================================================================================
-// Direct Seed Iteration Kernel - Zero expand_bits, Zero Warp Divergence
-// Uses precomputed base point from locked bits (computed on CPU)
-// =====================================================================================
-
-// ec_point_mult_pow2_direct: Direct multiplication using precomputed base point
-// Takes a 64-bit seed and adds corresponding G_POW2 points to basePoint
-__device__ void ec_point_mult_pow2_direct(const uint64_t seed, 
-                                           uint64_t px[4], uint64_t py[4]) {
-    // Start with precomputed base point in Jacobian coordinates
+    // 2. Initialize Jacobian Accumulator directly with the CPU Base Point
     uint64_t accX[4], accY[4], accZ[4];
     Load256(accX, d_basePointX);
     Load256(accY, d_basePointY);
-    Load256(accZ, d_basePointZ);
-    
-    // Iterate through each bit of the seed
-    // For each set bit, add the corresponding G_POW2 point
-    uint64_t remaining = seed;
-    int bitIdx = 0;
-    
-    while (remaining != 0) {
-        // Get the lowest set bit
-        int bit = __ffsll(remaining) - 1;  // -1 because __ffs returns 1-based
-        
-        // Add G_POW2[bit] to accumulator
-        uint64_t gx[4], gy[4];
-        Load256(gx, (uint64_t*)G_POW2_X_EXTENDED[bit]);
-        Load256(gy, (uint64_t*)G_POW2_Y_EXTENDED[bit]);
-        
-        // Mixed Jacobian addition
-        uint64_t newX[4], newY[4], newZ[4];
-        jacobian_add_affine(accX, accY, accZ, gx, gy, newX, newY, newZ);
-        Load256(accX, newX);
-        Load256(accY, newY);
-        Load256(accZ, newZ);
-        
-        // Clear this bit
-        remaining &= ~(1ULL << bit);
-    }
-    
-    // Convert to affine for hashing
-    jacobian_to_affine(accX, accY, accZ, px, py);
-}
+    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
 
-// comp_keys_direct: Direct seed iteration kernel
-// Uses precomputed base point and iterates through set bits in seed
-__global__ void comp_keys_direct(
-    address_t* sAddress, uint32_t* lookup32, uint32_t* out)
-{
-    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // Calculate seed: batchOffset + tid
-    uint64_t seed = d_batchOffsetLo + tid;
-    
-    // Step 1: Fast popcount filter using hardware instruction on 64-bit seed
-    int pc = __popcll(seed);
-    if (pc < d_popcountMin || pc > d_popcountMax) return;
-    
-    // Step 2: Direct EC point multiplication using precomputed base point
+    // 3. Direct Seed Iteration (Loop truncated to exact free bits)
+    uint64_t seed = seed_lo;
+    for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
+        if (seed & 1ULL) {
+            uint64_t newX[4], newY[4], newZ[4];
+            jacobian_add_affine(accX, accY, accZ, 
+                               (uint64_t*)d_free_GX[i], (uint64_t*)d_free_GY[i], 
+                               newX, newY, newZ);
+            Load256(accX, newX);
+            Load256(accY, newY);
+            Load256(accZ, newZ);
+        }
+        seed >>= 1;
+    }
+
+    seed = seed_hi;
+    for (int i = 64; i < d_numFreeBits; i++) {
+        if (seed & 1ULL) {
+            uint64_t newX[4], newY[4], newZ[4];
+            jacobian_add_affine(accX, accY, accZ, 
+                               (uint64_t*)d_free_GX[i], (uint64_t*)d_free_GY[i], 
+                               newX, newY, newZ);
+            Load256(accX, newX);
+            Load256(accY, newY);
+            Load256(accZ, newZ);
+        }
+        seed >>= 1;
+    }
+
+    // 4. Convert back to Affine and Hash
     uint64_t px[4], py[4];
-    ec_point_mult_pow2_direct(seed, px, py);
-    
-    // Step 3: Hash160 + address check
+    jacobian_to_affine(accX, accY, accZ, px, py);
+
     uint8_t odd_py = (uint8_t)(py[0] & 1);
     uint32_t h[5];
     _GetHash160Comp(px, odd_py, (uint8_t*)h);
@@ -1156,68 +1118,65 @@ bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
     err = cudaMemcpyToSymbol(d_popcountMax, &config->popcountMax, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_popcountMax: %s\n", cudaGetErrorString(err)); return false; }
     
-    // Upload precomputed base point to GPU
+    // Upload precomputed base point and free G table to GPU
     err = cudaMemcpyToSymbol(d_basePointX, config->basePointX, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointX: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_basePointY, config->basePointY, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_basePointZ, config->basePointZ, sizeof(uint64_t) * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_basePointZ: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_free_GX, config->free_GX, sizeof(uint64_t) * 256 * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_free_GX: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_free_GY, config->free_GY, sizeof(uint64_t) * 256 * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_free_GY: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
+    if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
     return true;
 }
 
-// Compute the base point from locked bits using CPU secp256k1
-// Result stored in Jacobian coordinates (X, Y, Z) where Z=1 for affine points
+// Compute the base point and free G table on CPU for Direct Seed Iteration
 void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
-    // Start with infinity (0, 0, 0) - represented as affine (0, 0)
-    Point basePoint;
-    basePoint.x = 0;
-    basePoint.y = 0;
-    basePoint.z = 1;  // Jacobian Z = 1 for affine point
-    
-    // Add each locked bit's contribution: val * 2^pos * G
-    for (int i = 0; i < config->numLockedBits; i++) {
-        int pos = config->lockedBits[i].position;
-        int val = config->lockedBits[i].value;
-        
-        if (val == 1 && pos < 256) {  // GTable has up to 256*32 entries
-            // Get the precomputed point 2^pos * G from secp's GTable
-            // GTable[pos] = 2^pos * G
-            Point pow2G = secp->GTable[pos];
-            // Add to base point: basePoint + pow2G
-            basePoint = secp->Add(basePoint, pow2G);
+    // 1. Calculate the true locked popcount (cross-platform safe)
+    config->lockedPopcount = 0;
+    for(int i = 0; i < 4; i++) {
+        uint64_t v = config->lockVals[i];
+        while (v) {
+            v &= (v - 1);
+            config->lockedPopcount++;
         }
     }
     
-    // Also add MSB lock if puzzleBits is set
-    if (config->puzzleBits > 0 && config->puzzleBits <= 256) {
-        int msbPos = config->puzzleBits - 1;
-        if (msbPos < 256) {
-            Point pow2G = secp->GTable[msbPos];
-            basePoint = secp->Add(basePoint, pow2G);
-        }
+    // 2. Precompute the Base Point (sum of all locked bits)
+    Int lockedKey;
+    lockedKey.SetInt32(0);
+    lockedKey.bits64[0] = config->lockVals[0];
+    lockedKey.bits64[1] = config->lockVals[1];
+    lockedKey.bits64[2] = config->lockVals[2];
+    lockedKey.bits64[3] = config->lockVals[3];
+
+    Point basePoint = secp->ComputePublicKey(&lockedKey);
+    memcpy(config->basePointX, basePoint.x.bits64, 32);
+    memcpy(config->basePointY, basePoint.y.bits64, 32);
+
+    // 3. Compact the G table for ONLY the free bits
+    for(int i = 0; i < config->numFreeBits; i++) {
+        int pos = config->freeBitPositions[i];
+        Int bitKey;
+        bitKey.SetInt32(0);
+        bitKey.bits64[pos >> 6] = (1ULL << (pos & 63));
+        Point p = secp->ComputePublicKey(&bitKey);
+        memcpy(config->free_GX[i], p.x.bits64, 32);
+        memcpy(config->free_GY[i], p.y.bits64, 32);
     }
     
-    // Store in config (Jacobian coordinates)
-    // Convert to uint64_t arrays
-    for (int i = 0; i < 4; i++) {
-        config->basePointX[i] = basePoint.x.bits64[i];
-        config->basePointY[i] = basePoint.y.bits64[i];
-        config->basePointZ[i] = basePoint.z.bits64[i];
-    }
-    
-    printf("[StringCrack] Base point computed in Jacobian coords\n");
-    printf("[StringCrack]   X: %016llX %016llX %016llX %016llX\n",
+    printf("[StringCrack] Base point computed (locked popcount: %d)\n", config->lockedPopcount);
+    printf("[StringCrack]   Base X: %016llX %016llX %016llX %016llX\n",
            (unsigned long long)config->basePointX[3], (unsigned long long)config->basePointX[2],
            (unsigned long long)config->basePointX[1], (unsigned long long)config->basePointX[0]);
-    printf("[StringCrack]   Y: %016llX %016llX %016llX %016llX\n",
+    printf("[StringCrack]   Base Y: %016llX %016llX %016llX %016llX\n",
            (unsigned long long)config->basePointY[3], (unsigned long long)config->basePointY[2],
            (unsigned long long)config->basePointY[1], (unsigned long long)config->basePointY[0]);
-    printf("[StringCrack]   Z: %016llX %016llX %016llX %016llX\n",
-           (unsigned long long)config->basePointZ[3], (unsigned long long)config->basePointZ[2],
-           (unsigned long long)config->basePointZ[1], (unsigned long long)config->basePointZ[0]);
+    printf("[StringCrack] Free G table: %d entries precomputed\n", config->numFreeBits);
     fflush(stdout);
 }
 

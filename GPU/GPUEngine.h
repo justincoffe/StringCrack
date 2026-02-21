@@ -71,11 +71,16 @@ typedef struct {
     uint64_t lockMask[4];
     uint64_t lockVals[4];
     
-    // Precomputed base point for direct seed iteration (Jacobian coordinates)
-    // Computed on CPU from locked bits, passed to GPU for zero-expand_bits kernel
+    // Precomputed base point (sum of locked bits * G)
     uint64_t basePointX[4];
     uint64_t basePointY[4];
-    uint64_t basePointZ[4];
+    
+    // Precomputed G table for ONLY free bits (compact)
+    uint64_t free_GX[256][4];
+    uint64_t free_GY[256][4];
+    
+    // Locked popcount (precomputed for O(1) filter)
+    int lockedPopcount;
 
     // Seed offset: -start HEX sets this as the starting seed
     // -range N sets the power-of-two size of the seed space
