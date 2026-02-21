@@ -24,7 +24,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
-#include "../SECP256K1.h"
+#include "../SECP256k1.h"
 #include "../hash/sha256.h"
 #include "../hash/ripemd160.h"
 #include "../Timer.h"
