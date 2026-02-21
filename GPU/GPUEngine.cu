@@ -816,7 +816,7 @@ __device__ __forceinline__ int popcount256(const uint64_t key[4]) {
 // Result in Jacobian coordinates: (X3, Y3, Z3)
 // This avoids modular inversions - only needs multiplications!
 __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[4],
-                                     const uint64_t x2[4], const uint64_t y2[4],
+                                     uint64_t x2[4], uint64_t y2[4],
                                      uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4]) {
     uint64_t z1z1[4], z1z1_sq[4];
     uint64_t u2[4], s2[4];
