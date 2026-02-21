@@ -70,6 +70,12 @@ typedef struct {
     int puzzleBits;
     uint64_t lockMask[4];
     uint64_t lockVals[4];
+    
+    // Precomputed base point for direct seed iteration (Jacobian coordinates)
+    // Computed on CPU from locked bits, passed to GPU for zero-expand_bits kernel
+    uint64_t basePointX[4];
+    uint64_t basePointY[4];
+    uint64_t basePointZ[4];
 
     // Seed offset: -start HEX sets this as the starting seed
     // -range N sets the power-of-two size of the seed space
@@ -119,6 +125,7 @@ public:
   static void PrintCudaInfo();
   static void GenerateCode(Secp256K1 *secp, int size);
   static void PrecomputeStringCrackMasks(StringCrackConfig *config);
+  static void ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config);
 
 private:
 

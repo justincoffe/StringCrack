@@ -24,6 +24,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include "../SECP256K1.h"
 #include "../hash/sha256.h"
 #include "../hash/ripemd160.h"
 #include "../Timer.h"
@@ -756,7 +757,8 @@ bool GPUEngine::Check(Secp256K1* secp) {
 }
 
 // =====================================================================================
-// StringCrack: Bit Injection + Popcount Filtering + EC Point Multiplication
+// StringCrack: Direct Seed Iteration - Zero expand_bits, Zero Warp Divergence
+// Precomputed base point from locked bits computed on CPU
 // =====================================================================================
 
 __device__ __constant__ uint64_t d_lockMask[4];
@@ -767,6 +769,11 @@ __device__ __constant__ int      d_popcountMin;
 __device__ __constant__ int      d_popcountMax;
 __device__ __constant__ uint64_t d_batchOffsetLo;
 __device__ __constant__ uint64_t d_batchOffsetHi;
+
+// Precomputed base point in Jacobian coordinates (from locked bits)
+__device__ __constant__ uint64_t d_basePointX[4];
+__device__ __constant__ uint64_t d_basePointY[4];
+__device__ __constant__ uint64_t d_basePointZ[4];
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
@@ -1004,6 +1011,75 @@ __global__ void comp_keys_openclaw(
 }
 
 // =====================================================================================
+// Direct Seed Iteration Kernel - Zero expand_bits, Zero Warp Divergence
+// Uses precomputed base point from locked bits (computed on CPU)
+// =====================================================================================
+
+// ec_point_mult_pow2_direct: Direct multiplication using precomputed base point
+// Takes a 64-bit seed and adds corresponding G_POW2 points to basePoint
+__device__ void ec_point_mult_pow2_direct(const uint64_t seed, 
+                                           uint64_t px[4], uint64_t py[4]) {
+    // Start with precomputed base point in Jacobian coordinates
+    uint64_t accX[4], accY[4], accZ[4];
+    Load256(accX, d_basePointX);
+    Load256(accY, d_basePointY);
+    Load256(accZ, d_basePointZ);
+    
+    // Iterate through each bit of the seed
+    // For each set bit, add the corresponding G_POW2 point
+    uint64_t remaining = seed;
+    int bitIdx = 0;
+    
+    while (remaining != 0) {
+        // Get the lowest set bit
+        int bit = __ffsll(remaining) - 1;  // -1 because __ffs returns 1-based
+        
+        // Add G_POW2[bit] to accumulator
+        uint64_t gx[4], gy[4];
+        Load256(gx, (uint64_t*)G_POW2_X_EXTENDED[bit]);
+        Load256(gy, (uint64_t*)G_POW2_Y_EXTENDED[bit]);
+        
+        // Mixed Jacobian addition
+        uint64_t newX[4], newY[4], newZ[4];
+        jacobian_add_affine(accX, accY, accZ, gx, gy, newX, newY, newZ);
+        Load256(accX, newX);
+        Load256(accY, newY);
+        Load256(accZ, newZ);
+        
+        // Clear this bit
+        remaining &= ~(1ULL << bit);
+    }
+    
+    // Convert to affine for hashing
+    jacobian_to_affine(accX, accY, accZ, px, py);
+}
+
+// comp_keys_direct: Direct seed iteration kernel
+// Uses precomputed base point and iterates through set bits in seed
+__global__ void comp_keys_direct(
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Calculate seed: batchOffset + tid
+    uint64_t seed = d_batchOffsetLo + tid;
+    
+    // Step 1: Fast popcount filter using hardware instruction on 64-bit seed
+    int pc = __popcll(seed);
+    if (pc < d_popcountMin || pc > d_popcountMax) return;
+    
+    // Step 2: Direct EC point multiplication using precomputed base point
+    uint64_t px[4], py[4];
+    ec_point_mult_pow2_direct(seed, px, py);
+    
+    // Step 3: Hash160 + address check
+    uint8_t odd_py = (uint8_t)(py[0] & 1);
+    uint32_t h[5];
+    _GetHash160Comp(px, odd_py, (uint8_t*)h);
+    CheckPoint(h, 0, sAddress, lookup32, out);
+}
+
+// =====================================================================================
 // Host-side StringCrack methods
 // =====================================================================================
 
@@ -1079,9 +1155,70 @@ bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
     if (err != cudaSuccess) { printf("GPUEngine: d_popcountMin: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_popcountMax, &config->popcountMax, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_popcountMax: %s\n", cudaGetErrorString(err)); return false; }
+    
+    // Upload precomputed base point to GPU
+    err = cudaMemcpyToSymbol(d_basePointX, config->basePointX, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_basePointX: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_basePointY, config->basePointY, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_basePointZ, config->basePointZ, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_basePointZ: %s\n", cudaGetErrorString(err)); return false; }
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
     return true;
+}
+
+// Compute the base point from locked bits using CPU secp256k1
+// Result stored in Jacobian coordinates (X, Y, Z) where Z=1 for affine points
+void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
+    // Start with infinity (0, 0, 0) - represented as affine (0, 0)
+    Point basePoint;
+    basePoint.x = 0;
+    basePoint.y = 0;
+    basePoint.z = 1;  // Jacobian Z = 1 for affine point
+    
+    // Add each locked bit's contribution: val * 2^pos * G
+    for (int i = 0; i < config->numLockedBits; i++) {
+        int pos = config->lockedBits[i].position;
+        int val = config->lockedBits[i].value;
+        
+        if (val == 1 && pos < 256) {  // GTable has up to 256*32 entries
+            // Get the precomputed point 2^pos * G from secp's GTable
+            // GTable[pos] = 2^pos * G
+            Point pow2G = secp->GTable[pos];
+            // Add to base point: basePoint + pow2G
+            basePoint = secp->Add(basePoint, pow2G);
+        }
+    }
+    
+    // Also add MSB lock if puzzleBits is set
+    if (config->puzzleBits > 0 && config->puzzleBits <= 256) {
+        int msbPos = config->puzzleBits - 1;
+        if (msbPos < 256) {
+            Point pow2G = secp->GTable[msbPos];
+            basePoint = secp->Add(basePoint, pow2G);
+        }
+    }
+    
+    // Store in config (Jacobian coordinates)
+    // Convert to uint64_t arrays
+    for (int i = 0; i < 4; i++) {
+        config->basePointX[i] = basePoint.x.bits64[i];
+        config->basePointY[i] = basePoint.y.bits64[i];
+        config->basePointZ[i] = basePoint.z.bits64[i];
+    }
+    
+    printf("[StringCrack] Base point computed in Jacobian coords\n");
+    printf("[StringCrack]   X: %016llX %016llX %016llX %016llX\n",
+           (unsigned long long)config->basePointX[3], (unsigned long long)config->basePointX[2],
+           (unsigned long long)config->basePointX[1], (unsigned long long)config->basePointX[0]);
+    printf("[StringCrack]   Y: %016llX %016llX %016llX %016llX\n",
+           (unsigned long long)config->basePointY[3], (unsigned long long)config->basePointY[2],
+           (unsigned long long)config->basePointY[1], (unsigned long long)config->basePointY[0]);
+    printf("[StringCrack]   Z: %016llX %016llX %016llX %016llX\n",
+           (unsigned long long)config->basePointZ[3], (unsigned long long)config->basePointZ[2],
+           (unsigned long long)config->basePointZ[1], (unsigned long long)config->basePointZ[0]);
+    fflush(stdout);
 }
 
 bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi) {
