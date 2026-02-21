@@ -1,4 +1,4 @@
-﻿/*
+/*
 * This file is part of the VanitySearch distribution (https://github.com/JeanLucPons/VanitySearch).
 * Copyright (c) 2019 Jean Luc PONS.
 *
@@ -305,6 +305,41 @@ __device__ void ModSub256(uint64_t* r, uint64_t* b) {
         UADDC1(r[1], p[1]);
         UADDC1(r[2], p[2]);
         UADD1(r[3], p[3]);
+    }
+}
+
+// Modular addition: r = a + b (mod P)
+__device__ void ModAdd256(uint64_t* r, uint64_t* a, uint64_t* b) {
+    uint64_t carry;
+    uint64_t p[4] = { 0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
+                      0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL };
+
+    UADDO(r[0], a[0], b[0]);
+    UADDC(r[1], a[1], b[1]);
+    UADDC(r[2], a[2], b[2]);
+    UADDC(r[3], a[3], b[3]);
+    UADD(carry, 0ULL, 0ULL);
+
+    if (carry) {
+        USUB(r[0], r[0], p[0]);
+        USUBC(r[1], r[1], p[1]);
+        USUBC(r[2], r[2], p[2]);
+        USUB(r[3], r[3], p[3]);
+    } else {
+        // Check if r >= p
+        uint64_t borrow;
+        USUBO(r[0], r[0], p[0]);
+        USUBC(r[1], r[1], p[1]);
+        USUBC(r[2], r[2], p[2]);
+        USUBC(r[3], r[3], p[3]);
+        USUB(borrow, 0ULL, 0ULL);
+        if (borrow) {
+            // r >= p, need to subtract p
+            USUB(r[0], r[0], p[0]);
+            USUBC(r[1], r[1], p[1]);
+            USUBC(r[2], r[2], p[2]);
+            USUB(r[3], r[3], p[3]);
+        }
     }
 }
 

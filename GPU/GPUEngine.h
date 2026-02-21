@@ -76,9 +76,10 @@ typedef struct {
     uint64_t basePointY[4];
     
     // Precomputed G table for ONLY free bits (compact)
-    // Changed to windowed format: 20 windows (covers up to 80 free bits), 16 values per window
-    uint64_t window_GX[20][16][4];
-    uint64_t window_GY[20][16][4];
+    // Upgraded to 5-bit windows: 14 windows (covers up to 70 free bits), 32 values per window
+    // Memory: 14 * 32 * 4 * 8 bytes = ~14 KB per table
+    uint64_t window_GX[14][32][4];
+    uint64_t window_GY[14][32][4];
     
     // Locked popcount (precomputed for O(1) filter)
     int lockedPopcount;
