@@ -981,6 +981,28 @@ __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64
     }
 }
 
+// --- 256-bit Warp Shuffle Helper Functions ---
+__device__ __forceinline__ void shfl_sync_256(uint32_t mask, const uint64_t val[4], int srcLane, uint64_t out[4]) {
+    out[0] = __shfl_sync(mask, val[0], srcLane);
+    out[1] = __shfl_sync(mask, val[1], srcLane);
+    out[2] = __shfl_sync(mask, val[2], srcLane);
+    out[3] = __shfl_sync(mask, val[3], srcLane);
+}
+
+__device__ __forceinline__ void shfl_up_sync_256(uint32_t mask, const uint64_t val[4], unsigned int delta, uint64_t out[4]) {
+    out[0] = __shfl_up_sync(mask, val[0], delta);
+    out[1] = __shfl_up_sync(mask, val[1], delta);
+    out[2] = __shfl_up_sync(mask, val[2], delta);
+    out[3] = __shfl_up_sync(mask, val[3], delta);
+}
+
+__device__ __forceinline__ void shfl_down_sync_256(uint32_t mask, const uint64_t val[4], unsigned int delta, uint64_t out[4]) {
+    out[0] = __shfl_down_sync(mask, val[0], delta);
+    out[1] = __shfl_down_sync(mask, val[1], delta);
+    out[2] = __shfl_down_sync(mask, val[2], delta);
+    out[3] = __shfl_down_sync(mask, val[3], delta);
+}
+
 // The Ultimate OpenClaw Kernel (Grid-Stride Loop Optimized)
 __global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint32_t* out) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1003,67 +1025,143 @@ __global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint
         asm volatile ("add.cc.u64 %0, %0, %1;" : "+l"(seed_lo) : "l"(current_offset));
         asm volatile ("addc.u64 %0, %0, 0;" : "+l"(seed_hi));
 
-        // 1. O(1) Popcount Filtering
+        // 1. O(1) Popcount Filtering (Masked, NO CONTINUE)
         int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
-        if (pc < d_popcountMin || pc > d_popcountMax) continue; // Use CONTINUE, not return!
+        bool valid = (pc >= d_popcountMin && pc <= d_popcountMax);
 
-        // 2. Initialize Jacobian Accumulator directly with the CPU Base Point
+        // 2. Initialize Jacobian Accumulator
         uint64_t accX[4], accY[4], accZ[4];
         Load256(accX, baseAccX);
         Load256(accY, baseAccY);
-        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
+        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is 1 (Neutral for multiplication)
 
-        // 3. Windowed Seed Iteration (4 bits at a time)
-        int numWindows = (d_numFreeBits + 3) / 4;
-        
-        // Process lower 64 bits (up to 16 windows)
-        uint64_t seed = seed_lo;
-        int w = 0;
-        for (; w < 16 && w < numWindows; w++) {
-            uint32_t nibble = seed & 0xF;
-            if (nibble > 0) {
-                uint64_t curGX[4], curGY[4];
-                Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
-                Load256(curGY, (uint64_t*)d_window_GY[w][nibble]);
+        if (valid) {
+            // 3. Windowed Seed Iteration (4 bits at a time)
+            int numWindows = (d_numFreeBits + 3) / 4;
+            
+            uint64_t seed = seed_lo;
+            int w = 0;
+            #pragma unroll 1
+            for (; w < 16 && w < numWindows; w++) {
+                uint32_t nibble = seed & 0xF;
+                if (nibble > 0) {
+                    uint64_t curGX[4], curGY[4];
+                    Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
+                    Load256(curGY, (uint64_t*)d_window_GY[w][nibble]);
 
-                uint64_t newX[4], newY[4], newZ[4];
-                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                Load256(accX, newX);
-                Load256(accY, newY);
-                Load256(accZ, newZ);
+                    uint64_t newX[4], newY[4], newZ[4];
+                    jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                    Load256(accX, newX); Load256(accY, newY); Load256(accZ, newZ);
+                }
+                seed >>= 4;
             }
-            seed >>= 4;
+
+            seed = seed_hi;
+            #pragma unroll 1
+            for (; w < numWindows; w++) {
+                uint32_t nibble = seed & 0xF;
+                if (nibble > 0) {
+                    uint64_t curGX[4], curGY[4];
+                    Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
+                    Load256(curGY, (uint64_t*)d_window_GY[w][nibble]);
+
+                    uint64_t newX[4], newY[4], newZ[4];
+                    jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                    Load256(accX, newX); Load256(accY, newY); Load256(accZ, newZ);
+                }
+                seed >>= 4;
+            }
+            
+            // Safety: If Z hit 0 (Point at Infinity), poison valid to prevent warp-wide div by zero
+            if (accZ[0] == 0 && accZ[1] == 0 && accZ[2] == 0 && accZ[3] == 0) {
+                valid = false;
+                accZ[0] = 1; 
+            }
         }
 
-        // Process upper 64 bits (remaining windows)
-        seed = seed_hi;
-        for (; w < numWindows; w++) {
-            uint32_t nibble = seed & 0xF;
-            if (nibble > 0) {
-                uint64_t curGX[4], curGY[4];
-                // Offset w by 16 because d_window_GX treats all 64 windows as one linear array
-                Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
-                Load256(curGY, (uint64_t*)d_window_GY[w][nibble]);
+       // ====================================================================
+        // 4. WARP-SHUFFLE MONTGOMERY BATCH INVERSION (O(1) Inversion per 32 keys)
+        // ====================================================================
+        uint32_t lane = threadIdx.x & 31;
+        uint64_t neighbor[4];
 
-                uint64_t newX[4], newY[4], newZ[4];
-                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                Load256(accX, newX);
-                Load256(accY, newY);
-                Load256(accZ, newZ);
+        // A. Parallel Prefix Pass (Product of Z's before this thread)
+        uint64_t P[4]; Load256(P, accZ);
+        #pragma unroll
+        for(int i = 1; i < 32; i *= 2) {
+            shfl_up_sync_256(0xFFFFFFFF, P, i, neighbor);
+            if (lane >= i) {
+                uint64_t tmp[4];
+                _ModMult(tmp, P, neighbor);
+                Load256(P, tmp);
             }
-            seed >>= 4;
+        }
+        uint64_t P_prev[4];
+        shfl_up_sync_256(0xFFFFFFFF, P, 1, P_prev);
+        if (lane == 0) {
+            P_prev[0] = 1; P_prev[1] = 0; P_prev[2] = 0; P_prev[3] = 0;
         }
 
-        // 4. Convert back to Affine and Hash
-        uint64_t px[4], py[4];
-        jacobian_to_affine(accX, accY, accZ, px, py);
+        // B. Parallel Suffix Pass (Product of Z's after this thread)
+        uint64_t S[4]; Load256(S, accZ);
+        #pragma unroll
+        for(int i = 1; i < 32; i *= 2) {
+            shfl_down_sync_256(0xFFFFFFFF, S, i, neighbor);
+            if (lane < 32 - i) {
+                uint64_t tmp[4];
+                _ModMult(tmp, S, neighbor);
+                Load256(S, tmp);
+            }
+        }
+        uint64_t S_next[4];
+        shfl_down_sync_256(0xFFFFFFFF, S, 1, S_next);
+        if (lane == 31) {
+            S_next[0] = 1; S_next[1] = 0; S_next[2] = 0; S_next[3] = 0;
+        }
 
-        uint8_t odd_py = (uint8_t)(py[0] & 1);
-        uint32_t h[5];
-        _GetHash160Comp(px, odd_py, (uint8_t*)h);
-        
-        // Pass 'step' to CheckPoint so the CPU knows exactly which loop iteration hit the key!
-        CheckPoint(h, step, sAddress, lookup32, out);
+        // C. Total Warp Product (broadcast to all lanes so lane 31 has it)
+        uint64_t Total[4];
+        shfl_sync_256(0xFFFFFFFF, P, 31, Total);
+
+        // D. Single _ModInv computed ONLY by lane 31
+        uint64_t Shared_Inv[4];
+        if (lane == 31) {
+            uint64_t Inv5[5];
+            Load256(Inv5, Total);
+            Inv5[4] = 0; // 5th limb required as scratch space by VanitySearch ModInv
+            _ModInv(Inv5);
+            Load256(Shared_Inv, Inv5); // Extract the 4-limb result
+        }
+
+        // Broadcast the inverted result from lane 31 back to all lanes
+        shfl_sync_256(0xFFFFFFFF, Shared_Inv, 31, Shared_Inv);
+
+        // E. Calculate thread's individual Z_inv
+        uint64_t Z_inv_tmp[4];
+        _ModMult(Z_inv_tmp, Shared_Inv, P_prev);
+        uint64_t Z_inv_final[4];
+        _ModMult(Z_inv_final, Z_inv_tmp, S_next);
+
+        // ====================================================================
+        // 5. Affine Conversion and Hash (Masked)
+        // ====================================================================
+        if (valid) {
+            uint64_t px[4], py[4];
+            
+            // Inline affine math: X = X * Z^-2, Y = Y * Z^-3
+            uint64_t Z_inv_sq[4];
+            _ModSqr(Z_inv_sq, Z_inv_final);
+            _ModMult(px, Z_inv_sq, accX);
+
+            uint64_t Z_inv_cb[4];
+            _ModMult(Z_inv_cb, Z_inv_sq, Z_inv_final);
+            _ModMult(py, Z_inv_cb, accY);
+
+            uint8_t odd_py = (uint8_t)(py[0] & 1);
+            uint32_t h[5];
+            _GetHash160Comp(px, odd_py, (uint8_t*)h);
+            CheckPoint(h, step, sAddress, lookup32, out);
+        }
     }
 }
 
