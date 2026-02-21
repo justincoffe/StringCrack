@@ -1016,55 +1016,37 @@ __global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint
         Load256(accY, baseAccY);
         accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
 
-        // 3. Windowed Seed Iteration (4-bit windows, 16 values per window)
-        // Instead of checking each bit individually, we extract 4-bit chunks and do 1 lookup + 1 addition per window
-        
-        // Process lower 64 bits (16 windows of 4 bits each)
-        uint64_t seedWindow = seed_lo;
-        for (int w = 0; w < 16 && w < d_numWindows; w++) {
-            // Extract 4-bit value from current window position
-            int windowVal = (int)(seedWindow & 0xFULL);  // Get 4 bits
-            
-            if (windowVal != 0) {
-                // Load precomputed point for this window value
+        // 3. Direct Seed Iteration (Loop truncated to exact free bits)
+        uint64_t seed = seed_lo;
+        for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
+            if (seed & 1ULL) {
                 uint64_t curGX[4], curGY[4];
-                Load256(curGX, (uint64_t*)d_windowGX[w][windowVal]);
-                Load256(curGY, (uint64_t*)d_windowGY[w][windowVal]);
-                
-                // Handle infinity case (z=0 means point at infinity)
-                if (curGX[0] != 0 || curGX[1] != 0 || curGX[2] != 0 || curGX[3] != 0) {
-                    uint64_t newX[4], newY[4], newZ[4];
-                    jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                    Load256(accX, newX);
-                    Load256(accY, newY);
-                    Load256(accZ, newZ);
-                }
+                Load256(curGX, (uint64_t*)d_free_GX[i]);
+                Load256(curGY, (uint64_t*)d_free_GY[i]);
+
+                uint64_t newX[4], newY[4], newZ[4];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                Load256(accX, newX);
+                Load256(accY, newY);
+                Load256(accZ, newZ);
             }
-            
-            seedWindow >>= 4;  // Move to next 4-bit window
+            seed >>= 1;
         }
-        
-        // Process upper bits (64+)
-        seedWindow = seed_hi;
-        for (int w = 16; w < d_numWindows; w++) {
-            // Extract 4-bit value from current window position
-            int windowVal = (int)(seedWindow & 0xFULL);
-            
-            if (windowVal != 0) {
+
+        seed = seed_hi;
+        for (int i = 64; i < d_numFreeBits; i++) {
+            if (seed & 1ULL) {
                 uint64_t curGX[4], curGY[4];
-                Load256(curGX, (uint64_t*)d_windowGX[w][windowVal]);
-                Load256(curGY, (uint64_t*)d_windowGY[w][windowVal]);
-                
-                if (curGX[0] != 0 || curGX[1] != 0 || curGX[2] != 0 || curGX[3] != 0) {
-                    uint64_t newX[4], newY[4], newZ[4];
-                    jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                    Load256(accX, newX);
-                    Load256(accY, newY);
-                    Load256(accZ, newZ);
-                }
+                Load256(curGX, (uint64_t*)d_free_GX[i]);
+                Load256(curGY, (uint64_t*)d_free_GY[i]);
+
+                uint64_t newX[4], newY[4], newZ[4];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                Load256(accX, newX);
+                Load256(accY, newY);
+                Load256(accZ, newZ);
             }
-            
-            seedWindow >>= 4;
+            seed >>= 1;
         }
 
         // 4. Convert back to Affine and Hash
