@@ -842,10 +842,12 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
     // r = s2 - Y1  
     ModSub256(r, s2, Y1);
     
-    // i = 4 * h^2
+    // i = 4 * h^2 (use addition: h_sq + h_sq + h_sq + h_sq)
     uint64_t h_sq[4];
     _ModSqr(h_sq, h);
-    _ModMult(i, h_sq, (uint64_t*)4);  // i = 4 * h^2
+    uint64_t two_h_sq[4];
+    ModAdd256(two_h_sq, h_sq, h_sq);  // 2 * h^2
+    ModAdd256(i, two_h_sq, two_h_sq);  // 4 * h^2
     
     // j = i * h
     _ModMult(j, i, h);
@@ -853,11 +855,11 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
     // v = X1 * i
     _ModMult(v, X1, i);
     
-    // new_X = r^2 - j - 2*v
+    // new_X = r^2 - j - 2*v (use addition: v + v)
     uint64_t r_sq[4];
     _ModSqr(r_sq, r);
     uint64_t two_v[4];
-    _ModMult(two_v, v, (uint64_t*)2);  // 2*v
+    ModAdd256(two_v, v, v);  // 2*v
     ModSub256(new_X, r_sq, j);
     ModSub256(new_X, two_v);
     
