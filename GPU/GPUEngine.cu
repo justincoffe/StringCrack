@@ -79,7 +79,7 @@ int _ConvertSMVer2Cores(int major, int minor) {
 
 
 #define GRP_SIZE 1024
-#define STEP_SIZE 1024
+#define STEP_SIZE 128
 
 __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out) {
 
