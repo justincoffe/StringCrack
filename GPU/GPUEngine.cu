@@ -1004,13 +1004,11 @@ __device__ __forceinline__ void shfl_down_sync_256(uint32_t mask, const uint64_t
 }
 
 // The Ultimate OpenClaw Kernel (Grid-Stride Loop Optimized)
-// Optimized: 5-bit windows, warp shuffle batch inversion, batch offsets as kernel args
+// Optimized: 5-bit windows, warp shuffle batch inversion
 __global__ void comp_keys_openclaw(
     address_t* sAddress, 
     uint32_t* lookup32, 
-    uint32_t* out,
-    uint64_t batchOffsetLo,  // Passed as kernel argument (faster than cudaMemcpyToSymbol)
-    uint64_t batchOffsetHi) {
+    uint32_t* out) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = gridDim.x * blockDim.x;
 
@@ -1018,10 +1016,6 @@ __global__ void comp_keys_openclaw(
     uint64_t baseAccX[4], baseAccY[4];
     Load256(baseAccX, d_basePointX);
     Load256(baseAccY, d_basePointY);
-    
-    // Use kernel arguments directly instead of device globals
-    uint64_t d_batchOffsetLo = batchOffsetLo;
-    uint64_t d_batchOffsetHi = batchOffsetHi;
 
     // Process d_stepSize seeds per thread
     for (uint32_t step = 0; step < d_stepSize; step++) {
@@ -1338,13 +1332,16 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
 
 bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi) {
     cudaMemset(outputBuffer, 0, 4);
-    // Pass batch offsets as kernel arguments (faster than cudaMemcpyToSymbol)
-    // No need to copy to device globals - they're passed directly to the kernel
+    // Use cudaMemcpyToSymbol to copy batch offsets to device globals
+    cudaError_t err = cudaMemcpyToSymbol(d_batchOffsetLo, &batchOffsetLo, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetLo: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_batchOffsetHi, &batchOffsetHi, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetHi: %s\n", cudaGetErrorString(err)); return false; }
 
     comp_keys_openclaw<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP>>>(
-        inputAddress, inputAddressLookUp, outputBuffer, batchOffsetLo, batchOffsetHi);
+        inputAddress, inputAddressLookUp, outputBuffer);
 
-    cudaError_t err = cudaGetLastError();
+    err = cudaGetLastError();
     if (err != cudaSuccess) { printf("GPUEngine: OpenClaw Kernel: %s\n", cudaGetErrorString(err)); return false; }
     return true;
 }
