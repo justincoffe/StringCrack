@@ -777,13 +777,10 @@ __device__ __constant__ uint64_t d_batchOffsetHi;
 // New Constant Memory for Direct Seed Iteration
 __device__ __constant__ uint64_t d_basePointX[4];
 __device__ __constant__ uint64_t d_basePointY[4];
-__device__ __constant__ uint64_t d_free_GX[256][4];
-__device__ __constant__ uint64_t d_free_GY[256][4];
 
-// Windowed precomputation tables (16 windows * 16 values * 4 limbs = 8KB)
-__device__ __constant__ int d_numWindows;
-__device__ __constant__ uint64_t d_windowGX[16][16][4];
-__device__ __constant__ uint64_t d_windowGY[16][16][4];
+// 64 windows, 16 possible values per 4-bit window, 4 uint64_t limbs per coordinate
+__device__ __constant__ uint64_t d_window_GX[64][16][4];
+__device__ __constant__ uint64_t d_window_GY[64][16][4];
 __device__ __constant__ int      d_lockedPopcount;
 __device__ __constant__ int      d_stepSize;
 
@@ -1016,13 +1013,18 @@ __global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint
         Load256(accY, baseAccY);
         accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
 
-        // 3. Direct Seed Iteration (Loop truncated to exact free bits)
+        // 3. Windowed Seed Iteration (4 bits at a time)
+        int numWindows = (d_numFreeBits + 3) / 4;
+        
+        // Process lower 64 bits (up to 16 windows)
         uint64_t seed = seed_lo;
-        for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
-            if (seed & 1ULL) {
+        int w = 0;
+        for (; w < 16 && w < numWindows; w++) {
+            uint32_t nibble = seed & 0xF;
+            if (nibble > 0) {
                 uint64_t curGX[4], curGY[4];
-                Load256(curGX, (uint64_t*)d_free_GX[i]);
-                Load256(curGY, (uint64_t*)d_free_GY[i]);
+                Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
+                Load256(curGY, (uint64_t*)d_window_GY[w][nibble]);
 
                 uint64_t newX[4], newY[4], newZ[4];
                 jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
@@ -1030,15 +1032,18 @@ __global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint
                 Load256(accY, newY);
                 Load256(accZ, newZ);
             }
-            seed >>= 1;
+            seed >>= 4;
         }
 
+        // Process upper 64 bits (remaining windows)
         seed = seed_hi;
-        for (int i = 64; i < d_numFreeBits; i++) {
-            if (seed & 1ULL) {
+        for (; w < numWindows; w++) {
+            uint32_t nibble = seed & 0xF;
+            if (nibble > 0) {
                 uint64_t curGX[4], curGY[4];
-                Load256(curGX, (uint64_t*)d_free_GX[i]);
-                Load256(curGY, (uint64_t*)d_free_GY[i]);
+                // Offset w by 16 because d_window_GX treats all 64 windows as one linear array
+                Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
+                Load256(curGY, (uint64_t*)d_window_GY[w][nibble]);
 
                 uint64_t newX[4], newY[4], newZ[4];
                 jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
@@ -1046,7 +1051,7 @@ __global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint
                 Load256(accY, newY);
                 Load256(accZ, newZ);
             }
-            seed >>= 1;
+            seed >>= 4;
         }
 
         // 4. Convert back to Affine and Hash
@@ -1144,18 +1149,11 @@ bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointX: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_basePointY, config->basePointY, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_free_GX, config->free_GX, sizeof(uint64_t) * 256 * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_free_GX: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_free_GY, config->free_GY, sizeof(uint64_t) * 256 * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_free_GY: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_window_GX, config->window_GX, sizeof(uint64_t) * 64 * 16 * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_window_GX: %s\n", cudaGetErrorString(err)); return false; }
     
-    // Upload windowed precomputation tables
-    err = cudaMemcpyToSymbol(d_numWindows, &config->numWindows, sizeof(int));
-    if (err != cudaSuccess) { printf("GPUEngine: d_numWindows: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_windowGX, config->windowGX, sizeof(uint64_t) * 16 * 16 * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_windowGX: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_windowGY, config->windowGY, sizeof(uint64_t) * 16 * 16 * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_windowGY: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_window_GY, config->window_GY, sizeof(uint64_t) * 64 * 16 * 4);
+    if (err != cudaSuccess) { printf("GPUEngine: d_window_GY: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
     
@@ -1191,58 +1189,31 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
     memcpy(config->basePointX, basePoint.x.bits64, 32);
     memcpy(config->basePointY, basePoint.y.bits64, 32);
 
-    // 3. Compact the G table for ONLY the free bits
-    for(int i = 0; i < config->numFreeBits; i++) {
-        int pos = config->freeBitPositions[i];
-        Int bitKey;
-        bitKey.SetInt32(0);
-        bitKey.bits64[pos >> 6] = (1ULL << (pos & 63));
-        Point p = secp->ComputePublicKey(&bitKey);
-        memcpy(config->free_GX[i], p.x.bits64, 32);
-        memcpy(config->free_GY[i], p.y.bits64, 32);
-    }
+    // 3. Compact the G table for 4-bit Windows
+    int numWindows = (config->numFreeBits + 3) / 4;
     
-    // 4. Build windowed precomputation tables (4-bit windows)
-    // Each window has 16 possible values (0-15), we precompute the EC point for each
-    const int WINDOW_SIZE = 4;
-    config->numWindows = (config->numFreeBits + WINDOW_SIZE - 1) / WINDOW_SIZE;
-    
-    for (int w = 0; w < config->numWindows; w++) {
-        // For each window, compute all 16 possible values
-        for (int val = 0; val < 16; val++) {
-            // Start from infinity (point at infinity)
-            Point windowPoint;
-            windowPoint.x.SetInt32(0);
-            windowPoint.y.SetInt32(0);
-            windowPoint.z.SetInt32(0);  // z=0 means point at infinity
+    // Clear index 0 (Point at Infinity) for all windows to prevent garbage data
+    memset(config->window_GX, 0, sizeof(config->window_GX));
+    memset(config->window_GY, 0, sizeof(config->window_GY));
+
+    for(int w = 0; w < numWindows; w++) {
+        // Calculate all 15 non-zero combinations for this 4-bit window
+        for(int val = 1; val < 16; val++) {
+            Int windowKey;
+            windowKey.SetInt32(0);
             
-            // For each bit in this window (4 bits)
-            for (int b = 0; b < WINDOW_SIZE; b++) {
-                int bitIndex = w * WINDOW_SIZE + b;
-                if (bitIndex >= config->numFreeBits) break;
-                
-                // If this bit is set in val, add the corresponding G point
-                if (val & (1 << b)) {
-                    int pos = config->freeBitPositions[bitIndex];
-                    Int bitKey;
-                    bitKey.SetInt32(0);
-                    bitKey.bits64[pos >> 6] = (1ULL << (pos & 63));
-                    Point gPoint = secp->ComputePublicKey(&bitKey);
-                    
-                    // Add to windowPoint (handle infinity case)
-                    if (windowPoint.z.IsZero()) {
-                        windowPoint.x.Set(&gPoint.x);
-                        windowPoint.y.Set(&gPoint.y);
-                        windowPoint.z.SetInt32(1);
-                    } else {
-                        windowPoint = secp->Add(windowPoint, gPoint);
+            for(int bit = 0; bit < 4; bit++) {
+                if ((val >> bit) & 1) {
+                    int pos_idx = w * 4 + bit;
+                    if (pos_idx < config->numFreeBits) {
+                        int actualPos = config->freeBitPositions[pos_idx];
+                        windowKey.bits64[actualPos >> 6] |= (1ULL << (actualPos & 63));
                     }
                 }
             }
-            
-            // Store in window table
-            memcpy(config->windowGX[w][val], windowPoint.x.bits64, 32);
-            memcpy(config->windowGY[w][val], windowPoint.y.bits64, 32);
+            Point p = secp->ComputePublicKey(&windowKey);
+            memcpy(config->window_GX[w][val], p.x.bits64, 32);
+            memcpy(config->window_GY[w][val], p.y.bits64, 32);
         }
     }
     
@@ -1253,8 +1224,7 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
     printf("[StringCrack]   Base Y: %016llX %016llX %016llX %016llX\n",
            (unsigned long long)config->basePointY[3], (unsigned long long)config->basePointY[2],
            (unsigned long long)config->basePointY[1], (unsigned long long)config->basePointY[0]);
-    printf("[StringCrack] Free G table: %d entries precomputed\n", config->numFreeBits);
-    printf("[StringCrack] Window tables: %d windows (4-bit each, 16 values per window)\n", config->numWindows);
+    printf("[StringCrack] Window tables: %d windows (4-bit each, 16 values per window)\n", numWindows);
     fflush(stdout);
 }
 
