@@ -842,12 +842,18 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
     // r = s2 - Y1  
     ModSub256(r, s2, Y1);
     
-    // i = 4 * h^2 (create local const arrays for 2 and 4)
+    // i = 4 * h^2 (use fast A - (-A) trick: 2*(2*x) = x - (-x) - (-(x - (-x))))
     uint64_t h_sq[4];
     _ModSqr(h_sq, h);
-    uint64_t const_2[4] = {2, 0, 0, 0};
-    uint64_t const_4[4] = {4, 0, 0, 0};
-    _ModMult(i, h_sq, const_4);  // i = 4 * h^2
+    // 2 * h_sq using h_sq - (-h_sq)
+    uint64_t neg_h_sq[4];
+    ModNeg256(neg_h_sq, h_sq);
+    uint64_t two_h_sq[4];
+    ModSub256(two_h_sq, h_sq, neg_h_sq);  // 2 * h_sq
+    // 4 * h_sq = 2 * (2 * h_sq)
+    uint64_t neg_two_h_sq[4];
+    ModNeg256(neg_two_h_sq, two_h_sq);
+    ModSub256(i, two_h_sq, neg_two_h_sq);  // 4 * h_sq
     
     // j = i * h
     _ModMult(j, i, h);
@@ -855,11 +861,13 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
     // v = X1 * i
     _ModMult(v, X1, i);
     
-    // new_X = r^2 - j - 2*v
+    // new_X = r^2 - j - 2*v (use A - (-A) for 2*v)
     uint64_t r_sq[4];
     _ModSqr(r_sq, r);
+    uint64_t neg_v[4];
+    ModNeg256(neg_v, v);
     uint64_t two_v[4];
-    _ModMult(two_v, v, const_2);  // 2*v
+    ModSub256(two_v, v, neg_v);  // 2*v
     ModSub256(new_X, r_sq, j);
     ModSub256(new_X, two_v);
     
