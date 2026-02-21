@@ -875,9 +875,10 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
     uint64_t R_sq[4];
     _ModSqr(R_sq, R);
     
-    // Calculate 2 * U1HH using ModAdd256 (saves 1 temporary array and 1 function call)
-    uint64_t two_U1HH[4];
-    ModAdd256(two_U1HH, U1HH, U1HH);  // 2 * U1HH = U1HH + U1HH
+    // Calculate 2 * U1HH using ModNeg256 + ModSub256 (reverted from ModAdd256 due to math bug)
+    uint64_t neg_U1HH[4], two_U1HH[4];
+    ModNeg256(neg_U1HH, U1HH);
+    ModSub256(two_U1HH, U1HH, neg_U1HH);  // A - (-A) = 2*A
     
     // X3 = R^2 - H^3 - 2*U1HH
     uint64_t new_X[4];
