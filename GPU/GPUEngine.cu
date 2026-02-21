@@ -1006,9 +1006,13 @@ __global__ void comp_keys_openclaw(
     uint64_t seed = seed_lo;
     for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
         if (seed & 1ULL) {
+            uint64_t curGX[4], curGY[4];
+            Load256(curGX, (uint64_t*)d_free_GX[i]);
+            Load256(curGY, (uint64_t*)d_free_GY[i]);
+
             uint64_t newX[4], newY[4], newZ[4];
             jacobian_add_affine(accX, accY, accZ, 
-                               (uint64_t*)d_free_GX[i], (uint64_t*)d_free_GY[i], 
+                               curGX, curGY, 
                                newX, newY, newZ);
             Load256(accX, newX);
             Load256(accY, newY);
@@ -1020,9 +1024,13 @@ __global__ void comp_keys_openclaw(
     seed = seed_hi;
     for (int i = 64; i < d_numFreeBits; i++) {
         if (seed & 1ULL) {
+            uint64_t curGX[4], curGY[4];
+            Load256(curGX, (uint64_t*)d_free_GX[i]);
+            Load256(curGY, (uint64_t*)d_free_GY[i]);
+
             uint64_t newX[4], newY[4], newZ[4];
             jacobian_add_affine(accX, accY, accZ, 
-                               (uint64_t*)d_free_GX[i], (uint64_t*)d_free_GY[i], 
+                               curGX, curGY, 
                                newX, newY, newZ);
             Load256(accX, newX);
             Load256(accY, newY);
