@@ -1090,9 +1090,14 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 			keycount.Add(STEP_SIZE);
 			keycount.Mult(numThreadsGPU);
-
-			keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
-			keys_n = keys_n * idxcount;
+			// Fix the variable BEFORE it gets passed to PrintStatsStringCrack
+			if (useStringCrack) {
+				keys_n = 1ULL * numThreadsGPU;
+				keys_n = keys_n * idxcount;
+			} else {
+				keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
+				keys_n = keys_n * idxcount;
+			}
 		
 			
 
