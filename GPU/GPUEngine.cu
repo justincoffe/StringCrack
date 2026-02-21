@@ -79,7 +79,7 @@ int _ConvertSMVer2Cores(int major, int minor) {
 
 
 #define GRP_SIZE 1024
-#define STEP_SIZE GRP_SIZE*1
+#define STEP_SIZE 1024
 
 __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out) {
 
@@ -974,79 +974,82 @@ __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64
     }
 }
 
-// comp_keys_openclaw: StringCrack kernel - Direct Seed Iteration + Popcount + EC Math
-__global__ void comp_keys_openclaw(
-    address_t* sAddress, uint32_t* lookup32, uint32_t* out)
-{
+// The Ultimate OpenClaw Kernel (Grid-Stride Loop Optimized)
+__global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint32_t* out) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // 128-bit Seed Generation with carry propagation
-    uint64_t seed_lo = d_batchOffsetLo;
-    uint64_t seed_hi = d_batchOffsetHi;
-    
-    // Add tid to lower 64 bits
-    asm volatile ("add.cc.u64 %0, %0, %1;" 
-                 : "+l"(seed_lo) 
-                 : "l"((uint64_t)tid));
-    // Add carry to upper 64 bits
-    asm volatile ("addc.u64 %0, %0, 0;" 
-                 : "+l"(seed_hi));
+    uint32_t stride = gridDim.x * blockDim.x;
 
-    // 1. O(1) Popcount Filtering BEFORE any arrays are built
-    int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
-    if (pc < d_popcountMin || pc > d_popcountMax) return;
+    // Load base points ONCE per thread to save register/cache bandwidth
+    uint64_t baseAccX[4], baseAccY[4];
+    Load256(baseAccX, d_basePointX);
+    Load256(baseAccY, d_basePointY);
 
-    // 2. Initialize Jacobian Accumulator directly with the CPU Base Point
-    uint64_t accX[4], accY[4], accZ[4];
-    Load256(accX, d_basePointX);
-    Load256(accY, d_basePointY);
-    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
+    // Process STEP_SIZE (1024) seeds per thread
+    for (uint32_t step = 0; step < STEP_SIZE; step++) {
+        
+        // Calculate the absolute offset for this specific step
+        uint64_t current_offset = (uint64_t)tid + ((uint64_t)step * (uint64_t)stride);
+        
+        uint64_t seed_lo = d_batchOffsetLo;
+        uint64_t seed_hi = d_batchOffsetHi;
+        
+        asm volatile ("add.cc.u64 %0, %0, %1;" : "+l"(seed_lo) : "l"(current_offset));
+        asm volatile ("addc.u64 %0, %0, 0;" : "+l"(seed_hi));
 
-    // 3. Direct Seed Iteration (Loop truncated to exact free bits)
-    uint64_t seed = seed_lo;
-    for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
-        if (seed & 1ULL) {
-            uint64_t curGX[4], curGY[4];
-            Load256(curGX, (uint64_t*)d_free_GX[i]);
-            Load256(curGY, (uint64_t*)d_free_GY[i]);
+        // 1. O(1) Popcount Filtering
+        int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
+        if (pc < d_popcountMin || pc > d_popcountMax) continue; // Use CONTINUE, not return!
 
-            uint64_t newX[4], newY[4], newZ[4];
-            jacobian_add_affine(accX, accY, accZ, 
-                               curGX, curGY, 
-                               newX, newY, newZ);
-            Load256(accX, newX);
-            Load256(accY, newY);
-            Load256(accZ, newZ);
+        // 2. Initialize Jacobian Accumulator directly with the CPU Base Point
+        uint64_t accX[4], accY[4], accZ[4];
+        Load256(accX, baseAccX);
+        Load256(accY, baseAccY);
+        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
+
+        // 3. Direct Seed Iteration (Loop truncated to exact free bits)
+        uint64_t seed = seed_lo;
+        for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
+            if (seed & 1ULL) {
+                uint64_t curGX[4], curGY[4];
+                Load256(curGX, (uint64_t*)d_free_GX[i]);
+                Load256(curGY, (uint64_t*)d_free_GY[i]);
+
+                uint64_t newX[4], newY[4], newZ[4];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                Load256(accX, newX);
+                Load256(accY, newY);
+                Load256(accZ, newZ);
+            }
+            seed >>= 1;
         }
-        seed >>= 1;
-    }
 
-    seed = seed_hi;
-    for (int i = 64; i < d_numFreeBits; i++) {
-        if (seed & 1ULL) {
-            uint64_t curGX[4], curGY[4];
-            Load256(curGX, (uint64_t*)d_free_GX[i]);
-            Load256(curGY, (uint64_t*)d_free_GY[i]);
+        seed = seed_hi;
+        for (int i = 64; i < d_numFreeBits; i++) {
+            if (seed & 1ULL) {
+                uint64_t curGX[4], curGY[4];
+                Load256(curGX, (uint64_t*)d_free_GX[i]);
+                Load256(curGY, (uint64_t*)d_free_GY[i]);
 
-            uint64_t newX[4], newY[4], newZ[4];
-            jacobian_add_affine(accX, accY, accZ, 
-                               curGX, curGY, 
-                               newX, newY, newZ);
-            Load256(accX, newX);
-            Load256(accY, newY);
-            Load256(accZ, newZ);
+                uint64_t newX[4], newY[4], newZ[4];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                Load256(accX, newX);
+                Load256(accY, newY);
+                Load256(accZ, newZ);
+            }
+            seed >>= 1;
         }
-        seed >>= 1;
+
+        // 4. Convert back to Affine and Hash
+        uint64_t px[4], py[4];
+        jacobian_to_affine(accX, accY, accZ, px, py);
+
+        uint8_t odd_py = (uint8_t)(py[0] & 1);
+        uint32_t h[5];
+        _GetHash160Comp(px, odd_py, (uint8_t*)h);
+        
+        // Pass 'step' to CheckPoint so the CPU knows exactly which loop iteration hit the key!
+        CheckPoint(h, step, sAddress, lookup32, out);
     }
-
-    // 4. Convert back to Affine and Hash
-    uint64_t px[4], py[4];
-    jacobian_to_affine(accX, accY, accZ, px, py);
-
-    uint8_t odd_py = (uint8_t)(py[0] & 1);
-    uint32_t h[5];
-    _GetHash160Comp(px, odd_py, (uint8_t*)h);
-    CheckPoint(h, 0, sAddress, lookup32, out);
 }
 
 // =====================================================================================
