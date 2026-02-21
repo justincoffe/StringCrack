@@ -778,9 +778,9 @@ __device__ __constant__ uint64_t d_batchOffsetHi;
 __device__ __constant__ uint64_t d_basePointX[4];
 __device__ __constant__ uint64_t d_basePointY[4];
 
-// 64 windows, 16 possible values per 4-bit window, 4 uint64_t limbs per coordinate
-__device__ __constant__ uint64_t d_window_GX[64][16][4];
-__device__ __constant__ uint64_t d_window_GY[64][16][4];
+// 20 windows (covers up to 80 free bits), 16 possible values per 4-bit window, 4 uint64_t limbs per coordinate
+__device__ __constant__ uint64_t d_window_GX[20][16][4];
+__device__ __constant__ uint64_t d_window_GY[20][16][4];
 __device__ __constant__ int      d_lockedPopcount;
 __device__ __constant__ int      d_stepSize;
 
@@ -1149,10 +1149,10 @@ bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointX: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_basePointY, config->basePointY, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_window_GX, config->window_GX, sizeof(uint64_t) * 64 * 16 * 4);
+    err = cudaMemcpyToSymbol(d_window_GX, config->window_GX, sizeof(uint64_t) * 20 * 16 * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_window_GX: %s\n", cudaGetErrorString(err)); return false; }
     
-    err = cudaMemcpyToSymbol(d_window_GY, config->window_GY, sizeof(uint64_t) * 64 * 16 * 4);
+    err = cudaMemcpyToSymbol(d_window_GY, config->window_GY, sizeof(uint64_t) * 20 * 16 * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_window_GY: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
