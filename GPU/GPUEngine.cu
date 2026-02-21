@@ -811,77 +811,82 @@ __device__ __forceinline__ int popcount256(const uint64_t key[4]) {
 // G_POW2 table size (currently 71 entries in GPUGroup.h, user will expand)
 #define G_POW2_TABLE_SIZE 71
 
-// Mixed Jacobian-Affine Addition
+// Mixed Jacobian-Affine Addition (Pure Cohen/Miyaji Formula)
 // Adds affine point Q(x2, y2) to Jacobian point P(X1, Y1, Z1)
 // Result in Jacobian coordinates: (X3, Y3, Z3)
 // This avoids modular inversions - only needs multiplications!
 __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[4],
                                      uint64_t x2[4], uint64_t y2[4],
                                      uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4]) {
-    uint64_t z1z1[4];
-    uint64_t u2[4], s2[4];
-    uint64_t h[4], r[4];
-    uint64_t i[4], j[4], v[4];
-    uint64_t new_X[4], new_Y[4], new_Z[4];
     
-    // z1z1 = Z1^2
-    _ModSqr(z1z1, Z1);
+    // Z1Z1 = Z1^2
+    uint64_t Z1Z1[4];
+    _ModSqr(Z1Z1, Z1);
     
-    // u2 = x2 * z1z1 (Z^2)
-    _ModMult(u2, z1z1, x2);
+    // U2 = x2 * Z1^2
+    uint64_t U2[4];
+    _ModMult(U2, Z1Z1, x2);
     
-    // s2 = y2 * z1z1 * Z1 = y2 * Z^3
-    uint64_t z1z1_z1[4];
-    _ModMult(z1z1_z1, z1z1, Z1);
-    _ModMult(s2, z1z1_z1, y2);
+    // Z1_cubed = Z1^3
+    uint64_t Z1_cubed[4];
+    _ModMult(Z1_cubed, Z1Z1, Z1);
     
-    // h = u2 - X1
-    ModSub256(h, u2, X1);
+    // S2 = y2 * Z1^3
+    uint64_t S2[4];
+    _ModMult(S2, Z1_cubed, y2);
     
-    // r = s2 - Y1  
-    ModSub256(r, s2, Y1);
+    // H = U2 - X1
+    uint64_t H[4];
+    ModSub256(H, U2, X1);
     
-    // i = 4 * h^2 (use fast A - (-A) trick: 2*(2*x) = x - (-x) - (-(x - (-x))))
-    uint64_t h_sq[4];
-    _ModSqr(h_sq, h);
-    // 2 * h_sq using h_sq - (-h_sq)
-    uint64_t neg_h_sq[4];
-    ModNeg256(neg_h_sq, h_sq);
-    uint64_t two_h_sq[4];
-    ModSub256(two_h_sq, h_sq, neg_h_sq);  // 2 * h_sq
-    // 4 * h_sq = 2 * (2 * h_sq)
-    uint64_t neg_two_h_sq[4];
-    ModNeg256(neg_two_h_sq, two_h_sq);
-    ModSub256(i, two_h_sq, neg_two_h_sq);  // 4 * h_sq
+    // R = S2 - Y1
+    uint64_t R[4];
+    ModSub256(R, S2, Y1);
     
-    // j = i * h
-    _ModMult(j, i, h);
+    // HH = H^2
+    uint64_t HH[4];
+    _ModSqr(HH, H);
     
-    // v = X1 * i
-    _ModMult(v, X1, i);
+    // HHH = H^3
+    uint64_t HHH[4];
+    _ModMult(HHH, HH, H);
     
-    // new_X = r^2 - j - 2*v (use A - (-A) for 2*v)
-    uint64_t r_sq[4];
-    _ModSqr(r_sq, r);
-    uint64_t neg_v[4];
-    ModNeg256(neg_v, v);
-    uint64_t two_v[4];
-    ModSub256(two_v, v, neg_v);  // 2*v
-    ModSub256(new_X, r_sq, j);
-    ModSub256(new_X, two_v);
+    // U1HH = X1 * H^2
+    uint64_t U1HH[4];
+    _ModMult(U1HH, X1, HH);
     
-    // new_Y = r * (v - new_X) - Y1 * j
-    uint64_t v_minus_X[4];
-    ModSub256(v_minus_X, v, new_X);
-    uint64_t r_vmx[4];
-    _ModMult(r_vmx, r, v_minus_X);
-    uint64_t Y1_j[4];
-    _ModMult(Y1_j, Y1, j);
-    ModSub256(new_Y, r_vmx, Y1_j);
+    // R_sq = R^2
+    uint64_t R_sq[4];
+    _ModSqr(R_sq, R);
     
-    // new_Z = Z1 * h
-    _ModMult(new_Z, Z1, h);
+    // Calculate 2 * U1HH safely via A - (-A)
+    uint64_t neg_U1HH[4], two_U1HH[4];
+    ModNeg256(neg_U1HH, U1HH);
+    ModSub256(two_U1HH, U1HH, neg_U1HH); 
     
+    // X3 = R^2 - H^3 - 2*U1HH
+    uint64_t new_X[4];
+    ModSub256(new_X, R_sq, HHH);
+    ModSub256(new_X, new_X, two_U1HH); 
+    
+    // Y3 = R * (U1HH - X3) - Y1 * H^3
+    uint64_t U1HH_minus_X3[4];
+    ModSub256(U1HH_minus_X3, U1HH, new_X);
+    
+    uint64_t R_times_diff[4];
+    _ModMult(R_times_diff, R, U1HH_minus_X3);
+    
+    uint64_t Y1_times_HHH[4];
+    _ModMult(Y1_times_HHH, Y1, HHH);
+    
+    uint64_t new_Y[4];
+    ModSub256(new_Y, R_times_diff, Y1_times_HHH); 
+    
+    // Z3 = Z1 * H
+    uint64_t new_Z[4];
+    _ModMult(new_Z, Z1, H); 
+    
+    // Commit the new coordinates
     Load256(X3, new_X);
     Load256(Y3, new_Y);
     Load256(Z3, new_Z);
