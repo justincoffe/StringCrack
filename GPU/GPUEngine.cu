@@ -818,7 +818,7 @@ __device__ __forceinline__ int popcount256(const uint64_t key[4]) {
 __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[4],
                                      uint64_t x2[4], uint64_t y2[4],
                                      uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4]) {
-    uint64_t z1z1[4], z1z1_sq[4];
+    uint64_t z1z1[4];
     uint64_t u2[4], s2[4];
     uint64_t h[4], r[4];
     uint64_t i[4], j[4], v[4];
@@ -826,14 +826,13 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
     
     // z1z1 = Z1^2
     _ModSqr(z1z1, Z1);
-    _ModSqr(z1z1_sq, z1z1);
     
-    // u2 = x2 * z1z1
-    _ModMult(u2, z1z1_sq, x2);
+    // u2 = x2 * z1z1 (Z^2)
+    _ModMult(u2, z1z1, x2);
     
-    // s2 = y2 * z1z1 * Z1 = y2 * z1z1^3
+    // s2 = y2 * z1z1 * Z1 = y2 * Z^3
     uint64_t z1z1_z1[4];
-    _ModMult(z1z1_z1, z1z1_sq, Z1);
+    _ModMult(z1z1_z1, z1z1, Z1);
     _ModMult(s2, z1z1_z1, y2);
     
     // h = u2 - X1
