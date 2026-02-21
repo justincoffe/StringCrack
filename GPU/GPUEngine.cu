@@ -951,55 +951,6 @@ __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64
     }
 }
 
-    for (int i = 0; i < G_POW2_TABLE_SIZE; i++) {
-        int limb = i >> 6;
-        int bit  = i & 63;
-        if ((key[limb] >> bit) & 1ULL) {
-            if (!pointSet) {
-                Load256(rx, (uint64_t*)G_POW2_X_EXTENDED[i]);
-                Load256(ry, (uint64_t*)G_POW2_Y_EXTENDED[i]);
-                pointSet = true;
-            } else {
-                uint64_t gx[4], gy[4];
-                Load256(gx, (uint64_t*)G_POW2_X_EXTENDED[i]);
-                Load256(gy, (uint64_t*)G_POW2_Y_EXTENDED[i]);
-
-                uint64_t dx_val[4], dy_val[4], s[4];
-                ModSub256(dx_val, gx, rx);
-                ModSub256(dy_val, gy, ry);
-
-                uint64_t inv[5];
-                Load256(inv, dx_val);
-                inv[4] = 0;
-                _ModInv(inv);
-
-                _ModMult(s, dy_val, inv);
-
-                uint64_t s2[4], new_x[4], new_y[4];
-                _ModSqr(s2, s);
-                ModSub256(new_x, s2, rx);
-                ModSub256(new_x, gx);
-
-                uint64_t tmp[4];
-                ModSub256(tmp, rx, new_x);
-                _ModMult(new_y, s, tmp);
-                ModSub256(new_y, ry);
-
-                Load256(rx, new_x);
-                Load256(ry, new_y);
-            }
-        }
-    }
-
-    if (pointSet) {
-        Load256(px, rx);
-        Load256(py, ry);
-    } else {
-        px[0] = px[1] = px[2] = px[3] = 0;
-        py[0] = py[1] = py[2] = py[3] = 0;
-    }
-}
-
 // comp_keys_openclaw: StringCrack kernel - Bit Injection + Popcount + EC Math
 __global__ void comp_keys_openclaw(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out)
