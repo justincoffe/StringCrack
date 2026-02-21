@@ -130,6 +130,7 @@ void printUsage() {
 	printf(" -lock \"pos:val,...\": Lock bit positions. Example: -lock \"93:0,98:0,99:0,78:0\"\n");
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
+	printf(" -step N: Step size for grid-stride loop. Default: 128\n");
 	exit(-1);
 
 }
@@ -606,6 +607,7 @@ int main(int argc, char* argv[]) {
 	scConfig.popcountTarget = -1;
 	scConfig.popcountMin = 0;
 	scConfig.popcountMax = 256;
+	scConfig.stepSize = 128; // Default step size for grid-stride loop
 	string lockStr = "";
 	
 	// bitcrack mod
@@ -697,6 +699,11 @@ int main(int argc, char* argv[]) {
 			scConfig.popcountMin = stoi(prStr.substr(0, colonPos));
 			scConfig.popcountMax = stoi(prStr.substr(colonPos + 1));
 			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-step") == 0) {
+			a++;
+			scConfig.stepSize = getInt("step", argv[a]);
 			a++;
 		}
 

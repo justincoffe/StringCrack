@@ -780,6 +780,7 @@ __device__ __constant__ uint64_t d_basePointY[4];
 __device__ __constant__ uint64_t d_free_GX[256][4];
 __device__ __constant__ uint64_t d_free_GY[256][4];
 __device__ __constant__ int      d_lockedPopcount;
+__device__ __constant__ int      d_stepSize;
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
@@ -988,8 +989,8 @@ __global__ void comp_keys_openclaw(address_t* sAddress, uint32_t* lookup32, uint
     Load256(baseAccX, d_basePointX);
     Load256(baseAccY, d_basePointY);
 
-    // Process STEP_SIZE (1024) seeds per thread
-    for (uint32_t step = 0; step < STEP_SIZE; step++) {
+    // Process d_stepSize seeds per thread
+    for (uint32_t step = 0; step < d_stepSize; step++) {
         
         // Calculate the absolute offset for this specific step
         uint64_t current_offset = (uint64_t)tid + ((uint64_t)step * (uint64_t)stride);
@@ -1144,6 +1145,10 @@ bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
     if (err != cudaSuccess) { printf("GPUEngine: d_free_GY: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
+    
+    // Upload stepSize to GPU
+    err = cudaMemcpyToSymbol(d_stepSize, &config->stepSize, sizeof(int));
+    if (err != cudaSuccess) { printf("GPUEngine: d_stepSize: %s\n", cudaGetErrorString(err)); return false; }
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
     return true;

@@ -81,6 +81,9 @@ typedef struct {
     
     // Locked popcount (precomputed for O(1) filter)
     int lockedPopcount;
+    
+    // Step size for grid-stride loop (from -step CLI argument)
+    int stepSize;
 
     // Seed offset: -start HEX sets this as the starting seed
     // -range N sets the power-of-two size of the seed space

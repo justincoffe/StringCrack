@@ -1006,10 +1006,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 			if (useStringCrack) {
 				// Use Int for full 256-bit batch offset calculation
-				// ADD * (uint64_t)STEP_SIZE to the math
+				// ADD * stepSize to the math
 				Int batchOffsetInt;
 				batchOffsetInt.Set(&scConfig->seedOffsetInt);
-				batchOffsetInt.Add((uint64_t)idxcount * (uint64_t)numThreadsGPU * (uint64_t)STEP_SIZE);
+				batchOffsetInt.Add((uint64_t)idxcount * (uint64_t)numThreadsGPU * (uint64_t)scConfig->stepSize);
 				uint64_t batchOffsetLo = batchOffsetInt.bits64[0];
 				uint64_t batchOffsetHi = batchOffsetInt.bits64[1];
 				ok = g.LaunchOpenClaw(found, batchOffsetLo, batchOffsetHi, true);
@@ -1037,10 +1037,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				if (useStringCrack) {
 					// Reconstruct key from seed via expand_bits (CPU side)
 					// Use Int for full 256-bit support
-					// 1. ADD * (uint64_t)STEP_SIZE to the previous batch calculation
+					// 1. ADD * stepSize to the previous batch calculation
 					Int prevBatchInt;
 					prevBatchInt.Set(&scConfig->seedOffsetInt);
-					prevBatchInt.Add((uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU * (uint64_t)STEP_SIZE);
+					prevBatchInt.Add((uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU * (uint64_t)scConfig->stepSize);
 					
 					// 2. Add BOTH the thread ID (it.thId) AND the step offset (it.incr * numThreadsGPU)
 					Int seedInt;
@@ -1095,12 +1095,14 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			keycount.Add(STEP_SIZE);
 			keycount.Mult(numThreadsGPU);
 
-			keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
-			keys_n = keys_n * idxcount;
-		
-			
-
-			
+			if (useStringCrack) {
+				// StringCrack now checks stepSize seeds per thread natively!
+				keys_n = 1ULL * numThreadsGPU * scConfig->stepSize;
+				keys_n = keys_n * idxcount;
+			} else {
+				keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
+				keys_n = keys_n * idxcount;
+			}
 
 		} else {
 			printf("Pausing...\r");
@@ -1115,8 +1117,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		// StringCrack: Use custom progress display
 		if (useStringCrack) {
-			// Calculate current seed position = offset + (idxcount * numThreadsGPU * STEP_SIZE)
-			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU * (uint64_t)STEP_SIZE;
+			// Calculate current seed position = offset + (idxcount * numThreadsGPU * stepSize)
+			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU * (uint64_t)scConfig->stepSize;
 			Int currentSeed;
 			currentSeed.Set(&scConfig->seedOffsetInt);
 			currentSeed.Add(scanned);
@@ -1135,8 +1137,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		// StringCrack stop condition: check if we've scanned all seeds
 		if (useStringCrack) {
-			// Calculate current seed = offset + (idxcount * numThreadsGPU * STEP_SIZE)
-			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU * (uint64_t)STEP_SIZE;
+			// Calculate current seed = offset + (idxcount * numThreadsGPU * stepSize)
+			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU * (uint64_t)scConfig->stepSize;
 			Int currentSeed;
 			currentSeed.Set(&scConfig->seedOffsetInt);
 			currentSeed.Add(scanned);
