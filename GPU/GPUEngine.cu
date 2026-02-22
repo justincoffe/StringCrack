@@ -1040,14 +1040,14 @@ __global__ void comp_keys_openclaw(
         accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is 1 (Neutral for multiplication)
 
         if (valid) {
-            // 3. Windowed Seed Iteration (5 bits at a time)
-            int numWindows = (d_numFreeBits + 4) / 5;  // 5 bits per window
+            // 3. Windowed Seed Iteration (4 bits at a time)
+            int numWindows = (d_numFreeBits + 3) / 4;  // 4 bits per window
             
             uint64_t seed = seed_lo;
             int w = 0;
             #pragma unroll 1
-            for (; w < 14 && w < numWindows; w++) {
-                uint32_t nibble = seed & 0x1F;  // 5 bits (0-31)
+            for (; w < 16 && w < numWindows; w++) {
+                uint32_t nibble = seed & 0xF;  // 4 bits (0-15)
                 if (nibble > 0) {
                     uint64_t curGX[4], curGY[4];
                     Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
@@ -1057,13 +1057,13 @@ __global__ void comp_keys_openclaw(
                     jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
                     Load256(accX, newX); Load256(accY, newY); Load256(accZ, newZ);
                 }
-                seed >>= 5;  // Shift 5 bits
+                seed >>= 4;  // Shift 4 bits
             }
 
             seed = seed_hi;
             #pragma unroll 1
             for (; w < numWindows; w++) {
-                uint32_t nibble = seed & 0x1F;  // 5 bits (0-31)
+                uint32_t nibble = seed & 0xF;  // 4 bits (0-15)
                 if (nibble > 0) {
                     uint64_t curGX[4], curGY[4];
                     Load256(curGX, (uint64_t*)d_window_GX[w][nibble]);
@@ -1073,7 +1073,7 @@ __global__ void comp_keys_openclaw(
                     jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
                     Load256(accX, newX); Load256(accY, newY); Load256(accZ, newZ);
                 }
-                seed >>= 5;  // Shift 5 bits
+                seed >>= 4;  // Shift 4 bits
             }
             
             // Safety: If Z hit 0 (Point at Infinity), poison valid to prevent warp-wide div by zero
@@ -1291,22 +1291,22 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
     memcpy(config->basePointX, basePoint.x.bits64, 32);
     memcpy(config->basePointY, basePoint.y.bits64, 32);
 
-    // 3. Compact the G table for 5-bit Windows
-    int numWindows = (config->numFreeBits + 4) / 5;  // 5 bits per window
+    // 3. Compact the G table for 4-bit Windows
+    int numWindows = (config->numFreeBits + 3) / 4;  // 4 bits per window
     
     // Clear index 0 (Point at Infinity) for all windows to prevent garbage data
     memset(config->window_GX, 0, sizeof(config->window_GX));
     memset(config->window_GY, 0, sizeof(config->window_GY));
 
     for(int w = 0; w < numWindows; w++) {
-        // Calculate all 31 non-zero combinations for this 5-bit window
-        for(int val = 1; val < 32; val++) {
+        // Calculate all 15 non-zero combinations for this 4-bit window
+        for(int val = 1; val < 16; val++) {
             Int windowKey;
             windowKey.SetInt32(0);
             
-            for(int bit = 0; bit < 5; bit++) {
+            for(int bit = 0; bit < 4; bit++) {
                 if ((val >> bit) & 1) {
-                    int pos_idx = w * 5 + bit;
+                    int pos_idx = w * 4 + bit;
                     if (pos_idx < config->numFreeBits) {
                         int actualPos = config->freeBitPositions[pos_idx];
                         windowKey.bits64[actualPos >> 6] |= (1ULL << (actualPos & 63));
@@ -1326,7 +1326,7 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
     printf("[StringCrack]   Base Y: %016llX %016llX %016llX %016llX\n",
            (unsigned long long)config->basePointY[3], (unsigned long long)config->basePointY[2],
            (unsigned long long)config->basePointY[1], (unsigned long long)config->basePointY[0]);
-    printf("[StringCrack] Window tables: %d windows (5-bit each, 32 values per window)\n", numWindows);
+    printf("[StringCrack] Window tables: %d windows (4-bit each, 16 values per window)\n", numWindows);
     fflush(stdout);
 }
 
