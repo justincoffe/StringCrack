@@ -977,6 +977,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 	endOfSearch = false;
 
+	// Track offsets per stream for async double-buffering
+	uint64_t streamOffsetLo[2] = {0, 0};
+	uint64_t streamOffsetHi[2] = {0, 0};
+	bool firstBatch = true;
 
 	while (ok && !endOfSearch) {
 
@@ -1012,17 +1016,71 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				uint64_t batchOffsetLo = batchOffsetInt.bits64[0];
 				uint64_t batchOffsetHi = batchOffsetInt.bits64[1];
 				
+				// Determine which stream we are about to use
+				int current_s = g.currentStep % 2;
+				
+				// SAVE the offset for this specific stream before launching
+				streamOffsetLo[current_s] = batchOffsetLo;
+				streamOffsetHi[current_s] = batchOffsetHi;
+				
 				// Asynchronous double-buffered launch
 				g.LaunchOpenClawAsync(batchOffsetLo, batchOffsetHi);
 				
 				// Process previous batch results while GPU is working on current batch
-				if (idxcount > 0) {
-					int prevStep = g.currentStep - 2;
-					uint32_t nbFound = g.SyncAndGetResult(prevStep, found);
+				if (!firstBatch) {
+					int prev_s = (g.currentStep - 2) % 2;
+					uint32_t nbFound = g.SyncAndGetResult(prev_s, found);
 					if (nbFound > 0) {
-						// Found items will be processed in the loop below
+						// Process found items using the saved offset for this stream
+						for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
+							ITEM it = found[i];
+							
+							// Use the offset that was used when this batch was launched
+							Int prevBatchInt;
+							prevBatchInt.Set(&scConfig->seedOffsetInt);
+							prevBatchInt.Add(streamOffsetLo[prev_s]);
+							if (streamOffsetHi[prev_s] > 0) {
+								prevBatchInt.bits64[1] = streamOffsetHi[prev_s];
+							}
+							Int seedInt;
+							seedInt.Set(&prevBatchInt);
+							seedInt.Add((uint64_t)it.thId);
+							
+							uint64_t keyBits[4];
+							keyBits[0] = scConfig->lockVals[0];
+							keyBits[1] = scConfig->lockVals[1];
+							keyBits[2] = scConfig->lockVals[2];
+							keyBits[3] = scConfig->lockVals[3];
+							
+							uint64_t seedLo = seedInt.bits64[0];
+							for (int fb = 0; fb < 64 && fb < scConfig->numFreeBits; fb++) {
+								if (seedLo & 1ULL) {
+									int pos = scConfig->freeBitPositions[fb];
+									keyBits[pos >> 6] |= (1ULL << (pos & 63));
+								}
+								seedLo >>= 1;
+							}
+							if (scConfig->numFreeBits > 64) {
+								uint64_t seedHi = seedInt.bits64[1];
+								for (int fb = 64; fb < scConfig->numFreeBits && fb < 128; fb++) {
+									if (seedHi & 1ULL) {
+										int pos = scConfig->freeBitPositions[fb];
+										keyBits[pos >> 6] |= (1ULL << (pos & 63));
+									}
+									seedHi >>= 1;
+								}
+							}
+							privkey.SetInt32(0);
+							privkey.bits64[0] = keyBits[0];
+							privkey.bits64[1] = keyBits[1];
+							privkey.bits64[2] = keyBits[2];
+							privkey.bits64[3] = keyBits[3];
+							checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
+						}
+						found.clear();
 					}
 				}
+				firstBatch = false;
 			} else {
 				ok = g.Launch(found, true);
 			}
@@ -1203,8 +1261,55 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 	}
 
+	// Process the final batch for async StringCrack mode
+	if (useStringCrack && !firstBatch) {
+		int last_s = (g.currentStep - 1) % 2;
+		uint32_t nbFound = g.SyncAndGetResult(last_s, found);
+		if (nbFound > 0) {
+			for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
+				ITEM it = found[i];
+				Int prevBatchInt;
+				prevBatchInt.Set(&scConfig->seedOffsetInt);
+				prevBatchInt.Add(streamOffsetLo[last_s]);
+				if (streamOffsetHi[last_s] > 0) {
+					prevBatchInt.bits64[1] = streamOffsetHi[last_s];
+				}
+				Int seedInt;
+				seedInt.Set(&prevBatchInt);
+				seedInt.Add((uint64_t)it.thId);
+				uint64_t keyBits[4];
+				keyBits[0] = scConfig->lockVals[0];
+				keyBits[1] = scConfig->lockVals[1];
+				keyBits[2] = scConfig->lockVals[2];
+				keyBits[3] = scConfig->lockVals[3];
+				uint64_t seedLo = seedInt.bits64[0];
+				for (int fb = 0; fb < 64 && fb < scConfig->numFreeBits; fb++) {
+					if (seedLo & 1ULL) {
+						int pos = scConfig->freeBitPositions[fb];
+						keyBits[pos >> 6] |= (1ULL << (pos & 63));
+					}
+					seedLo >>= 1;
+				}
+				if (scConfig->numFreeBits > 64) {
+					uint64_t seedHi = seedInt.bits64[1];
+					for (int fb = 64; fb < scConfig->numFreeBits && fb < 128; fb++) {
+						if (seedHi & 1ULL) {
+							int pos = scConfig->freeBitPositions[fb];
+							keyBits[pos >> 6] |= (1ULL << (pos & 63));
+						}
+						seedHi >>= 1;
+					}
+				}
+				privkey.SetInt32(0);
+				privkey.bits64[0] = keyBits[0];
+				privkey.bits64[1] = keyBits[1];
+				privkey.bits64[2] = keyBits[2];
+				privkey.bits64[3] = keyBits[3];
+				checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
+			}
+		}
+	}
 
-	
 
 	ph->isRunning = false;
 
