@@ -1181,10 +1181,23 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		// StringCrack: Use custom progress display (throttled to every ~0.5 seconds)
 		if (useStringCrack) {
-			// Only update display every ~0.5 seconds to avoid overhead
 			static double lastStatsTime = 0.0;
+			static uint64_t lastStatsKeys = 0;
+			static double real_time_speed = 0.0;
+
 			if (ttot - lastStatsTime >= 0.5 || lastStatsTime == 0.0) {
+				
+				// 1. Calculate Real-Time Speed specifically over this ~0.5s window
+				double delta_time = ttot - lastStatsTime;
+				uint64_t delta_keys = keys_n - lastStatsKeys;
+
+				if (lastStatsTime > 0.0 && delta_time > 0.0) {
+					real_time_speed = static_cast<double>(delta_keys) / (delta_time * 1000000.0);
+				}
+
+				// 2. Update tracking variables for the next 0.5s window
 				lastStatsTime = ttot;
+				lastStatsKeys = keys_n;
 				
 				// Calculate current seed position = offset + (idxcount * numThreadsGPU)
 				uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
@@ -1195,9 +1208,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				// Use seedEndInt for progress if -end was specified, otherwise use seedCountInt
 				Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
 				
+				// 3. Pass the newly calculated real_time_speed to your print function
 				PrintStatsStringCrack(keys_n, keys_n_prev, ttot, tprev,
 					currentSeed, limitSeed, scConfig->seedOffsetInt,
-					scConfig->numLockedBits, nbFoundKey);
+					scConfig->numLockedBits, nbFoundKey, real_time_speed);
 			}
 		} else {
 			PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
@@ -1315,7 +1329,8 @@ void VanitySearch::PrintStatsStringCrack(
     uint64_t keys_n, uint64_t keys_n_prev, 
     double ttot, double tprev, 
     Int& seedsScanned, Int& seedCount, Int& seedStart,
-    int numLockedBits, int nbFound) 
+    int numLockedBits, int nbFound,
+    double realTimeSpeed) 
 {
 	double speed;
 	double perc;
@@ -1349,7 +1364,9 @@ void VanitySearch::PrintStatsStringCrack(
 		perc = 0.0;
 	}
 
-	if (ttot > 0.0001) {
+	if (realTimeSpeed > 0.0) {
+		speed = realTimeSpeed;
+	} else if (ttot > 0.0001) {
 		speed = (double)keys_n / (ttot * 1000000.0);
 	} else {
 		speed = 0.0;
