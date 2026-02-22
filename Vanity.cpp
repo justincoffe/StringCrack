@@ -1035,16 +1035,12 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 						for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
 							ITEM it = found[i];
 							
-							// Use the offset that was used when this batch was launched
-							Int prevBatchInt;
-							prevBatchInt.Set(&scConfig->seedOffsetInt);
-							prevBatchInt.Add(streamOffsetLo[prev_s]);
-							if (streamOffsetHi[prev_s] > 0) {
-								prevBatchInt.bits64[1] = streamOffsetHi[prev_s];
-							}
+							// Reconstruct the EXACT 128-bit seed that was sent to the kernel for this batch
 							Int seedInt;
-							seedInt.Set(&prevBatchInt);
-							seedInt.Add((uint64_t)it.thId);
+							seedInt.SetInt32(0); // Clear it
+							seedInt.bits64[0] = streamOffsetLo[prev_s];
+							seedInt.bits64[1] = streamOffsetHi[prev_s];
+							seedInt.Add((uint64_t)it.thId); // Add the thread ID just like the GPU did
 							
 							uint64_t keyBits[4];
 							keyBits[0] = scConfig->lockVals[0];
@@ -1268,15 +1264,12 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		if (nbFound > 0) {
 			for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
 				ITEM it = found[i];
-				Int prevBatchInt;
-				prevBatchInt.Set(&scConfig->seedOffsetInt);
-				prevBatchInt.Add(streamOffsetLo[last_s]);
-				if (streamOffsetHi[last_s] > 0) {
-					prevBatchInt.bits64[1] = streamOffsetHi[last_s];
-				}
+				// Reconstruct the EXACT 128-bit seed that was sent to the kernel for this batch
 				Int seedInt;
-				seedInt.Set(&prevBatchInt);
-				seedInt.Add((uint64_t)it.thId);
+				seedInt.SetInt32(0); // Clear it
+				seedInt.bits64[0] = streamOffsetLo[last_s];
+				seedInt.bits64[1] = streamOffsetHi[last_s];
+				seedInt.Add((uint64_t)it.thId); // Add the thread ID just like the GPU did
 				uint64_t keyBits[4];
 				keyBits[0] = scConfig->lockVals[0];
 				keyBits[1] = scConfig->lockVals[1];
