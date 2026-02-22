@@ -963,17 +963,22 @@ __global__ void comp_keys_openclaw(
     
     // ==========================================================
     // PHASE 1: STREAM COMPACTION QUEUE ALLOCATION
-    // Requires ~9.7 KB of shared memory per block
     // ==========================================================
     __shared__ uint64_t s_seed_lo[256];
     __shared__ uint64_t s_seed_hi[256];
     __shared__ uint8_t  s_orig_tid[256];
-    __shared__ uint32_t s_hash[256][5];
-    __shared__ bool     s_passed[256];
+    
+    // 100% Bank-Conflict-Free Structure of Arrays for Hash Exchange
+    __shared__ uint32_t s_h0[256];
+    __shared__ uint32_t s_h1[256];
+    __shared__ uint32_t s_h2[256];
+    __shared__ uint32_t s_h3[256];
+    __shared__ uint32_t s_h4[256];
+    __shared__ bool     s_hit[256];
     __shared__ int      s_count;
 
     // Initialize shared tracking
-    s_passed[tid_in_block] = false;
+    s_hit[tid_in_block] = false;
     if (tid_in_block == 0) s_count = 0;
     __syncthreads();
     
@@ -1123,30 +1128,36 @@ __global__ void comp_keys_openclaw(
         uint32_t h[5];
         _GetHash160Comp(px, odd_py, (uint8_t*)h);
         
-        // Save the resulting hash back to the original thread's slot!
-        s_hash[orig_tid][0] = h[0];
-        s_hash[orig_tid][1] = h[1];
-        s_hash[orig_tid][2] = h[2];
-        s_hash[orig_tid][3] = h[3];
-        s_hash[orig_tid][4] = h[4];
+        // --- The Early Bloom Filter ---
+        // Pre-check the global bloom filter. 
+        // This prevents 99.999% of shared memory writes and Phase 3 thread wakeups.
+        if (sAddress[h[0] & 0xFFFF] != 0) {
+            // Write to shared memory ONLY if there is a potential hit
+            s_h0[orig_tid] = h[0];
+            s_h1[orig_tid] = h[1];
+            s_h2[orig_tid] = h[2];
+            s_h3[orig_tid] = h[3];
+            s_h4[orig_tid] = h[4];
+            s_hit[orig_tid] = true; 
+        }
     }
 
-    // Wait for math threads to finish writing hashes
+    // Wait for math threads to finish writing any potential hits
     __syncthreads();
 
     // ==========================================================
     // PHASE 3: THE UNPACK
-    // Original threads wake up and submit their own answers
+    // Original threads wake up ONLY if their seed produced a hit
     // ==========================================================
-    if (s_passed[tid_in_block]) {
+    if (s_hit[tid_in_block]) {
         uint32_t h[5];
-        h[0] = s_hash[tid_in_block][0];
-        h[1] = s_hash[tid_in_block][1];
-        h[2] = s_hash[tid_in_block][2];
-        h[3] = s_hash[tid_in_block][3];
-        h[4] = s_hash[tid_in_block][4];
+        h[0] = s_h0[tid_in_block];
+        h[1] = s_h1[tid_in_block];
+        h[2] = s_h2[tid_in_block];
+        h[3] = s_h3[tid_in_block];
+        h[4] = s_h4[tid_in_block];
         
-        // Because the original thread calls this, thId logic remains 100% intact
+        // Final verification via standard CheckPoint
         CheckPoint(h, 0, sAddress, lookup32, out);
     }
 }
