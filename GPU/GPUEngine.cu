@@ -845,77 +845,36 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
                                      uint64_t x2[4], uint64_t y2[4],
                                      uint64_t X3[4], uint64_t Y3[4], uint64_t Z3[4]) {
     
-    // Z1Z1 = Z1^2
-    uint64_t Z1Z1[4];
-    _ModSqr(Z1Z1, Z1);
+    // Minimal register footprint: Only 4 temporary 256-bit variables
+    uint64_t T1[4], T2[4], T3[4], T4[4];
     
-    // U2 = x2 * Z1^2
-    uint64_t U2[4];
-    _ModMult(U2, Z1Z1, x2);
+    _ModSqr(T1, Z1);               // T1 = Z1^2
+    _ModMult(T2, T1, x2);          // T2 = U2 = x2 * Z1^2
+    _ModMult(T3, T1, Z1);          // T3 = Z1^3
+    _ModMult(T4, T3, y2);          // T4 = S2 = y2 * Z1^3
     
-    // Z1_cubed = Z1^3
-    uint64_t Z1_cubed[4];
-    _ModMult(Z1_cubed, Z1Z1, Z1);
+    ModSub256(T2, T2, X1);         // T2 = H = U2 - X1
+    ModSub256(T4, T4, Y1);         // T4 = R = S2 - Y1
     
-    // S2 = y2 * Z1^3
-    uint64_t S2[4];
-    _ModMult(S2, Z1_cubed, y2);
+    _ModSqr(T1, T2);               // T1 = HH = H^2
+    _ModMult(T3, T1, T2);          // T3 = HHH = H^3
+    _ModMult(T1, X1, T1);          // T1 = U1HH = X1 * H^2
     
-    // H = U2 - X1
-    uint64_t H[4];
-    ModSub256(H, U2, X1);
+    _ModSqr(X3, T4);               // X3 = R^2
+    ModSub256(X3, X3, T3);         // X3 = R^2 - H^3
     
-    // R = S2 - Y1
-    uint64_t R[4];
-    ModSub256(R, S2, Y1);
+    uint64_t tmp[4], tmp2[4];      // Two extra arrays for safe subtraction
+    ModNeg256(tmp, T1);
+    ModSub256(tmp2, T1, tmp);      // tmp2 = 2 * U1HH
+    ModSub256(X3, X3, tmp2);       // X3 = R^2 - H^3 - 2*U1HH
     
-    // HH = H^2
-    uint64_t HH[4];
-    _ModSqr(HH, H);
+    ModSub256(Y3, T1, X3);         // Y3 = U1HH - X3
+    _ModMult(Y3, T4, Y3);          // Y3 = R * (U1HH - X3)
     
-    // HHH = H^3
-    uint64_t HHH[4];
-    _ModMult(HHH, HH, H);
+    _ModMult(tmp, Y1, T3);         // tmp = Y1 * HHH
+    ModSub256(Y3, Y3, tmp);        // Y3 = R * (U1HH - X3) - Y1 * HHH
     
-    // U1HH = X1 * H^2
-    uint64_t U1HH[4];
-    _ModMult(U1HH, X1, HH);
-    
-    // R_sq = R^2
-    uint64_t R_sq[4];
-    _ModSqr(R_sq, R);
-    
-    // Calculate 2 * U1HH safely via A - (-A)
-    uint64_t neg_U1HH[4], two_U1HH[4];
-    ModNeg256(neg_U1HH, U1HH);
-    ModSub256(two_U1HH, U1HH, neg_U1HH); 
-    
-    // X3 = R^2 - H^3 - 2*U1HH
-    uint64_t new_X[4];
-    ModSub256(new_X, R_sq, HHH);
-    ModSub256(new_X, new_X, two_U1HH); 
-    
-    // Y3 = R * (U1HH - X3) - Y1 * H^3
-    uint64_t U1HH_minus_X3[4];
-    ModSub256(U1HH_minus_X3, U1HH, new_X);
-    
-    uint64_t R_times_diff[4];
-    _ModMult(R_times_diff, R, U1HH_minus_X3);
-    
-    uint64_t Y1_times_HHH[4];
-    _ModMult(Y1_times_HHH, Y1, HHH);
-    
-    uint64_t new_Y[4];
-    ModSub256(new_Y, R_times_diff, Y1_times_HHH); 
-    
-    // Z3 = Z1 * H
-    uint64_t new_Z[4];
-    _ModMult(new_Z, Z1, H); 
-    
-    // Commit the new coordinates
-    Load256(X3, new_X);
-    Load256(Y3, new_Y);
-    Load256(Z3, new_Z);
+    _ModMult(Z3, Z1, T2);          // Z3 = Z1 * H
 }
 
 // Convert Jacobian (X, Y, Z) to Affine (x, y)
