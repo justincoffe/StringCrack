@@ -904,24 +904,13 @@ __device__ void jacobian_add_affine_inplace(uint64_t X1[4], uint64_t Y1[4], uint
     _ModSqr(X3, T4);               // X3 = R^2
     ModSub256(X3, X3, T3);         // X3 = R^2 - H^3
     
-    // Fast 2*U1HH (Eliminates ModNeg and extra arrays)
+    // Fast 2*U1HH (Mathematically safe, natively branchless via our ModSub256)
     uint64_t two_U1HH[4];
-    asm volatile(
-        "{\n\t"
-        ".reg .pred q;\n\t"
-        "add.cc.u64 %0, %4, %4;\n\t"
-        "addc.cc.u64 %1, %5, %5;\n\t"
-        "addc.cc.u64 %2, %6, %6;\n\t"
-        "addc.cc.u64 %3, %7, %7;\n\t"
-        "setp.ge.u64 q, %0, 0xFFFFFFFEFFFFFC2F;\n\t" 
-        "@q sub.cc.u64 %0, %0, 0xFFFFFFFEFFFFFC2F;\n\t"
-        "@q subc.cc.u64 %1, %1, 0xFFFFFFFFFFFFFFFF;\n\t"
-        "@q subc.cc.u64 %2, %2, 0xFFFFFFFFFFFFFFFF;\n\t"
-        "@q subc.u64 %3, %3, 0xFFFFFFFFFFFFFFFF;\n\t"
-        "}\n\t"
-        : "=l"(two_U1HH[0]),"=l"(two_U1HH[1]),"=l"(two_U1HH[2]),"=l"(two_U1HH[3])
-        : "l"(T1[0]),"l"(T1[1]),"l"(T1[2]),"l"(T1[3])
-    );
+    uint64_t tmp_neg[4];
+    
+    // T1 - (-T1 mod P) mod P = 2 * T1 mod P
+    ModNeg256(tmp_neg, T1);
+    ModSub256(two_U1HH, T1, tmp_neg);   
     
     ModSub256(X3, X3, two_U1HH);   // X3 = R^2 - H^3 - 2*U1HH
     
@@ -1042,8 +1031,11 @@ void comp_keys_openclaw(
     asm volatile ("add.cc.u64 %0, %0, %1;" : "+l"(seed_lo) : "l"((uint64_t)tid));
     asm volatile ("addc.u64 %0, %0, 0;" : "+l"(seed_hi));
 
-    // Correctness Fix: Mask out bits beyond numFreeBits before counting!
-    int pc = __popcll(seed_lo & d_seedMaskLo) + __popcll(seed_hi & d_seedMaskHi) + d_lockedPopcount;
+    // Fix: Mask the seeds BEFORE counting so the safe bits enter Phase 2's queue
+    seed_lo &= d_seedMaskLo;
+    seed_hi &= d_seedMaskHi;
+
+    int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
     bool is_valid = (pc >= d_popcountMin && pc <= d_popcountMax);
     
     // 2. Synchronize the warp and get a bitmask of all passing threads
