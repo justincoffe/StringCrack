@@ -953,16 +953,33 @@ __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64
     }
 }
 
-// comp_keys_openclaw: StringCrack kernel - Direct Seed Iteration + Popcount + EC Math
+// comp_keys_openclaw: StringCrack kernel - Stream Compaction + Direct Seed Iteration + EC Math
 __global__ void comp_keys_openclaw(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     uint64_t d_batchOffsetLo, uint64_t d_batchOffsetHi)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid_in_block = threadIdx.x;
+    
+    // ==========================================================
+    // PHASE 1: STREAM COMPACTION QUEUE ALLOCATION
+    // Requires ~9.7 KB of shared memory per block
+    // ==========================================================
+    __shared__ uint64_t s_seed_lo[256];
+    __shared__ uint64_t s_seed_hi[256];
+    __shared__ uint8_t  s_orig_tid[256];
+    __shared__ uint32_t s_hash[256][5];
+    __shared__ bool     s_passed[256];
+    __shared__ int      s_count;
+
+    // Initialize shared tracking
+    s_passed[tid_in_block] = false;
+    if (tid_in_block == 0) s_count = 0;
+    __syncthreads();
     
     // 128-bit Seed Generation with carry propagation
-    uint64_t seed_lo = d_batchOffsetLo; // Now reads perfectly from the argument
-    uint64_t seed_hi = d_batchOffsetHi; // Now reads perfectly from the argument
+    uint64_t seed_lo = d_batchOffsetLo; 
+    uint64_t seed_hi = d_batchOffsetHi; 
     
     // Add tid to lower 64 bits
     asm volatile ("add.cc.u64 %0, %0, %1;" 
@@ -972,85 +989,134 @@ __global__ void comp_keys_openclaw(
     asm volatile ("addc.u64 %0, %0, 0;" 
                  : "+l"(seed_hi));
 
-    // 1. O(1) Popcount Filtering BEFORE any arrays are built
+    // O(1) Popcount Filtering
     int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
-    if (pc < d_popcountMin || pc > d_popcountMax) return;
-
-    // 2. Initialize Jacobian Accumulator directly with the CPU Base Point
-    uint64_t accX[4], accY[4], accZ[4];
-    Load256(accX, d_basePointX);
-    Load256(accY, d_basePointY);
-    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
-
-    // 3. Direct Seed Iteration (8-Bit Windows)
-    int num_windows = (d_numFreeBits + 7) / 8;
     
-    // --- Process lower 64 bits (Up to 8 windows) ---
-    uint64_t seed = seed_lo;
-    for (int w = 0; w < 8 && w < num_windows; w++) {
-        int byte_val = seed & 0xFF;
-        
-        if (byte_val != 0) {
-            // Flattened 2D array index: (window * 256 + byte_val) * 4
-            int idx = (w * 256 + byte_val) * 4; 
-            
-            uint64_t curGX[4], curGY[4];
-            // __ldg forces read-only cache, perfect for lookup tables
-            curGX[0] = __ldg(&d_window_GX[idx + 0]);
-            curGX[1] = __ldg(&d_window_GX[idx + 1]);
-            curGX[2] = __ldg(&d_window_GX[idx + 2]);
-            curGX[3] = __ldg(&d_window_GX[idx + 3]);
-            curGY[0] = __ldg(&d_window_GY[idx + 0]);
-            curGY[1] = __ldg(&d_window_GY[idx + 1]);
-            curGY[2] = __ldg(&d_window_GY[idx + 2]);
-            curGY[3] = __ldg(&d_window_GY[idx + 3]);
+    // If thread passes, atomically push seed into the dense shared queue
+    if (pc >= d_popcountMin && pc <= d_popcountMax) {
+        int q_idx = atomicAdd(&s_count, 1);
+        s_seed_lo[q_idx] = seed_lo;
+        s_seed_hi[q_idx] = seed_hi;
+        s_orig_tid[q_idx] = tid_in_block;
+        s_passed[tid_in_block] = true; // Mark original thread as alive
+    }
+    
+    // Wait for all threads in the block to finish filtering
+    __syncthreads();
 
-            uint64_t newX[4], newY[4], newZ[4];
-            jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+    // --- Fast-Path Early Exit ---
+    // If no threads survived the filter, drop the entire block instantly
+    if (s_count == 0) return;
+
+    // ==========================================================
+    // PHASE 2: 100% EFFICIENT MATH EXECUTION
+    // Only threads 0 to s_count execute this, completely packed
+    // ==========================================================
+    if (tid_in_block < s_count) {
+        // Pull dense seed from queue
+        uint64_t my_seed_lo = s_seed_lo[tid_in_block];
+        uint64_t my_seed_hi = s_seed_hi[tid_in_block];
+        uint8_t orig_tid = s_orig_tid[tid_in_block];
+
+        // Initialize Jacobian Accumulator directly with the CPU Base Point
+        uint64_t accX[4], accY[4], accZ[4];
+        Load256(accX, d_basePointX);
+        Load256(accY, d_basePointY);
+        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
+
+        // Direct Seed Iteration (8-Bit Windows)
+        int num_windows = (d_numFreeBits + 7) / 8;
+        
+        // --- Process lower 64 bits (Up to 8 windows) ---
+        uint64_t seed = my_seed_lo;
+        for (int w = 0; w < 8 && w < num_windows; w++) {
+            int byte_val = seed & 0xFF;
             
-            Load256(accX, newX);
-            Load256(accY, newY);
-            Load256(accZ, newZ);
+            if (byte_val != 0) {
+                int idx = (w * 256 + byte_val) * 4; 
+                
+                uint64_t curGX[4], curGY[4];
+                curGX[0] = __ldg(&d_window_GX[idx + 0]);
+                curGX[1] = __ldg(&d_window_GX[idx + 1]);
+                curGX[2] = __ldg(&d_window_GX[idx + 2]);
+                curGX[3] = __ldg(&d_window_GX[idx + 3]);
+                curGY[0] = __ldg(&d_window_GY[idx + 0]);
+                curGY[1] = __ldg(&d_window_GY[idx + 1]);
+                curGY[2] = __ldg(&d_window_GY[idx + 2]);
+                curGY[3] = __ldg(&d_window_GY[idx + 3]);
+
+                uint64_t newX[4], newY[4], newZ[4];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                
+                Load256(accX, newX);
+                Load256(accY, newY);
+                Load256(accZ, newZ);
+            }
+            seed >>= 8;
         }
-        seed >>= 8;
+
+        // --- Process upper 64 bits (Windows 8 to 15) ---
+        seed = my_seed_hi;
+        for (int w = 8; w < 16 && w < num_windows; w++) {
+            int byte_val = seed & 0xFF;
+            
+            if (byte_val != 0) {
+                int idx = (w * 256 + byte_val) * 4; 
+                
+                uint64_t curGX[4], curGY[4];
+                curGX[0] = __ldg(&d_window_GX[idx + 0]);
+                curGX[1] = __ldg(&d_window_GX[idx + 1]);
+                curGX[2] = __ldg(&d_window_GX[idx + 2]);
+                curGX[3] = __ldg(&d_window_GX[idx + 3]);
+                curGY[0] = __ldg(&d_window_GY[idx + 0]);
+                curGY[1] = __ldg(&d_window_GY[idx + 1]);
+                curGY[2] = __ldg(&d_window_GY[idx + 2]);
+                curGY[3] = __ldg(&d_window_GY[idx + 3]);
+
+                uint64_t newX[4], newY[4], newZ[4];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                
+                Load256(accX, newX);
+                Load256(accY, newY);
+                Load256(accZ, newZ);
+            }
+            seed >>= 8;
+        }
+
+        // Convert back to Affine and Hash
+        uint64_t px[4], py[4];
+        jacobian_to_affine(accX, accY, accZ, px, py);
+
+        uint8_t odd_py = (uint8_t)(py[0] & 1);
+        uint32_t h[5];
+        _GetHash160Comp(px, odd_py, (uint8_t*)h);
+        
+        // Save the resulting hash back to the original thread's slot!
+        s_hash[orig_tid][0] = h[0];
+        s_hash[orig_tid][1] = h[1];
+        s_hash[orig_tid][2] = h[2];
+        s_hash[orig_tid][3] = h[3];
+        s_hash[orig_tid][4] = h[4];
     }
 
-    // --- Process upper 64 bits (Windows 8 to 15) ---
-    seed = seed_hi;
-    for (int w = 8; w < 16 && w < num_windows; w++) {
-        int byte_val = seed & 0xFF;
+    // Wait for math threads to finish writing hashes
+    __syncthreads();
+
+    // ==========================================================
+    // PHASE 3: THE UNPACK
+    // Original threads wake up and submit their own answers
+    // ==========================================================
+    if (s_passed[tid_in_block]) {
+        uint32_t h[5];
+        h[0] = s_hash[tid_in_block][0];
+        h[1] = s_hash[tid_in_block][1];
+        h[2] = s_hash[tid_in_block][2];
+        h[3] = s_hash[tid_in_block][3];
+        h[4] = s_hash[tid_in_block][4];
         
-        if (byte_val != 0) {
-            int idx = (w * 256 + byte_val) * 4; 
-            
-            uint64_t curGX[4], curGY[4];
-            curGX[0] = __ldg(&d_window_GX[idx + 0]);
-            curGX[1] = __ldg(&d_window_GX[idx + 1]);
-            curGX[2] = __ldg(&d_window_GX[idx + 2]);
-            curGX[3] = __ldg(&d_window_GX[idx + 3]);
-            curGY[0] = __ldg(&d_window_GY[idx + 0]);
-            curGY[1] = __ldg(&d_window_GY[idx + 1]);
-            curGY[2] = __ldg(&d_window_GY[idx + 2]);
-            curGY[3] = __ldg(&d_window_GY[idx + 3]);
-
-            uint64_t newX[4], newY[4], newZ[4];
-            jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-            
-            Load256(accX, newX);
-            Load256(accY, newY);
-            Load256(accZ, newZ);
-        }
-        seed >>= 8;
+        // Because the original thread calls this, thId logic remains 100% intact
+        CheckPoint(h, 0, sAddress, lookup32, out);
     }
-
-    // 4. Convert back to Affine and Hash
-    uint64_t px[4], py[4];
-    jacobian_to_affine(accX, accY, accZ, px, py);
-
-    uint8_t odd_py = (uint8_t)(py[0] & 1);
-    uint32_t h[5];
-    _GetHash160Comp(px, odd_py, (uint8_t*)h);
-    CheckPoint(h, 0, sAddress, lookup32, out);
 }
 
 // =====================================================================================
