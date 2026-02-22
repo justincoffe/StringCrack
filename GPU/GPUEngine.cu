@@ -1060,38 +1060,29 @@ __global__ void comp_keys_openclaw(
         uint64_t seed = my_seed_lo;
         for (int w = 0; w < 8 && w < num_windows; w++) {
             int byte_val = seed & 0xFF;
-            int idx = (w * 256 + byte_val) * 4; 
             
-            // 1. Vectorized Memory Loads (Two 128-bit LDG instructions per coordinate)
-            // Use ulonglong2 x2 instead of ulonglong4 since __ldg doesn't support ulonglong4*
-            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
-            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
-            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
-            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
+            if (byte_val != 0) {
+                int idx = (w * 256 + byte_val) * 4; 
+                
+                // Keep the highly-efficient vectorized memory loads
+                ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+                ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+                ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+                ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
 
-            uint64_t curG[4]; // Reusable array for both input and output
-            
-            // 2. Unpack vector into working registers for X
-            curG[0] = vec_GX_lo.x; curG[1] = vec_GX_lo.y; curG[2] = vec_GX_hi.x; curG[3] = vec_GX_hi.y;
-            
-            uint64_t curGY[4]; 
-            curGY[0] = vec_GY_lo.x; curGY[1] = vec_GY_lo.y; curGY[2] = vec_GY_hi.x; curGY[3] = vec_GY_hi.y;
+                uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
+                uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+                uint64_t newX[4], newY[4], newZ[4];
 
-            uint64_t curGZ[4];
-
-            // 3. Register Reuse: Pass curG in as the X affine input, and ALSO as the X Jacobian output.
-            jacobian_add_affine(accX, accY, accZ, curG, curGY, curG, curGY, curGZ);
-            
-            // 4. Branchless conditional move (selp)
-            bool apply = (byte_val != 0);
-            
-            #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                accX[i] = apply ? curG[i]  : accX[i];
-                accY[i] = apply ? curGY[i] : accY[i];
-                accZ[i] = apply ? curGZ[i] : accZ[i];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    accX[i] = newX[i];
+                    accY[i] = newY[i];
+                    accZ[i] = newZ[i];
+                }
             }
-            
             seed >>= 8;
         }
 
@@ -1099,33 +1090,28 @@ __global__ void comp_keys_openclaw(
         seed = my_seed_hi;
         for (int w = 8; w < 16 && w < num_windows; w++) {
             int byte_val = seed & 0xFF;
-            int idx = (w * 256 + byte_val) * 4; 
             
-            // Use ulonglong2 x2 instead of ulonglong4 since __ldg doesn't support ulonglong4*
-            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
-            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
-            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
-            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
+            if (byte_val != 0) {
+                int idx = (w * 256 + byte_val) * 4; 
+                
+                ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+                ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+                ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+                ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
 
-            uint64_t curG[4]; 
-            curG[0] = vec_GX_lo.x; curG[1] = vec_GX_lo.y; curG[2] = vec_GX_hi.x; curG[3] = vec_GX_hi.y;
-            
-            uint64_t curGY[4]; 
-            curGY[0] = vec_GY_lo.x; curGY[1] = vec_GY_lo.y; curGY[2] = vec_GY_hi.x; curGY[3] = vec_GY_hi.y;
+                uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
+                uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+                uint64_t newX[4], newY[4], newZ[4];
 
-            uint64_t curGZ[4];
-
-            jacobian_add_affine(accX, accY, accZ, curG, curGY, curG, curGY, curGZ);
-            
-            bool apply = (byte_val != 0);
-            
-            #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                accX[i] = apply ? curG[i]  : accX[i];
-                accY[i] = apply ? curGY[i] : accY[i];
-                accZ[i] = apply ? curGZ[i] : accZ[i];
+                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+                
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    accX[i] = newX[i];
+                    accY[i] = newY[i];
+                    accZ[i] = newZ[i];
+                }
             }
-            
             seed >>= 8;
         }
 
