@@ -23,6 +23,7 @@
 #include <cstdint>
 #include "../SECP256k1.h"
 #include "../Int.h"
+#include <cuda_runtime.h>
 
 #define SEARCH_COMPRESSED 0
 #define SEARCH_UNCOMPRESSED 1
