@@ -1060,27 +1060,35 @@ __global__ void comp_keys_openclaw(
         uint64_t seed = my_seed_lo;
         for (int w = 0; w < 8 && w < num_windows; w++) {
             int byte_val = seed & 0xFF;
+            int idx = (w * 256 + byte_val) * 4; 
             
-            if (byte_val != 0) {
-                int idx = (w * 256 + byte_val) * 4; 
-                
-                uint64_t curGX[4], curGY[4];
-                curGX[0] = __ldg(&d_window_GX[idx + 0]);
-                curGX[1] = __ldg(&d_window_GX[idx + 1]);
-                curGX[2] = __ldg(&d_window_GX[idx + 2]);
-                curGX[3] = __ldg(&d_window_GX[idx + 3]);
-                curGY[0] = __ldg(&d_window_GY[idx + 0]);
-                curGY[1] = __ldg(&d_window_GY[idx + 1]);
-                curGY[2] = __ldg(&d_window_GY[idx + 2]);
-                curGY[3] = __ldg(&d_window_GY[idx + 3]);
+            // 1. Vectorized Memory Loads (Two 128-bit LDG instructions per coordinate)
+            ulonglong4 vec_GX = __ldg((ulonglong4*)&d_window_GX[idx]);
+            ulonglong4 vec_GY = __ldg((ulonglong4*)&d_window_GY[idx]);
 
-                uint64_t newX[4], newY[4], newZ[4];
-                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                
-                Load256(accX, newX);
-                Load256(accY, newY);
-                Load256(accZ, newZ);
+            uint64_t curG[4]; // Reusable array for both input and output
+            
+            // 2. Unpack vector into working registers for X
+            curG[0] = vec_GX.x; curG[1] = vec_GX.y; curG[2] = vec_GX.z; curG[3] = vec_GX.w;
+            
+            uint64_t curGY[4]; 
+            curGY[0] = vec_GY.x; curGY[1] = vec_GY.y; curGY[2] = vec_GY.z; curGY[3] = vec_GY.w;
+
+            uint64_t curGZ[4];
+
+            // 3. Register Reuse: Pass curG in as the X affine input, and ALSO as the X Jacobian output.
+            jacobian_add_affine(accX, accY, accZ, curG, curGY, curG, curGY, curGZ);
+            
+            // 4. Branchless conditional move (selp)
+            bool apply = (byte_val != 0);
+            
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                accX[i] = apply ? curG[i]  : accX[i];
+                accY[i] = apply ? curGY[i] : accY[i];
+                accZ[i] = apply ? curGZ[i] : accZ[i];
             }
+            
             seed >>= 8;
         }
 
@@ -1088,27 +1096,30 @@ __global__ void comp_keys_openclaw(
         seed = my_seed_hi;
         for (int w = 8; w < 16 && w < num_windows; w++) {
             int byte_val = seed & 0xFF;
+            int idx = (w * 256 + byte_val) * 4; 
             
-            if (byte_val != 0) {
-                int idx = (w * 256 + byte_val) * 4; 
-                
-                uint64_t curGX[4], curGY[4];
-                curGX[0] = __ldg(&d_window_GX[idx + 0]);
-                curGX[1] = __ldg(&d_window_GX[idx + 1]);
-                curGX[2] = __ldg(&d_window_GX[idx + 2]);
-                curGX[3] = __ldg(&d_window_GX[idx + 3]);
-                curGY[0] = __ldg(&d_window_GY[idx + 0]);
-                curGY[1] = __ldg(&d_window_GY[idx + 1]);
-                curGY[2] = __ldg(&d_window_GY[idx + 2]);
-                curGY[3] = __ldg(&d_window_GY[idx + 3]);
+            ulonglong4 vec_GX = __ldg((ulonglong4*)&d_window_GX[idx]);
+            ulonglong4 vec_GY = __ldg((ulonglong4*)&d_window_GY[idx]);
 
-                uint64_t newX[4], newY[4], newZ[4];
-                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                
-                Load256(accX, newX);
-                Load256(accY, newY);
-                Load256(accZ, newZ);
+            uint64_t curG[4]; 
+            curG[0] = vec_GX.x; curG[1] = vec_GX.y; curG[2] = vec_GX.z; curG[3] = vec_GX.w;
+            
+            uint64_t curGY[4]; 
+            curGY[0] = vec_GY.x; curGY[1] = vec_GY.y; curGY[2] = vec_GY.z; curGY[3] = vec_GY.w;
+
+            uint64_t curGZ[4];
+
+            jacobian_add_affine(accX, accY, accZ, curG, curGY, curG, curGY, curGZ);
+            
+            bool apply = (byte_val != 0);
+            
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                accX[i] = apply ? curG[i]  : accX[i];
+                accY[i] = apply ? curGY[i] : accY[i];
+                accZ[i] = apply ? curGZ[i] : accZ[i];
             }
+            
             seed >>= 8;
         }
 
