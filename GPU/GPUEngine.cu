@@ -992,9 +992,38 @@ __global__ void comp_keys_openclaw(
     // O(1) Popcount Filtering
     int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
     
-    // If thread passes, atomically push seed into the dense shared queue
-    if (pc >= d_popcountMin && pc <= d_popcountMax) {
-        int q_idx = atomicAdd(&s_count, 1);
+    // 1. Evaluate filter condition
+    bool is_valid = (pc >= d_popcountMin && pc <= d_popcountMax);
+    
+    // 2. Synchronize the warp and get a bitmask of all passing threads
+    // 0xFFFFFFFF means all 32 threads in the warp participate in the ballot
+    unsigned int warp_mask = __ballot_sync(0xFFFFFFFF, is_valid);
+    
+    if (is_valid) {
+        // Get the thread's index within its specific warp (0 to 31)
+        int lane_id = threadIdx.x & 31;
+        
+        // 3. Calculate how many passing threads are *before* this one in the warp.
+        // We mask off the bits at and above the current lane_id, then count the remaining 1s.
+        int warp_offset = __popc(warp_mask & ((1u << lane_id) - 1));
+        
+        int base_offset = 0;
+        
+        // 4. Leader Election: Only the first passing thread in the warp executes the atomic.
+        if (warp_offset == 0) {
+            // Add the total number of passing threads in this warp (__popc(warp_mask)) 
+            // to the global shared counter, returning the starting index for this warp.
+            base_offset = atomicAdd(&s_count, __popc(warp_mask));
+        }
+        
+        // 5. Broadcast the base_offset from the leader to all other passing threads.
+        // __ffs(warp_mask) - 1 gives the lane_id of the leader.
+        base_offset = __shfl_sync(warp_mask, base_offset, __ffs(warp_mask) - 1);
+        
+        // 6. Calculate the exact, unique queue index for this specific thread
+        int q_idx = base_offset + warp_offset;
+        
+        // Push data to the dense shared queue
         s_seed_lo[q_idx] = seed_lo;
         s_seed_hi[q_idx] = seed_hi;
         s_orig_tid[q_idx] = tid_in_block;
