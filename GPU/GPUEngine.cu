@@ -1032,7 +1032,6 @@ __global__ void comp_keys_openclaw(
         s_seed_lo[q_idx] = seed_lo;
         s_seed_hi[q_idx] = seed_hi;
         s_orig_tid[q_idx] = tid_in_block;
-        s_passed[tid_in_block] = true; // Mark original thread as alive
     }
     
     // Wait for all threads in the block to finish filtering
