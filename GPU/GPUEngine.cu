@@ -786,8 +786,6 @@ __device__ __constant__ int      d_freeBitPos[256];
 __device__ __constant__ int      d_numFreeBits;
 __device__ __constant__ int      d_popcountMin;
 __device__ __constant__ int      d_popcountMax;
-__device__ __constant__ uint64_t d_batchOffsetLo;
-__device__ __constant__ uint64_t d_batchOffsetHi;
 
 // New Constant Memory for Direct Seed Iteration
 __device__ __constant__ uint64_t d_basePointX[4];
@@ -995,13 +993,14 @@ __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64
 
 // comp_keys_openclaw: StringCrack kernel - Direct Seed Iteration + Popcount + EC Math
 __global__ void comp_keys_openclaw(
-    address_t* sAddress, uint32_t* lookup32, uint32_t* out)
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out,
+    uint64_t d_batchOffsetLo, uint64_t d_batchOffsetHi)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     
     // 128-bit Seed Generation with carry propagation
-    uint64_t seed_lo = d_batchOffsetLo;
-    uint64_t seed_hi = d_batchOffsetHi;
+    uint64_t seed_lo = d_batchOffsetLo; // Now reads perfectly from the argument
+    uint64_t seed_hi = d_batchOffsetHi; // Now reads perfectly from the argument
     
     // Add tid to lower 64 bits
     asm volatile ("add.cc.u64 %0, %0, %1;" 
@@ -1209,15 +1208,14 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
 
 bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi, uint32_t* d_out, cudaStream_t stream) {
     cudaMemsetAsync(d_out, 0, 4, stream);
-    cudaError_t err = cudaMemcpyToSymbol(d_batchOffsetLo, &batchOffsetLo, sizeof(uint64_t));
-    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetLo: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_batchOffsetHi, &batchOffsetHi, sizeof(uint64_t));
-    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetHi: %s\n", cudaGetErrorString(err)); return false; }
+    
+    // The synchronous cudaMemcpyToSymbol lines have been deleted from here!
 
+    // Launch the kernel and pass the offsets directly via the stream
     comp_keys_openclaw<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP, 0, stream>>>(
-        inputAddress, inputAddressLookUp, d_out);
+        inputAddress, inputAddressLookUp, d_out, batchOffsetLo, batchOffsetHi);
 
-    err = cudaGetLastError();
+    cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) { printf("GPUEngine: OpenClaw Kernel: %s\n", cudaGetErrorString(err)); return false; }
     return true;
 }
