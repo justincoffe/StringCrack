@@ -796,6 +796,8 @@ __device__ __constant__ uint64_t d_basePointX[4];
 __device__ __constant__ uint64_t d_basePointY[4];
 
 __device__ __constant__ int      d_lockedPopcount;
+__device__ __constant__ uint64_t d_seedMaskLo;
+__device__ __constant__ uint64_t d_seedMaskHi;
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
@@ -880,34 +882,85 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
     _ModMult(Z3, Z1, T2);          // Z3 = Z1 * H
 }
 
+// Mixed Jacobian-Affine Addition (In-Place)
+__device__ void jacobian_add_affine_inplace(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[4],
+                                            const uint64_t x2[4], const uint64_t y2[4]) {
+    
+    uint64_t T1[4], T2[4], T3[4], T4[4];
+    
+    _ModSqr(T1, Z1);               // T1 = Z1^2
+    _ModMult(T2, T1, x2);          // T2 = U2 = x2 * Z1^2
+    _ModMult(T3, T1, Z1);          // T3 = Z1^3
+    _ModMult(T4, T3, y2);          // T4 = S2 = y2 * Z1^3
+    
+    ModSub256(T2, T2, X1);         // T2 = H = U2 - X1
+    ModSub256(T4, T4, Y1);         // T4 = R = S2 - Y1
+    
+    _ModSqr(T1, T2);               // T1 = HH = H^2
+    _ModMult(T3, T1, T2);          // T3 = HHH = H^3
+    _ModMult(T1, X1, T1);          // T1 = U1HH = X1 * H^2
+    
+    uint64_t X3[4];
+    _ModSqr(X3, T4);               // X3 = R^2
+    ModSub256(X3, X3, T3);         // X3 = R^2 - H^3
+    
+    // Fast 2*U1HH (Eliminates ModNeg and extra arrays)
+    uint64_t two_U1HH[4];
+    asm volatile(
+        "{\n\t"
+        ".reg .pred q;\n\t"
+        "add.cc.u64 %0, %4, %4;\n\t"
+        "addc.cc.u64 %1, %5, %5;\n\t"
+        "addc.cc.u64 %2, %6, %6;\n\t"
+        "addc.cc.u64 %3, %7, %7;\n\t"
+        "setp.ge.u64 q, %0, 0xFFFFFFFEFFFFFC2F;\n\t" 
+        "@q sub.cc.u64 %0, %0, 0xFFFFFFFEFFFFFC2F;\n\t"
+        "@q subc.cc.u64 %1, %1, 0xFFFFFFFFFFFFFFFF;\n\t"
+        "@q subc.cc.u64 %2, %2, 0xFFFFFFFFFFFFFFFF;\n\t"
+        "@q subc.u64 %3, %3, 0xFFFFFFFFFFFFFFFF;\n\t"
+        "}\n\t"
+        : "=l"(two_U1HH[0]),"=l"(two_U1HH[1]),"=l"(two_U1HH[2]),"=l"(two_U1HH[3])
+        : "l"(T1[0]),"l"(T1[1]),"l"(T1[2]),"l"(T1[3])
+    );
+    
+    ModSub256(X3, X3, two_U1HH);   // X3 = R^2 - H^3 - 2*U1HH
+    
+    uint64_t Y3[4];
+    ModSub256(Y3, T1, X3);         // Y3 = U1HH - X3
+    _ModMult(Y3, T4, Y3);          // Y3 = R * (U1HH - X3)
+    
+    uint64_t tmp[4];
+    _ModMult(tmp, Y1, T3);         // tmp = Y1 * HHH
+    ModSub256(Y3, Y3, tmp);        // Y3 = R * (U1HH - X3) - Y1 * HHH
+    
+    _ModMult(Z1, Z1, T2);          // Z1 = Z1 * H (Updated in-place)
+    
+    // Update X1 and Y1 in-place
+    X1[0] = X3[0]; X1[1] = X3[1]; X1[2] = X3[2]; X1[3] = X3[3];
+    Y1[0] = Y3[0]; Y1[1] = Y3[1]; Y1[2] = Y3[2]; Y1[3] = Y3[3];
+}
+
 // Convert Jacobian (X, Y, Z) to Affine (x, y)
 __device__ void jacobian_to_affine(uint64_t X[4], uint64_t Y[4], uint64_t Z[4], uint64_t x[4], uint64_t y[4]) {
-    // Check if Z == 0 (point at infinity)
-    if (Z[0] == 0 && Z[1] == 0 && Z[2] == 0 && Z[3] == 0) {
-        x[0] = x[1] = x[2] = x[3] = 0;
-        y[0] = y[1] = y[2] = y[3] = 0;
-        return;
-    }
-    
-    // Compute Z^-1
     uint64_t Z_inv[5];
     Load256(Z_inv, Z);
     Z_inv[4] = 0;
     _ModInv(Z_inv);
     
-    // Compute Z^-2
     uint64_t Z_inv_sq[4];
     _ModSqr(Z_inv_sq, Z_inv);
-    
-    // x = X * Z^-2
     _ModMult(x, Z_inv_sq, X);
     
-    // Compute Z^-3 = Z^-2 * Z^-1
     uint64_t Z_inv_cb[4];
     _ModMult(Z_inv_cb, Z_inv_sq, Z_inv);
-    
-    // y = Y * Z^-3
     _ModMult(y, Z_inv_cb, Y);
+
+    // Branchless zeroing for point at infinity
+    bool is_inf = (Z[0] | Z[1] | Z[2] | Z[3]) == 0;
+    if (is_inf) {
+        x[0] = x[1] = x[2] = x[3] = 0;
+        y[0] = y[1] = y[2] = y[3] = 0;
+    }
 }
 
 // ec_point_mult_pow2: Compute key * G using precomputed G_POW2 table
@@ -954,7 +1007,8 @@ __device__ void ec_point_mult_pow2(const uint64_t key[4], uint64_t px[4], uint64
 }
 
 // comp_keys_openclaw: StringCrack kernel - Stream Compaction + Direct Seed Iteration + EC Math
-__global__ void comp_keys_openclaw(
+__global__ __launch_bounds__(256, 2)
+void comp_keys_openclaw(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     uint64_t d_batchOffsetLo, uint64_t d_batchOffsetHi)
 {
@@ -966,38 +1020,30 @@ __global__ void comp_keys_openclaw(
     // ==========================================================
     __shared__ uint64_t s_seed_lo[256];
     __shared__ uint64_t s_seed_hi[256];
-    __shared__ uint8_t  s_orig_tid[256];
     
-    // 100% Bank-Conflict-Free Structure of Arrays for Hash Exchange
+    // Upgraded to uint32_t to completely eliminate 4-way Bank Conflicts
+    __shared__ uint32_t s_orig_tid[256]; 
     __shared__ uint32_t s_h0[256];
     __shared__ uint32_t s_h1[256];
     __shared__ uint32_t s_h2[256];
     __shared__ uint32_t s_h3[256];
     __shared__ uint32_t s_h4[256];
-    __shared__ bool     s_hit[256];
+    __shared__ uint32_t s_hit[256];
     __shared__ int      s_count;
 
     // Initialize shared tracking
-    s_hit[tid_in_block] = false;
+    s_hit[tid_in_block] = 0;
     if (tid_in_block == 0) s_count = 0;
     __syncthreads();
     
-    // 128-bit Seed Generation with carry propagation
     uint64_t seed_lo = d_batchOffsetLo; 
     uint64_t seed_hi = d_batchOffsetHi; 
     
-    // Add tid to lower 64 bits
-    asm volatile ("add.cc.u64 %0, %0, %1;" 
-                 : "+l"(seed_lo) 
-                 : "l"((uint64_t)tid));
-    // Add carry to upper 64 bits
-    asm volatile ("addc.u64 %0, %0, 0;" 
-                 : "+l"(seed_hi));
+    asm volatile ("add.cc.u64 %0, %0, %1;" : "+l"(seed_lo) : "l"((uint64_t)tid));
+    asm volatile ("addc.u64 %0, %0, 0;" : "+l"(seed_hi));
 
-    // O(1) Popcount Filtering
-    int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
-    
-    // 1. Evaluate filter condition
+    // Correctness Fix: Mask out bits beyond numFreeBits before counting!
+    int pc = __popcll(seed_lo & d_seedMaskLo) + __popcll(seed_hi & d_seedMaskHi) + d_lockedPopcount;
     bool is_valid = (pc >= d_popcountMin && pc <= d_popcountMax);
     
     // 2. Synchronize the warp and get a bitmask of all passing threads
@@ -1076,16 +1122,9 @@ __global__ void comp_keys_openclaw(
 
                 uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
                 uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
-                uint64_t newX[4], newY[4], newZ[4];
 
-                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                
-                #pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    accX[i] = newX[i];
-                    accY[i] = newY[i];
-                    accZ[i] = newZ[i];
-                }
+                // Call it directly on accX, accY, accZ. No need for newX/newY arrays or copying back!
+                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
             }
             seed >>= 8;
         }
@@ -1105,16 +1144,9 @@ __global__ void comp_keys_openclaw(
 
                 uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
                 uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
-                uint64_t newX[4], newY[4], newZ[4];
 
-                jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
-                
-                #pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    accX[i] = newX[i];
-                    accY[i] = newY[i];
-                    accZ[i] = newZ[i];
-                }
+                // Call it directly on accX, accY, accZ. No need for newX/newY arrays or copying back!
+                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
             }
             seed >>= 8;
         }
@@ -1137,7 +1169,7 @@ __global__ void comp_keys_openclaw(
             s_h2[orig_tid] = h[2];
             s_h3[orig_tid] = h[3];
             s_h4[orig_tid] = h[4];
-            s_hit[orig_tid] = true; 
+            s_hit[orig_tid] = 1; // Used 1 instead of true 
         }
     }
 
@@ -1148,7 +1180,7 @@ __global__ void comp_keys_openclaw(
     // PHASE 3: THE UNPACK
     // Original threads wake up ONLY if their seed produced a hit
     // ==========================================================
-    if (s_hit[tid_in_block]) {
+    if (s_hit[tid_in_block] != 0) {
         uint32_t h[5];
         h[0] = s_h0[tid_in_block];
         h[1] = s_h1[tid_in_block];
@@ -1245,6 +1277,29 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Compute and upload Popcount Correction Masks
+    uint64_t seedMaskLo = 0, seedMaskHi = 0;
+    if (config->numFreeBits <= 0) {
+        seedMaskLo = 0; seedMaskHi = 0;
+    } else if (config->numFreeBits < 64) {
+        seedMaskLo = (1ULL << config->numFreeBits) - 1ULL; 
+        seedMaskHi = 0;
+    } else if (config->numFreeBits == 64) {
+        seedMaskLo = 0xFFFFFFFFFFFFFFFFULL; 
+        seedMaskHi = 0;
+    } else if (config->numFreeBits < 128) {
+        seedMaskLo = 0xFFFFFFFFFFFFFFFFULL; 
+        seedMaskHi = (1ULL << (config->numFreeBits - 64)) - 1ULL;
+    } else {
+        seedMaskLo = 0xFFFFFFFFFFFFFFFFULL; 
+        seedMaskHi = 0xFFFFFFFFFFFFFFFFULL;
+    }
+
+    err = cudaMemcpyToSymbol(d_seedMaskLo, &seedMaskLo, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_seedMaskLo: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_seedMaskHi, &seedMaskHi, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_seedMaskHi: %s\n", cudaGetErrorString(err)); return false; }
 
     // Compute and upload window tables to global memory
     ComputeWindowTables(secp, (StringCrackConfig*)config);

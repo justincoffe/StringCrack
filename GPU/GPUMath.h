@@ -334,23 +334,25 @@ __device__ __forceinline__ void ModSub256(uint64_t r[4], const uint64_t a[4], co
 }
 
 
-__device__ void ModSub256(uint64_t* r, uint64_t* b) {
-    uint64_t borrow;
-    uint64_t p[4] = { 0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
-                      0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL };
-
-    USUBO1(r[0], b[0]);
-    USUBC1(r[1], b[1]);
-    USUBC1(r[2], b[2]);
-    USUBC1(r[3], b[3]);
-    USUB(borrow, 0ULL, 0ULL); 
-
-    if (borrow) {
-        UADDO1(r[0], p[0]);
-        UADDC1(r[1], p[1]);
-        UADDC1(r[2], p[2]);
-        UADD1(r[3], p[3]);
-    }
+__device__ __forceinline__ void ModSub256(uint64_t* r, const uint64_t* b) {
+    asm volatile(
+        "{\n\t"
+        ".reg .u32 bw;\n\t"
+        ".reg .pred p;\n\t"
+        "sub.cc.u64 %0, %0, %4;\n\t"
+        "subc.cc.u64 %1, %1, %5;\n\t"
+        "subc.cc.u64 %2, %2, %6;\n\t"
+        "subc.cc.u64 %3, %3, %7;\n\t"
+        "subc.u32 bw, 0, 0;\n\t"
+        "setp.ne.u32 p, bw, 0;\n\t"
+        "@p add.cc.u64 %0, %0, 0xFFFFFFFEFFFFFC2F;\n\t"
+        "@p addc.cc.u64 %1, %1, 0xFFFFFFFFFFFFFFFF;\n\t"
+        "@p addc.cc.u64 %2, %2, 0xFFFFFFFFFFFFFFFF;\n\t"
+        "@p addc.u64 %3, %3, 0xFFFFFFFFFFFFFFFF;\n\t"
+        "}\n\t"
+        : "+l"(r[0]), "+l"(r[1]), "+l"(r[2]), "+l"(r[3])
+        : "l"(b[0]), "l"(b[1]), "l"(b[2]), "l"(b[3])
+    );
 }
 
 
