@@ -122,7 +122,7 @@ public:
   int GetStepSize();
 
   // StringCrack: Configure and launch the Bit Injection + Popcount kernel
-  bool SetStringCrackConfig(const StringCrackConfig *config);
+  bool SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *config);
   bool LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait=false);
 
   // Asynchronous double-buffered StringCrack
@@ -136,6 +136,7 @@ public:
   static void GenerateCode(Secp256K1 *secp, int size);
   static void PrecomputeStringCrackMasks(StringCrackConfig *config);
   static void ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config);
+  static void ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config);
 
 private:
 

@@ -926,7 +926,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	// StringCrack: Upload configuration to GPU if enabled
 	bool useStringCrack = (scConfig != NULL && scConfig->enabled);
 	if (useStringCrack) {
-		if (!g.SetStringCrackConfig(scConfig)) {
+		if (!g.SetStringCrackConfig(secp, scConfig)) {
 			printf("[StringCrack] Failed to upload config to GPU!\n");
 			useStringCrack = false;
 		} else {

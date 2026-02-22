@@ -787,11 +787,16 @@ __device__ __constant__ int      d_numFreeBits;
 __device__ __constant__ int      d_popcountMin;
 __device__ __constant__ int      d_popcountMax;
 
-// New Constant Memory for Direct Seed Iteration
+// Global read-only pointers for window tables (use __ldg() in kernel)
+extern "C" {
+    extern uint64_t* d_window_GX;
+    extern uint64_t* d_window_GY;
+}
+
+// Keep basepoint in constant memory (small, frequently accessed)
 __device__ __constant__ uint64_t d_basePointX[4];
 __device__ __constant__ uint64_t d_basePointY[4];
-__device__ __constant__ uint64_t d_free_GX[256][4];
-__device__ __constant__ uint64_t d_free_GY[256][4];
+
 __device__ __constant__ int      d_lockedPopcount;
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
@@ -979,41 +984,53 @@ __global__ void comp_keys_openclaw(
     Load256(accY, d_basePointY);
     accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; // Z is always 1
 
-    // 3. Direct Seed Iteration (Loop truncated to exact free bits)
+    // 3. Direct Seed Iteration (8-Bit Windows)
+    int num_windows = (d_numFreeBits + 7) / 8;
+    
+    // --- Process lower 64 bits (Up to 8 windows) ---
     uint64_t seed = seed_lo;
-    for (int i = 0; i < 64 && i < d_numFreeBits; i++) {
-        if (seed & 1ULL) {
+    for (int w = 0; w < 8 && w < num_windows; w++) {
+        int byte_val = seed & 0xFF;
+        
+        if (byte_val != 0) {
+            // Flattened 2D array index: (window * 256 + byte_val) * 4
+            int idx = (w * 256 + byte_val) * 4; 
+            
             uint64_t curGX[4], curGY[4];
-            Load256(curGX, (uint64_t*)d_free_GX[i]);
-            Load256(curGY, (uint64_t*)d_free_GY[i]);
+            // __ldg forces read-only cache, perfect for lookup tables
+            Load256(curGX, (uint64_t*)&__ldg(&d_window_GX[idx]));
+            Load256(curGY, (uint64_t*)&__ldg(&d_window_GY[idx]));
 
             uint64_t newX[4], newY[4], newZ[4];
-            jacobian_add_affine(accX, accY, accZ, 
-                               curGX, curGY, 
-                               newX, newY, newZ);
+            jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+            
             Load256(accX, newX);
             Load256(accY, newY);
             Load256(accZ, newZ);
         }
-        seed >>= 1;
+        seed >>= 8;
     }
 
+    // --- Process upper 64 bits (Windows 8 to 15) ---
     seed = seed_hi;
-    for (int i = 64; i < d_numFreeBits; i++) {
-        if (seed & 1ULL) {
+    for (int w = 8; w < 16 && w < num_windows; w++) {
+        int byte_val = seed & 0xFF;
+        
+        if (byte_val != 0) {
+            int idx = (w * 256 + byte_val) * 4; 
+            
             uint64_t curGX[4], curGY[4];
-            Load256(curGX, (uint64_t*)d_free_GX[i]);
-            Load256(curGY, (uint64_t*)d_free_GY[i]);
+            Load256(curGX, (uint64_t*)&__ldg(&d_window_GX[idx]));
+            Load256(curGY, (uint64_t*)&__ldg(&d_window_GY[idx]));
 
             uint64_t newX[4], newY[4], newZ[4];
-            jacobian_add_affine(accX, accY, accZ, 
-                               curGX, curGY, 
-                               newX, newY, newZ);
+            jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
+            
             Load256(accX, newX);
             Load256(accY, newY);
             Load256(accZ, newZ);
         }
-        seed >>= 1;
+        seed >>= 8;
     }
 
     // 4. Convert back to Affine and Hash
@@ -1084,7 +1101,7 @@ void GPUEngine::PrecomputeStringCrackMasks(StringCrackConfig *config) {
     fflush(stdout);
 }
 
-bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
+bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *config) {
     scConfig = *config;
     stringCrackEnabled = config->enabled;
     if (!stringCrackEnabled) return true;
@@ -1103,17 +1120,16 @@ bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
     err = cudaMemcpyToSymbol(d_popcountMax, &config->popcountMax, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_popcountMax: %s\n", cudaGetErrorString(err)); return false; }
     
-    // Upload precomputed base point and free G table to GPU
+    // Upload precomputed base point to GPU (window tables now use global memory via __ldg)
     err = cudaMemcpyToSymbol(d_basePointX, config->basePointX, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointX: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_basePointY, config->basePointY, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_free_GX, config->free_GX, sizeof(uint64_t) * 256 * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_free_GX: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_free_GY, config->free_GY, sizeof(uint64_t) * 256 * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_free_GY: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Compute and upload window tables to global memory
+    ComputeWindowTables(secp, config);
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
     return true;
@@ -1162,6 +1178,68 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
            (unsigned long long)config->basePointY[3], (unsigned long long)config->basePointY[2],
            (unsigned long long)config->basePointY[1], (unsigned long long)config->basePointY[0]);
     printf("[StringCrack] Free G table: %d entries precomputed\n", config->numFreeBits);
+    fflush(stdout);
+}
+
+// Compute 8-Bit Window Tables for accelerated lookup
+void GPUEngine::ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config) {
+    int num_windows = (config->numFreeBits + 7) / 8;
+    
+    // Allocate host memory (1D arrays to represent [window][256][4])
+    uint64_t* h_window_GX = (uint64_t*)malloc(num_windows * 256 * 4 * sizeof(uint64_t));
+    uint64_t* h_window_GY = (uint64_t*)malloc(num_windows * 256 * 4 * sizeof(uint64_t));
+    memset(h_window_GX, 0, num_windows * 256 * 4 * sizeof(uint64_t));
+    memset(h_window_GY, 0, num_windows * 256 * 4 * sizeof(uint64_t));
+
+    for (int w = 0; w < num_windows; w++) {
+        // Find which free bits belong to this window (up to 8 bits)
+        int bits_in_window = 0;
+        int window_bit_positions[8];
+        
+        for(int b = 0; b < 8; b++) {
+            int global_bit_idx = (w * 8) + b;
+            if (global_bit_idx < config->numFreeBits) {
+                window_bit_positions[b] = config->freeBitPositions[global_bit_idx];
+                bits_in_window++;
+            }
+        }
+
+        // Generate all non-zero combinations for this byte
+        int max_val = (1 << bits_in_window);
+        for (int val = 1; val < max_val; val++) {
+            Int bitKey;
+            bitKey.SetInt32(0);
+            
+            // Map the bits of 'val' to their global physical positions
+            for (int b = 0; b < bits_in_window; b++) {
+                if ((val >> b) & 1) {
+                    int pos = window_bit_positions[b];
+                    bitKey.bits64[pos >> 6] |= (1ULL << (pos & 63));
+                }
+            }
+
+            // Compute the point
+            Point p = secp->ComputePublicKey(&bitKey);
+            
+            // Store flattened
+            int idx = (w * 256 + val) * 4;
+            memcpy(&h_window_GX[idx], p.x.bits64, 32);
+            memcpy(&h_window_GY[idx], p.y.bits64, 32);
+        }
+    }
+
+    // Allocate device memory and copy from host
+    size_t tableSize = num_windows * 256 * 4 * sizeof(uint64_t);
+    cudaMalloc((void**)&d_window_GX, tableSize);
+    cudaMalloc((void**)&d_window_GY, tableSize);
+    cudaMemcpy(d_window_GX, h_window_GX, tableSize, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_window_GY, h_window_GY, tableSize, cudaMemcpyHostToDevice);
+    
+    // Free host memory
+    free(h_window_GX);
+    free(h_window_GY);
+    
+    printf("[StringCrack] Window tables: %d windows (%d KB)\n", num_windows, (num_windows * 256 * 32) / 1024);
     fflush(stdout);
 }
 

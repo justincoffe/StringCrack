@@ -757,6 +757,7 @@ int main(int argc, char* argv[]) {
 		if (!lockStr.empty()) parseLockString(lockStr, &scConfig);
 		GPUEngine::PrecomputeStringCrackMasks(&scConfig);
 		GPUEngine::ComputeBasePoint(secp, &scConfig);
+		GPUEngine::ComputeWindowTables(secp, &scConfig);
 
 
 		// In StringCrack mode: -start is the seed offset, -range is the seed space size
