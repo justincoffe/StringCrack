@@ -1114,20 +1114,26 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		}
 		
 
-		// StringCrack: Use custom progress display
+		// StringCrack: Use custom progress display (throttled to every ~0.5 seconds)
 		if (useStringCrack) {
-			// Calculate current seed position = offset + (idxcount * numThreadsGPU)
-			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
-			Int currentSeed;
-			currentSeed.Set(&scConfig->seedOffsetInt);
-			currentSeed.Add(scanned);
-			
-			// Use seedEndInt for progress if -end was specified, otherwise use seedCountInt
-			Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
-			
-			PrintStatsStringCrack(keys_n, keys_n_prev, ttot, tprev,
-				currentSeed, limitSeed, scConfig->seedOffsetInt,
-				scConfig->numLockedBits, nbFoundKey);
+			// Only update display every ~0.5 seconds to avoid overhead
+			static double lastStatsTime = 0.0;
+			if (ttot - lastStatsTime >= 0.5 || lastStatsTime == 0.0) {
+				lastStatsTime = ttot;
+				
+				// Calculate current seed position = offset + (idxcount * numThreadsGPU)
+				uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
+				Int currentSeed;
+				currentSeed.Set(&scConfig->seedOffsetInt);
+				currentSeed.Add(scanned);
+				
+				// Use seedEndInt for progress if -end was specified, otherwise use seedCountInt
+				Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
+				
+				PrintStatsStringCrack(keys_n, keys_n_prev, ttot, tprev,
+					currentSeed, limitSeed, scConfig->seedOffsetInt,
+					scConfig->numLockedBits, nbFoundKey);
+			}
 		} else {
 			PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
 		}
