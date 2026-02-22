@@ -106,7 +106,7 @@ class GPUEngine {
 
 public:
 
-  GPUEngine(int gpuId, uint32_t maxFound);
+  GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier = 1024);
   ~GPUEngine();
   void FreeGPUEngine();
   void SetAddress(std::vector<address_t> addresses);

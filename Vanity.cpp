@@ -894,7 +894,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 	// Global init
 	int thId = ph->threadId;
-	GPUEngine g(ph->gpuId, maxFound);
+	GPUEngine g(ph->gpuId, maxFound, ph->smMultiplier);
 	int numThreadsGPU = g.GetNbThread();
 	int STEP_SIZE = g.GetStepSize();
 	Point* publicKeys = new Point[numThreadsGPU];
@@ -1548,6 +1548,7 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 		params[i].threadId = i;
 		params[i].isRunning = true;
 		params[i].gpuId = gpuId[i];
+		params[i].smMultiplier = this->smMultiplier;
 		params[i].gridSizeX = gridSize[i];
 		params[i].gridSizeY = gridSize[i+1];
 		params[i].THnextKey.Set(&bc->ksNext);

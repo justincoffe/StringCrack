@@ -598,6 +598,7 @@ int main(int argc, char* argv[]) {
 	int range = 30;
 	std::string start = "0";
 	int endBits = -1;
+	int smMultiplier = 1024; // Default SM multiplier for GPU
 
 	// StringCrack configuration
 	StringCrackConfig scConfig;
@@ -662,6 +663,11 @@ int main(int argc, char* argv[]) {
 		else if (strcmp(argv[a], "-range") == 0) {
 			a++;
 			range = (uint64_t)getInt("range", argv[a]);
+			a++;
+		}
+		else if (strcmp(argv[a], "-sm") == 0) {
+			a++;
+			smMultiplier = getInt("sm", argv[a]);
 			a++;
 		}
 		else if (strcmp(argv[a], "-end") == 0) {
@@ -836,6 +842,7 @@ int main(int argc, char* argv[]) {
 		Paused = false;
 		VanitySearch* v = new VanitySearch(secp, address, searchMode, stop, outputFile, maxFound, bc,
 			scConfig.enabled ? &scConfig : NULL);
+		v->smMultiplier = smMultiplier;
 		v->Search(gpuId, gridSize);
 
 		while (Paused) {

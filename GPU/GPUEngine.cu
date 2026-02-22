@@ -233,13 +233,13 @@ std::string globalGPUname;
 
 
 
-GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
+GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
 
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, gpuId);
 
     NB_TRHEAD_PER_GROUP = 256;                                          //////////////////  GRID SIZE ////////////////
-    int nbThreadGroup = deviceProp.multiProcessorCount * 1024;
+    int nbThreadGroup = deviceProp.multiProcessorCount * smMultiplier;
 
     // --- COMMENT THIS ENTIRE BLOCK OUT ---
     /*

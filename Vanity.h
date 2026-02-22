@@ -54,6 +54,7 @@ typedef struct {
 	int  gridSizeX;
 	int  gridSizeY;
 	int  gpuId;
+	int  smMultiplier;
 	Int  THnextKey;
 
 } TH_PARAM;
@@ -90,6 +91,8 @@ typedef struct {
 class VanitySearch {
 
 public:
+
+	int smMultiplier;
 
 	VanitySearch(Secp256K1* secp, std::vector<std::string>& address, int searchMode,
 		bool stop, std::string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc,
