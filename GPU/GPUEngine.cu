@@ -788,10 +788,8 @@ __device__ __constant__ int      d_popcountMin;
 __device__ __constant__ int      d_popcountMax;
 
 // Global read-only pointers for window tables (use __ldg() in kernel)
-extern "C" {
-    extern uint64_t* d_window_GX;
-    extern uint64_t* d_window_GY;
-}
+__device__ uint64_t* d_window_GX;
+__device__ uint64_t* d_window_GY;
 
 // Keep basepoint in constant memory (small, frequently accessed)
 __device__ __constant__ uint64_t d_basePointX[4];
@@ -1242,10 +1240,16 @@ void GPUEngine::ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config) 
 
     // Allocate device memory and copy from host
     size_t tableSize = num_windows * 256 * 4 * sizeof(uint64_t);
-    cudaMalloc((void**)&d_window_GX, tableSize);
-    cudaMalloc((void**)&d_window_GY, tableSize);
-    cudaMemcpy(d_window_GX, h_window_GX, tableSize, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_window_GY, h_window_GY, tableSize, cudaMemcpyHostToDevice);
+    uint64_t* d_table_GX;
+    uint64_t* d_table_GY;
+    cudaMalloc((void**)&d_table_GX, tableSize);
+    cudaMalloc((void**)&d_table_GY, tableSize);
+    cudaMemcpy(d_table_GX, h_window_GX, tableSize, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_table_GY, h_window_GY, tableSize, cudaMemcpyHostToDevice);
+    
+    // Copy device pointers to device symbols
+    cudaMemcpyToSymbol(d_window_GX, &d_table_GX, sizeof(uint64_t*));
+    cudaMemcpyToSymbol(d_window_GY, &d_table_GY, sizeof(uint64_t*));
     
     // Free host memory
     free(h_window_GX);
