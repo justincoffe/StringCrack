@@ -1063,16 +1063,19 @@ __global__ void comp_keys_openclaw(
             int idx = (w * 256 + byte_val) * 4; 
             
             // 1. Vectorized Memory Loads (Two 128-bit LDG instructions per coordinate)
-            ulonglong4 vec_GX = __ldg((ulonglong4*)&d_window_GX[idx]);
-            ulonglong4 vec_GY = __ldg((ulonglong4*)&d_window_GY[idx]);
+            // Use ulonglong2 x2 instead of ulonglong4 since __ldg doesn't support ulonglong4*
+            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
 
             uint64_t curG[4]; // Reusable array for both input and output
             
             // 2. Unpack vector into working registers for X
-            curG[0] = vec_GX.x; curG[1] = vec_GX.y; curG[2] = vec_GX.z; curG[3] = vec_GX.w;
+            curG[0] = vec_GX_lo.x; curG[1] = vec_GX_lo.y; curG[2] = vec_GX_hi.x; curG[3] = vec_GX_hi.y;
             
             uint64_t curGY[4]; 
-            curGY[0] = vec_GY.x; curGY[1] = vec_GY.y; curGY[2] = vec_GY.z; curGY[3] = vec_GY.w;
+            curGY[0] = vec_GY_lo.x; curGY[1] = vec_GY_lo.y; curGY[2] = vec_GY_hi.x; curGY[3] = vec_GY_hi.y;
 
             uint64_t curGZ[4];
 
@@ -1098,14 +1101,17 @@ __global__ void comp_keys_openclaw(
             int byte_val = seed & 0xFF;
             int idx = (w * 256 + byte_val) * 4; 
             
-            ulonglong4 vec_GX = __ldg((ulonglong4*)&d_window_GX[idx]);
-            ulonglong4 vec_GY = __ldg((ulonglong4*)&d_window_GY[idx]);
+            // Use ulonglong2 x2 instead of ulonglong4 since __ldg doesn't support ulonglong4*
+            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
 
             uint64_t curG[4]; 
-            curG[0] = vec_GX.x; curG[1] = vec_GX.y; curG[2] = vec_GX.z; curG[3] = vec_GX.w;
+            curG[0] = vec_GX_lo.x; curG[1] = vec_GX_lo.y; curG[2] = vec_GX_hi.x; curG[3] = vec_GX_hi.y;
             
             uint64_t curGY[4]; 
-            curGY[0] = vec_GY.x; curGY[1] = vec_GY.y; curGY[2] = vec_GY.z; curGY[3] = vec_GY.w;
+            curGY[0] = vec_GY_lo.x; curGY[1] = vec_GY_lo.y; curGY[2] = vec_GY_hi.x; curGY[3] = vec_GY_hi.y;
 
             uint64_t curGZ[4];
 
