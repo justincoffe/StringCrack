@@ -136,7 +136,7 @@ public:
   static void GenerateCode(Secp256K1 *secp, int size);
   static void PrecomputeStringCrackMasks(StringCrackConfig *config);
   static void ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config);
-  static void ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config);
+  static bool ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config);
 
 private:
 

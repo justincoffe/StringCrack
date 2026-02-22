@@ -883,7 +883,7 @@ __device__ void jacobian_add_affine(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[
 }
 
 // Mixed Jacobian-Affine Addition (In-Place)
-__device__ void jacobian_add_affine_inplace(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[4],
+__device__ __forceinline__ void jacobian_add_affine_inplace(uint64_t X1[4], uint64_t Y1[4], uint64_t Z1[4],
                                             const uint64_t x2[4], const uint64_t y2[4]) {
     
     uint64_t T1[4], T2[4], T3[4], T4[4];
@@ -1293,8 +1293,10 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     err = cudaMemcpyToSymbol(d_seedMaskHi, &seedMaskHi, sizeof(uint64_t));
     if (err != cudaSuccess) { printf("GPUEngine: d_seedMaskHi: %s\n", cudaGetErrorString(err)); return false; }
 
-    // Compute and upload window tables to global memory
-    ComputeWindowTables(secp, (StringCrackConfig*)config);
+    // Safely execute and catch memory allocation errors
+    if (!ComputeWindowTables(secp, (StringCrackConfig*)config)) {
+        return false;
+    }
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
     return true;
@@ -1347,19 +1349,29 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
 }
 
 // Compute 8-Bit Window Tables for accelerated lookup
-void GPUEngine::ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config) {
+bool GPUEngine::ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config) {
     int num_windows = (config->numFreeBits + 7) / 8;
     
-    // Allocate host memory (1D arrays to represent [window][256][4])
+    // Prevent malloc(0) crash if puzzle is fully locked
+    if (num_windows == 0) return true; 
+
+    // Safely retrieve and free old pointers to prevent VRAM leak
+    uint64_t* old_GX = nullptr;
+    uint64_t* old_GY = nullptr;
+    cudaMemcpyFromSymbol(&old_GX, d_window_GX, sizeof(uint64_t*));
+    cudaMemcpyFromSymbol(&old_GY, d_window_GY, sizeof(uint64_t*));
+    if (old_GX) cudaFree(old_GX);
+    if (old_GY) cudaFree(old_GY);
+    
+    // Allocate host memory
     uint64_t* h_window_GX = (uint64_t*)malloc(num_windows * 256 * 4 * sizeof(uint64_t));
     uint64_t* h_window_GY = (uint64_t*)malloc(num_windows * 256 * 4 * sizeof(uint64_t));
     memset(h_window_GX, 0, num_windows * 256 * 4 * sizeof(uint64_t));
     memset(h_window_GY, 0, num_windows * 256 * 4 * sizeof(uint64_t));
 
     for (int w = 0; w < num_windows; w++) {
-        // Find which free bits belong to this window (up to 8 bits)
         int bits_in_window = 0;
-        int window_bit_positions[8];
+        int window_bit_positions[8] = {0}; // Fix: Safe Array initialization
         
         for(int b = 0; b < 8; b++) {
             int global_bit_idx = (w * 8) + b;
@@ -1369,49 +1381,47 @@ void GPUEngine::ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config) 
             }
         }
 
-        // Generate all non-zero combinations for this byte
         int max_val = (1 << bits_in_window);
         for (int val = 1; val < max_val; val++) {
             Int bitKey;
             bitKey.SetInt32(0);
-            
-            // Map the bits of 'val' to their global physical positions
             for (int b = 0; b < bits_in_window; b++) {
                 if ((val >> b) & 1) {
                     int pos = window_bit_positions[b];
                     bitKey.bits64[pos >> 6] |= (1ULL << (pos & 63));
                 }
             }
-
-            // Compute the point
             Point p = secp->ComputePublicKey(&bitKey);
-            
-            // Store flattened
             int idx = (w * 256 + val) * 4;
             memcpy(&h_window_GX[idx], p.x.bits64, 32);
             memcpy(&h_window_GY[idx], p.y.bits64, 32);
         }
     }
 
-    // Allocate device memory and copy from host
+    // Strict Error Checking for GPU Allocations
     size_t tableSize = num_windows * 256 * 4 * sizeof(uint64_t);
-    uint64_t* d_table_GX;
-    uint64_t* d_table_GY;
-    cudaMalloc((void**)&d_table_GX, tableSize);
-    cudaMalloc((void**)&d_table_GY, tableSize);
+    uint64_t* d_table_GX = nullptr;
+    uint64_t* d_table_GY = nullptr;
+    cudaError_t err;
+
+    err = cudaMalloc((void**)&d_table_GX, tableSize);
+    if (err != cudaSuccess) { free(h_window_GX); free(h_window_GY); printf("GPUEngine: OOM GX\n"); return false; }
+
+    err = cudaMalloc((void**)&d_table_GY, tableSize);
+    if (err != cudaSuccess) { cudaFree(d_table_GX); free(h_window_GX); free(h_window_GY); printf("GPUEngine: OOM GY\n"); return false; }
+
     cudaMemcpy(d_table_GX, h_window_GX, tableSize, cudaMemcpyHostToDevice);
     cudaMemcpy(d_table_GY, h_window_GY, tableSize, cudaMemcpyHostToDevice);
     
-    // Copy device pointers to device symbols
     cudaMemcpyToSymbol(d_window_GX, &d_table_GX, sizeof(uint64_t*));
     cudaMemcpyToSymbol(d_window_GY, &d_table_GY, sizeof(uint64_t*));
     
-    // Free host memory
     free(h_window_GX);
     free(h_window_GY);
     
-    printf("[StringCrack] Window tables: %d windows (%d KB)\n", num_windows, (num_windows * 256 * 32) / 1024);
+    printf("[StringCrack] Window tables: %d windows (%d KB)\n", num_windows, (int)((num_windows * 256 * 32) / 1024));
     fflush(stdout);
+    return true;
 }
 
 bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi, uint32_t* d_out, cudaStream_t stream) {
@@ -1433,7 +1443,8 @@ bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOf
     if (!callOpenClawKernel(batchOffsetLo, batchOffsetHi, outputBuffer, 0)) return false;
 
     if (spinWait) {
-        cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
+        // Transfer ONLY the 4-byte counter first
+        cudaMemcpy(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost);
     } else {
         cudaEvent_t evt;
         cudaEventCreate(&evt);
@@ -1448,7 +1459,11 @@ bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOf
 
     uint32_t nbFound = outputBufferPinned[0];
     if (nbFound > maxFound) { nbFound = maxFound; }
-    cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE + 4, cudaMemcpyDeviceToHost);
+    
+    // Transfer ONLY the valid structs, skipping massive amounts of zeros
+    if (nbFound > 0) {
+        cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE + 4, cudaMemcpyDeviceToHost);
+    }
 
     for (uint32_t i = 0; i < nbFound; i++) {
         uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE32 + 1);
