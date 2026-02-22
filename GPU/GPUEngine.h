@@ -124,6 +124,10 @@ public:
   bool SetStringCrackConfig(const StringCrackConfig *config);
   bool LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait=false);
 
+  // Asynchronous double-buffered StringCrack
+  void LaunchOpenClawAsync(uint64_t batchOffsetLo, uint64_t batchOffsetHi);
+  uint32_t SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressFound);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 
@@ -135,7 +139,7 @@ public:
 private:
 
   bool callKernel();
-  bool callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi);
+  bool callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi, uint32_t* d_out, cudaStream_t stream);
   static void ComputeIndex(std::vector<int> &s, int depth, int n);
   static void Browse(FILE *f,int depth, int max, int s);
   bool CheckHash(uint8_t *h, std::vector<ITEM>& found, int tid, int incr, int endo, int *ok);
@@ -165,6 +169,12 @@ private:
   // StringCrack state
   bool stringCrackEnabled;
   StringCrackConfig scConfig;
+
+  // Asynchronous double-buffered streams
+  cudaStream_t streams[2];
+  uint32_t* d_output[2];
+  uint32_t* h_outputPinned[2];
+  int currentStep;
 };
 
 #endif // GPUENGINEH

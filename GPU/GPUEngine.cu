@@ -376,9 +376,24 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     stringCrackEnabled = false;
     memset(&scConfig, 0, sizeof(StringCrackConfig));
 
+    // Initialize asynchronous double-buffered streams
+    for (int i = 0; i < 2; i++) {
+        cudaStreamCreate(&streams[i]);
+        cudaMalloc(&d_output[i], outputSize);
+        cudaMallocHost(&h_outputPinned[i], outputSize);
+    }
+    currentStep = 0;
+
 }
 
 GPUEngine::~GPUEngine() {
+
+    // Cleanup asynchronous double-buffered streams
+    for (int i = 0; i < 2; i++) {
+        cudaStreamDestroy(streams[i]);
+        if (d_output[i]) cudaFree(d_output[i]);
+        if (h_outputPinned[i]) cudaFreeHost(h_outputPinned[i]);
+    }
 
     cudaFree(inputKey);
     cudaFree(inputAddress);
@@ -1192,15 +1207,15 @@ void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
     fflush(stdout);
 }
 
-bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi) {
-    cudaMemset(outputBuffer, 0, 4);
+bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi, uint32_t* d_out, cudaStream_t stream) {
+    cudaMemsetAsync(d_out, 0, 4, stream);
     cudaError_t err = cudaMemcpyToSymbol(d_batchOffsetLo, &batchOffsetLo, sizeof(uint64_t));
     if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetLo: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_batchOffsetHi, &batchOffsetHi, sizeof(uint64_t));
     if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetHi: %s\n", cudaGetErrorString(err)); return false; }
 
-    comp_keys_openclaw<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP>>>(
-        inputAddress, inputAddressLookUp, outputBuffer);
+    comp_keys_openclaw<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP, 0, stream>>>(
+        inputAddress, inputAddressLookUp, d_out);
 
     err = cudaGetLastError();
     if (err != cudaSuccess) { printf("GPUEngine: OpenClaw Kernel: %s\n", cudaGetErrorString(err)); return false; }
@@ -1209,7 +1224,7 @@ bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetH
 
 bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait) {
     addressFound.clear();
-    if (!callOpenClawKernel(batchOffsetLo, batchOffsetHi)) return false;
+    if (!callOpenClawKernel(batchOffsetLo, batchOffsetHi, outputBuffer, 0)) return false;
 
     if (spinWait) {
         cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
@@ -1241,4 +1256,47 @@ bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOf
         addressFound.push_back(it);
     }
     return true;
+}
+
+// Asynchronous double-buffered launch
+void GPUEngine::LaunchOpenClawAsync(uint64_t batchOffsetLo, uint64_t batchOffsetHi) {
+    int s = currentStep % 2;
+
+    // Reset the found counter for this stream asynchronously
+    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
+
+    // Launch the math kernel on this stream
+    callOpenClawKernel(batchOffsetLo, batchOffsetHi, d_output[s], streams[s]);
+
+    // Queue the result transfer back to the CPU asynchronously
+    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
+
+    currentStep++;
+}
+
+// Synchronize and get result for a specific stream
+uint32_t GPUEngine::SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressFound) {
+    int s = stepToSync % 2;
+
+    // Wait ONLY for this specific stream to finish
+    cudaStreamSynchronize(streams[s]);
+
+    uint32_t nbFound = h_outputPinned[s][0];
+    if (nbFound > maxFound) { nbFound = maxFound; }
+
+    addressFound.clear();
+    if (nbFound > 0) {
+        for (uint32_t i = 0; i < nbFound; i++) {
+            uint32_t* itemPtr = h_outputPinned[s] + (i * ITEM_SIZE32 + 1);
+            ITEM it;
+            it.thId = itemPtr[0];
+            int16_t* ptr = (int16_t*)&(itemPtr[1]);
+            it.endo = ptr[0] & 0x7FFF;
+            it.mode = (ptr[0] & 0x8000) != 0;
+            it.incr = ptr[1];
+            it.hash = (uint8_t*)(itemPtr + 2);
+            addressFound.push_back(it);
+        }
+    }
+    return nbFound;
 }

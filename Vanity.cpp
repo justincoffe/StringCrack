@@ -1011,7 +1011,18 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				batchOffsetInt.Add((uint64_t)idxcount * (uint64_t)numThreadsGPU);
 				uint64_t batchOffsetLo = batchOffsetInt.bits64[0];
 				uint64_t batchOffsetHi = batchOffsetInt.bits64[1];
-				ok = g.LaunchOpenClaw(found, batchOffsetLo, batchOffsetHi, true);
+				
+				// Asynchronous double-buffered launch
+				g.LaunchOpenClawAsync(batchOffsetLo, batchOffsetHi);
+				
+				// Process previous batch results while GPU is working on current batch
+				if (idxcount > 0) {
+					int prevStep = g.currentStep - 2;
+					uint32_t nbFound = g.SyncAndGetResult(prevStep, found);
+					if (nbFound > 0) {
+						// Found items will be processed in the loop below
+					}
+				}
 			} else {
 				ok = g.Launch(found, true);
 			}
