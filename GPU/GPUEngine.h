@@ -175,6 +175,7 @@ private:
   cudaStream_t streams[2];
   uint32_t* d_output[2];
   uint32_t* h_outputPinned[2];
+public:
   int currentStep;
 };
 
