@@ -998,8 +998,14 @@ __global__ void comp_keys_openclaw(
             
             uint64_t curGX[4], curGY[4];
             // __ldg forces read-only cache, perfect for lookup tables
-            Load256(curGX, (uint64_t*)&__ldg(&d_window_GX[idx]));
-            Load256(curGY, (uint64_t*)&__ldg(&d_window_GY[idx]));
+            curGX[0] = __ldg(&d_window_GX[idx + 0]);
+            curGX[1] = __ldg(&d_window_GX[idx + 1]);
+            curGX[2] = __ldg(&d_window_GX[idx + 2]);
+            curGX[3] = __ldg(&d_window_GX[idx + 3]);
+            curGY[0] = __ldg(&d_window_GY[idx + 0]);
+            curGY[1] = __ldg(&d_window_GY[idx + 1]);
+            curGY[2] = __ldg(&d_window_GY[idx + 2]);
+            curGY[3] = __ldg(&d_window_GY[idx + 3]);
 
             uint64_t newX[4], newY[4], newZ[4];
             jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
@@ -1020,8 +1026,14 @@ __global__ void comp_keys_openclaw(
             int idx = (w * 256 + byte_val) * 4; 
             
             uint64_t curGX[4], curGY[4];
-            Load256(curGX, (uint64_t*)&__ldg(&d_window_GX[idx]));
-            Load256(curGY, (uint64_t*)&__ldg(&d_window_GY[idx]));
+            curGX[0] = __ldg(&d_window_GX[idx + 0]);
+            curGX[1] = __ldg(&d_window_GX[idx + 1]);
+            curGX[2] = __ldg(&d_window_GX[idx + 2]);
+            curGX[3] = __ldg(&d_window_GX[idx + 3]);
+            curGY[0] = __ldg(&d_window_GY[idx + 0]);
+            curGY[1] = __ldg(&d_window_GY[idx + 1]);
+            curGY[2] = __ldg(&d_window_GY[idx + 2]);
+            curGY[3] = __ldg(&d_window_GY[idx + 3]);
 
             uint64_t newX[4], newY[4], newZ[4];
             jacobian_add_affine(accX, accY, accZ, curGX, curGY, newX, newY, newZ);
@@ -1129,7 +1141,7 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
 
     // Compute and upload window tables to global memory
-    ComputeWindowTables(secp, config);
+    ComputeWindowTables(secp, (StringCrackConfig*)config);
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
     return true;
