@@ -502,136 +502,139 @@ __device__ void _ModMult(uint64_t *r, uint64_t *a) {
 
 
 
-__device__ void _ModSqr(uint64_t *rp, const uint64_t *up) {
+__device__ __forceinline__ void _ModSqr(uint64_t *rp, const uint64_t *up) {
+    uint64_t u0 = up[0], u1 = up[1], u2 = up[2], u3 = up[3];
+    
+    // Explicit scalar registers to lock down the pipeline (no arrays!)
+    uint64_t p0, p1, p2, p3, p4, p5, p6, p7;
+    uint64_t r0, r1, r3, r4, t0, t1, t2, t3, t4;
+    uint64_t u10, u11;
 
-  uint64_t r512[8];
+    // k=0
+    UMULLO_R(p0, u0, u0);
+    UMULHI_R(r1, u0, u0);
 
-  uint64_t u10, u11;
+    // k=1 (Cross term, double it)
+    UMULLO_R(r3, u0, u1);
+    UMULHI_R(r4, u0, u1);
+    UADDO1_R(r3, r3);  
+    UADDC1_R(r4, r4);
+    UADD_R(t1, 0x0ULL, 0x0ULL);
+    
+    UADDO1_R(r3, r1);
+    UADDC1_R(r4, 0x0ULL);
+    UADD1_R(t1, 0x0ULL);
+    p1 = r3;
 
-  uint64_t r0;
-  uint64_t r1;
-  uint64_t r3;
-  uint64_t r4;
+    // k=2 (Cross term double + inner square)
+    UMULLO_R(r0, u0, u2);
+    UMULHI_R(r1, u0, u2);
+    UADDO1_R(r0, r0);
+    UADDC1_R(r1, r1);
+    UADD_R(t2, 0x0ULL, 0x0ULL);
+    
+    UMULLO_R(u10, u1, u1);
+    UMULHI_R(u11, u1, u1);
+    UADDO1_R(r0, u10);
+    UADDC1_R(r1, u11);
+    UADD1_R(t2, 0x0ULL);
+    
+    UADDO1_R(r0, r4);
+    UADDC1_R(r1, t1);
+    UADD1_R(t2, 0x0ULL);
+    p2 = r0;
 
-  uint64_t t1;
-  uint64_t t2;
+    // k=3 (Two cross terms, double both)
+    UMULLO_R(r3, u0, u3);
+    UMULHI_R(r4, u0, u3);
+    UMULLO_R(u10, u1, u2);
+    UMULHI_R(u11, u1, u2);
+    
+    UADDO1_R(r3, u10);
+    UADDC1_R(r4, u11);
+    UADD_R(t1, 0x0ULL, 0x0ULL);
+    t1 += t1; // Native shift to double the carry
+    
+    UADDO1_R(r3, r3);
+    UADDC1_R(r4, r4);
+    UADD1_R(t1, 0x0ULL);
+    
+    UADDO1_R(r3, r1);
+    UADDC1_R(r4, t2);
+    UADD1_R(t1, 0x0ULL);
+    p3 = r3;
 
+    // k=4 (Cross term double + inner square)
+    UMULLO_R(r0, u1, u3);
+    UMULHI_R(r1, u1, u3);
+    UADDO1_R(r0, r0);
+    UADDC1_R(r1, r1);
+    UADD_R(t2, 0x0ULL, 0x0ULL);
+    
+    UMULLO_R(u10, u2, u2);
+    UMULHI_R(u11, u2, u2);
+    UADDO1_R(r0, u10);
+    UADDC1_R(r1, u11);
+    UADD1_R(t2, 0x0ULL);
+    
+    UADDO1_R(r0, r4);
+    UADDC1_R(r1, t1);
+    UADD1_R(t2, 0x0ULL);
+    p4 = r0;
 
-  //k=0
-  UMULLO(r512[0], up[0], up[0]);
-  UMULHI(r1, up[0], up[0]);
+    // k=5 (Cross term double)
+    UMULLO_R(r3, u2, u3);
+    UMULHI_R(r4, u2, u3);
+    UADDO1_R(r3, r3);
+    UADDC1_R(r4, r4);
+    UADD_R(t1, 0x0ULL, 0x0ULL);
+    
+    UADDO1_R(r3, r1);
+    UADDC1_R(r4, t2);
+    UADD1_R(t1, 0x0ULL);
+    p5 = r3;
 
-  //k=1
-  UMULLO(r3, up[0], up[1]);
-  UMULHI(r4, up[0], up[1]);
-  UADDO1(r3, r3);
-  UADDC1(r4, r4);
-  UADD(t1, 0x0ULL, 0x0ULL);
-  UADDO1(r3, r1);
-  UADDC1(r4, 0x0ULL);
-  UADD1(t1, 0x0ULL);
-  r512[1] = r3;
+    // k=6
+    UMULLO_R(r0, u3, u3);
+    UMULHI_R(r1, u3, u3);
+    UADDO1_R(r0, r4);
+    UADD1_R(r1, t1);
+    p6 = r0;
 
-  //k=2
-  UMULLO(r0, up[0], up[2]);
-  UMULHI(r1, up[0], up[2]);
-  UADDO1(r0, r0);
-  UADDC1(r1, r1);
-  UADD(t2, 0x0ULL, 0x0ULL);
-  UMULLO(u10, up[1], up[1]);
-  UMULHI(u11, up[1], up[1]);
-  UADDO1(r0, u10);
-  UADDC1(r1, u11);
-  UADD1(t2, 0x0ULL);
-  UADDO1(r0, r4);
-  UADDC1(r1, t1);
-  UADD1(t2, 0x0ULL);
+    // k=7
+    p7 = r1;
 
-  r512[2] = r0;
+    // Fast Reduction from 512 to 320 (Reusing the highly-optimized logic)
+    uint64_t tmp;
+    t0 = (p4 << 32) + (p4 << 9) + (p4 << 8) + (p4 << 7) + (p4 << 6) + (p4 << 4) + p4;
+    t1 = (p5 << 32) + (p5 << 9) + (p5 << 8) + (p5 << 7) + (p5 << 6) + (p5 << 4) + p5;
+    MADDO_R(t1, p4, 0x1000003D1ULL, t1);
+    
+    t2 = (p6 << 32) + (p6 << 9) + (p6 << 8) + (p6 << 7) + (p6 << 6) + (p6 << 4) + p6;
+    MADDC_R(t2, p5, 0x1000003D1ULL, t2);
+    
+    t3 = (p7 << 32) + (p7 << 9) + (p7 << 8) + (p7 << 7) + (p7 << 6) + (p7 << 4) + p7;
+    tmp = t3;
+    MADDC_R(t3, p6, 0x1000003D1ULL, t3);
+    
+    t4 = tmp + p7;
+    MADD_R(t4, p7, 0x1000003D1ULL, 0ULL);
 
-  //k=3
-  UMULLO(r3, up[0], up[3]);
-  UMULHI(r4, up[0], up[3]);
-  UMULLO(u10, up[1], up[2]);
-  UMULHI(u11, up[1], up[2]);
-  UADDO1(r3, u10);
-  UADDC1(r4, u11);
-  UADD(t1, 0x0ULL, 0x0ULL);
-  t1 += t1;
-  UADDO1(r3, r3);
-  UADDC1(r4, r4);
-  UADD1(t1, 0x0ULL);
-  UADDO1(r3, r1);
-  UADDC1(r4, t2);
-  UADD1(t1, 0x0ULL);
-
-  r512[3] = r3;
-
-  //k=4
-  UMULLO(r0, up[1], up[3]);
-  UMULHI(r1, up[1], up[3]);
-  UADDO1(r0, r0);
-  UADDC1(r1, r1);
-  UADD(t2, 0x0ULL, 0x0ULL);
-  UMULLO(u10, up[2], up[2]);
-  UMULHI(u11, up[2], up[2]);
-  UADDO1(r0, u10);
-  UADDC1(r1, u11);
-  UADD1(t2, 0x0ULL);
-  UADDO1(r0, r4);
-  UADDC1(r1, t1);
-  UADD1(t2, 0x0ULL);
-
-  r512[4] = r0;
-
-  //k=5
-  UMULLO(r3, up[2], up[3]);
-  UMULHI(r4, up[2], up[3]);
-  UADDO1(r3, r3);
-  UADDC1(r4, r4);
-  UADD(t1, 0x0ULL, 0x0ULL);
-  UADDO1(r3, r1);
-  UADDC1(r4, t2);
-  UADD1(t1, 0x0ULL);
-
-  r512[5] = r3;
-
-  //k=6
-  UMULLO(r0, up[3], up[3]);
-  UMULHI(r1, up[3], up[3]);
-  UADDO1(r0, r4);
-  UADD1(r1, t1);
-  r512[6] = r0;
-
-  //k=7
-  r512[7] = r1;
-
-
-  // Reduce from 512 to 320
-  UMULLO(r0, r512[4], 0x1000003D1ULL);
-  UMULLO(r1, r512[5], 0x1000003D1ULL);
-  MADDO(r1, r512[4], 0x1000003D1ULL, r1);
-  UMULLO(t2, r512[6], 0x1000003D1ULL);
-  MADDC(t2, r512[5], 0x1000003D1ULL, t2);
-  UMULLO(r3, r512[7], 0x1000003D1ULL);
-  MADDC(r3, r512[6], 0x1000003D1ULL, r3);
-  MADD(r4, r512[7], 0x1000003D1ULL, 0ULL);
-
-  UADDO1(r512[0], r0);
-  UADDC1(r512[1], r1);
-  UADDC1(r512[2], t2);
-  UADDC1(r512[3], r3);
-
-  // Reduce from 320 to 256
-  UADD1(r4, 0ULL);
-  UMULLO(u10, r4, 0x1000003D1ULL);
-  UMULHI(u11, r4, 0x1000003D1ULL);
-  UADDO(rp[0], r512[0], u10);
-  UADDC(rp[1], r512[1], u11);
-  UADDC(rp[2], r512[2], 0ULL);
-  UADD(rp[3], r512[3], 0ULL);
-
-
+    UADDO1_R(p0, t0);
+    UADDC1_R(p1, t1);
+    UADDC1_R(p2, t2);
+    UADDC1_R(p3, t3);
+    
+    // Fast Reduction from 320 to 256
+    UADD1_R(t4, 0ULL);
+    uint64_t al, ah;
+    UMULLO_R(al, t4, 0x1000003D1ULL);
+    UMULHI_R(ah, t4, 0x1000003D1ULL);
+    
+    UADDO_R(rp[0], p0, al);
+    UADDC_R(rp[1], p1, ah);
+    UADDC_R(rp[2], p2, 0ULL);
+    UADD_R(rp[3], p3, 0ULL);
 }
 
 // ---------------------------------------------------------------------------------------
