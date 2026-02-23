@@ -1335,10 +1335,8 @@ void VanitySearch::PrintStatsStringCrack(
 	double speed;
 	double perc;
 	double bkeys;
-	double totalBKeys;
 	
 	// Calculate progress as: (current - start) / (end - start) * 100
-	// This gives accurate percentage based on distance traveled
 	Int distance;
 	distance.Set(&seedsScanned);
 	distance.Sub(&seedStart);
@@ -1364,6 +1362,7 @@ void VanitySearch::PrintStatsStringCrack(
 		perc = 0.0;
 	}
 
+	// 1. Get the Raw Seed Processing Speed
 	if (realTimeSpeed > 0.0) {
 		speed = realTimeSpeed;
 	} else if (ttot > 0.0001) {
@@ -1371,6 +1370,27 @@ void VanitySearch::PrintStatsStringCrack(
 	} else {
 		speed = 0.0;
 	}
+
+	// =========================================================================
+	// 2. NEW: CALCULATE EFFECTIVE SPEED (Ignoring Geographic Bits 64-70)
+	// =========================================================================
+	int free_under_64 = 0;
+	if (scConfig != NULL) {
+		// Count how many "Free Bits" are located in the 0-63 range
+		for(int i = 0; i < scConfig->numFreeBits; i++) {
+			if(scConfig->freeBitPositions[i] < 64) {
+				free_under_64++;
+			}
+		}
+	}
+	
+	// If there are 64 total bottom bits, the locked ones are (64 - free)
+	int algo_locks = 64 - free_under_64;
+	if (algo_locks < 0) algo_locks = 0;
+	
+	// Effective Speed = Raw Speed * 2^(Algorithmic Locks)
+	double eff_speed = speed * pow(2.0, algo_locks);
+	// =========================================================================
 
 	bkeys = (double)keys_n / 1000000000.0;
 
@@ -1387,8 +1407,9 @@ void VanitySearch::PrintStatsStringCrack(
 		countHex = countHex.substr(countHex.length() - (countBitLen + 3) / 4);
 	}
 
-	printf("%.1f MK/s - %.2f BKeys - %s/%s [%.2f%%] - Found: %d     \r",
-		speed, bkeys,
+	// 3. Print both Raw and Effective Speed!
+	printf("Raw: %.1f MK/s | Eff: %.1f MK/s - %.2f BKeys - %s/%s [%.2f%%] - Found: %d     \r",
+		speed, eff_speed, bkeys,
 		seedHex.c_str(),
 		countHex.c_str(),
 		perc, nbFound);

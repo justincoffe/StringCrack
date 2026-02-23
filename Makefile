@@ -31,8 +31,9 @@ CXXFLAGS   = -O3 -march=native -mtune=native -Wno-write-strings -I. -I$(CUDA)/in
 endif
 LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart
 
-# GPU Architecture Targets (Ada, Hopper, Blackwell)
-GENCODE    = -gencode=arch=compute_89,code=sm_89 \
+# GPU Architecture Targets (Ampere, Ada, Hopper, Blackwell)
+GENCODE    = -gencode=arch=compute_86,code=sm_86 \
+             -gencode=arch=compute_89,code=sm_89 \
              -gencode=arch=compute_90,code=sm_90 \
              -gencode=arch=compute_120,code=sm_120
 
