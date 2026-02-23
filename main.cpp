@@ -598,7 +598,7 @@ int main(int argc, char* argv[]) {
 	int range = 30;
 	std::string start = "0";
 	int endBits = -1;
-	int smMultiplier = 1024; // Default SM multiplier for GPU
+	int smMultiplier = 128; // Default SM multiplier for GPU
 
 	// StringCrack configuration
 	StringCrackConfig scConfig;
