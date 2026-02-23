@@ -1022,6 +1022,12 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			// HYBRID/STANDARD: Calculate start points using fast Batch Modular Inversion
 			getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * idxcount * g.GetStepSize()));
 			ok = g.SetKeys(publicKeys);
+			
+			// REQUIRED FOR STANDARD MODE: Upload the step size coordinate to GPU constants
+			Int kStep;
+			kStep.SetInt32(g.GetStepSize());
+			g.SetRandomJump(secp->ComputePublicKey(&kStep));
+			
 			if (currentChunk == 0) delete[] publicKeys; 
 		}
 
