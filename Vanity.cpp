@@ -943,7 +943,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			
 			printf("[Hybrid Engine] ENGAGED! Skips warp divergence using fast-path math.\n");
 			printf("[Hybrid Engine] Lower free bits: %d (Chunk Size: 2^%d)\n", L_free, L_free);
-			printf("[Hybrid Engine] Upper free bits: %d. Total massive chunks: %llu\n", U_free, totalChunks);
+			printf("[Hybrid Engine] Upper free bits: %d. Total massive chunks: %lu\n", U_free, totalChunks);
 			fflush(stdout);
 		} else {
 			if (!g.SetStringCrackConfig(secp, scConfig)) {
@@ -963,6 +963,9 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	uint64_t streamOffsetLo[2] = {0, 0};
 	uint64_t streamOffsetHi[2] = {0, 0};
 	bool firstBatch = true;
+
+	Int stepThread, taskSize, numthread;
+	Int privkey, part_key, keycount;
 
 	// ==============================================================================
 	// OUTER CHUNKING LOOP (Runs 1 time for standard/SC, TotalChunks for Hybrid)
@@ -994,7 +997,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				bc->ksFinish.bits64[i >> 6] |= (1ULL << (i & 63));
 			}
 
-			printf("\n[Hybrid] Initiating Chunk %llu/%llu. Anchor: %s\n", currentChunk + 1, totalChunks, bc->ksStart.GetBase16().c_str());
+			printf("\n[Hybrid] Initiating Chunk %lu/%lu. Anchor: %s\n", currentChunk + 1, totalChunks, bc->ksStart.GetBase16().c_str());
 			fflush(stdout);
 			idxcount = 0; // Reset standard engine step counter for new chunk
 		}
@@ -1007,7 +1010,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		stepThread.Set(&taskSize);
 		stepThread.Div(&numthread);
 
-		Int privkey, part_key, keycount;
 		t0 = Timer::get_tick();
 
 		if (useStringCrack) {
