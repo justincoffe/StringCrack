@@ -240,9 +240,7 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
 
     NB_TRHEAD_PER_GROUP = 256;                                          //////////////////  GRID SIZE ////////////////
     int nbThreadGroup = deviceProp.multiProcessorCount * smMultiplier;
-
-    // --- COMMENT THIS ENTIRE BLOCK OUT ---
-    /*
+   
     if (!randomMode) {
         uint64_t powerOfTwo = 1;
         while (powerOfTwo <= nbThreadGroup) {  //  GET THE CLOSEST POWER OF 2
@@ -252,10 +250,8 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
         powerOfTwo >>= 1;
         nbThreadGroup = powerOfTwo;
     }
-    */
-    // -------------------------------------
-
     
+
     g_gpuId = gpuId;
 
     // Initialise CUDA
