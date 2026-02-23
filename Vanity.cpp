@@ -1044,12 +1044,14 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				publicKeys[i] = secp->ComputePublicKey(&baseKey);
 			}
 
-			ok = g.SetKeys(publicKeys);
-			
-			// Required: Upload the exact step size (1024) so the GPU strides perfectly
+			// 1. First, upload the exact step size (1024) so the GPU strides perfectly.
+			// This MUST happen before SetKeys because SetKeys launches the first kernel.
 			Int kStep;
 			kStep.SetInt32(g.GetStepSize());
 			g.SetRandomJump(secp->ComputePublicKey(&kStep));
+
+			// 2. Now upload the points and let the first kernel execute cleanly.
+			ok = g.SetKeys(publicKeys);
 			
 			if (currentChunk == 0) delete[] publicKeys; 
 		}
