@@ -1021,8 +1021,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		} else {
 			// =========================================================================
 			// HYBRID ENGINE: 100% Mathematically Perfect CPU-GPU Sync
-			// We bypass the complex batch inversion and directly map each thread's 
-			// starting point exactly to: ksStart + (thId * stepThread) + (groupSize / 2)
+			// Bypasses the Batch Inversion array overflow for massive thread grids.
+			// Maps each thread directly to exactly: ksStart + (thId * stepThread)
 			// =========================================================================
 			
 			Int baseKey;
@@ -1031,7 +1031,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			for (int i = 0; i < numThreadsGPU; i++) {
 				threadOffset.Set(&stepThread);
 				threadOffset.Mult(i);
-				threadOffset.Add(g.GetGroupSize() / 2); // Center the GPU execution window
 				
 				baseKey.Set(&bc->ksStart); // Apply our Hybrid Anchor
 				baseKey.Add(&threadOffset);
@@ -1041,7 +1040,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 			ok = g.SetKeys(publicKeys);
 			
-			// Upload the exact step size (1024) so the GPU strides perfectly every iteration
+			// Required: Upload the exact step size (1024) so the GPU strides perfectly
 			Int kStep;
 			kStep.SetInt32(g.GetStepSize());
 			g.SetRandomJump(secp->ComputePublicKey(&kStep));
