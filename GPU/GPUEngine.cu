@@ -979,34 +979,3 @@ bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOf
     return false;
 }
 
-    if (spinWait) {
-        cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
-    } else {
-        cudaEvent_t evt;
-        cudaEventCreate(&evt);
-        cudaMemcpyAsync(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost, 0);
-        cudaEventRecord(evt, 0);
-        while (cudaEventQuery(evt) == cudaErrorNotReady) Timer::SleepMillis(1);
-        cudaEventDestroy(evt);
-    }
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) { printf("GPUEngine: LaunchOpenClaw: %s\n", cudaGetErrorString(err)); return false; }
-
-    uint32_t nbFound = outputBufferPinned[0];
-    if (nbFound > maxFound) { nbFound = maxFound; }
-    cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE + 4, cudaMemcpyDeviceToHost);
-
-    for (uint32_t i = 0; i < nbFound; i++) {
-        uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE32 + 1);
-        ITEM it;
-        it.thId = itemPtr[0];
-        int16_t* ptr = (int16_t*)&(itemPtr[1]);
-        it.endo = ptr[0] & 0x7FFF;
-        it.mode = (ptr[0] & 0x8000) != 0;
-        it.incr = ptr[1];
-        it.hash = (uint8_t*)(itemPtr + 2);
-        addressFound.push_back(it);
-    }
-    return true;
-}
