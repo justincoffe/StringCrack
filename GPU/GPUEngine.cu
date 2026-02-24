@@ -1439,85 +1439,20 @@ bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetH
 }
 
 bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait) {
+    // Removed: StringCrack kernel no longer used
     addressFound.clear();
-    if (!callOpenClawKernel(batchOffsetLo, batchOffsetHi, outputBuffer, 0)) return false;
-
-    if (spinWait) {
-        // Transfer ONLY the 4-byte counter first
-        cudaMemcpy(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost);
-    } else {
-        cudaEvent_t evt;
-        cudaEventCreate(&evt);
-        cudaMemcpyAsync(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost, 0);
-        cudaEventRecord(evt, 0);
-        while (cudaEventQuery(evt) == cudaErrorNotReady) Timer::SleepMillis(1);
-        cudaEventDestroy(evt);
-    }
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) { printf("GPUEngine: LaunchOpenClaw: %s\n", cudaGetErrorString(err)); return false; }
-
-    uint32_t nbFound = outputBufferPinned[0];
-    if (nbFound > maxFound) { nbFound = maxFound; }
-    
-    // Transfer ONLY the valid structs, skipping massive amounts of zeros
-    if (nbFound > 0) {
-        cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE + 4, cudaMemcpyDeviceToHost);
-    }
-
-    for (uint32_t i = 0; i < nbFound; i++) {
-        uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE32 + 1);
-        ITEM it;
-        it.thId = itemPtr[0];
-        int16_t* ptr = (int16_t*)&(itemPtr[1]);
-        it.endo = ptr[0] & 0x7FFF;
-        it.mode = (ptr[0] & 0x8000) != 0;
-        it.incr = ptr[1];
-        it.hash = (uint8_t*)(itemPtr + 2);
-        addressFound.push_back(it);
-    }
-    return true;
+    return false;
 }
 
 // Asynchronous double-buffered launch
 void GPUEngine::LaunchOpenClawAsync(uint64_t batchOffsetLo, uint64_t batchOffsetHi) {
-    int s = currentStep % 2;
-
-    // Reset the found counter for this stream asynchronously
-    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
-
-    // Launch the math kernel on this stream
-    callOpenClawKernel(batchOffsetLo, batchOffsetHi, d_output[s], streams[s]);
-
-    // Queue the result transfer back to the CPU asynchronously
-    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
-
-    currentStep++;
+    // Removed: StringCrack kernel no longer used
+    return;
 }
 
 // Synchronize and get result for a specific stream
 uint32_t GPUEngine::SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressFound) {
-    int s = stepToSync % 2;
-
-    // Wait ONLY for this specific stream to finish
-    cudaStreamSynchronize(streams[s]);
-
-    uint32_t nbFound = h_outputPinned[s][0];
-    if (nbFound > maxFound) { nbFound = maxFound; }
-
+    // Removed: StringCrack kernel no longer used
     addressFound.clear();
-    if (nbFound > 0) {
-        for (uint32_t i = 0; i < nbFound; i++) {
-            uint32_t* itemPtr = h_outputPinned[s] + (i * ITEM_SIZE32 + 1);
-            ITEM it;
-            it.thId = itemPtr[0];
-            int16_t* ptr = (int16_t*)&(itemPtr[1]);
-            it.endo = ptr[0] & 0x7FFF;
-            it.mode = (ptr[0] & 0x8000) != 0;
-            it.incr = ptr[1];
-            it.hash = (uint8_t*)(itemPtr + 2);
-            addressFound.push_back(it);
-        }
-    }
-    return nbFound;
+    return 0;
 }
