@@ -940,6 +940,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	int sc_lowerFreeBitsCount = 0;
 	bool needsNewBlock = true;
 	uint64_t sc_keys_n = 0;
+	static uint64_t sc_keys_n_prev = 0;
 
 	if (useStringCrack) {
 		printf("[Hybrid Engine] Initializing CPU-GPU Workload Split...\n");
