@@ -1024,29 +1024,35 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			// Bypasses the Batch Inversion array overflow for massive thread grids.
 			// Maps each thread directly to exactly: ksStart + (thId * stepThread)
 			// =========================================================================
-
+			
 			Int baseKey;
 			Int threadOffset;
-
+			Int centerShift;
+			
+			// Center shift for the [-512, +511] GPU window
+			centerShift.SetInt32(g.GetGroupSize() / 2); 
+			
 			for (int i = 0; i < numThreadsGPU; i++) {
 				threadOffset.Set(&stepThread);
 				threadOffset.Mult(i);
 				
 				baseKey.Set(&bc->ksStart); // Apply our Hybrid Anchor
 				baseKey.Add(&threadOffset);
-				baseKey.Add((uint64_t)(g.GetGroupSize() / 2)); 
+				baseKey.Add(&centerShift); // Ensure CPU mapping matches GPU center
 				
 				publicKeys[i] = secp->ComputePublicKey(&baseKey);
 			}
 
-			// 1. First, upload the exact step size (1024) so the GPU strides perfectly.
-			// This MUST happen before SetKeys because SetKeys launches the first kernel.
+			// --- THE CRITICAL FIX ---
+			// g.SetKeys() implicitly launches Kernel 1. We MUST upload the step size 
+			// BEFORE SetKeys, otherwise the GPU memory corrupts on the first pass!
 			Int kStep;
 			kStep.SetInt32(g.GetStepSize());
 			g.SetRandomJump(secp->ComputePublicKey(&kStep));
 
-			// 2. Now upload the points and let the first kernel execute cleanly.
-			ok = g.SetKeys(publicKeys);
+			// Now launch Kernel 1 safely with the 1024 stride already loaded
+			ok = g.SetKeys(publicKeys); 
+			// ------------------------
 			
 			if (currentChunk == 0) delete[] publicKeys; 
 		}
