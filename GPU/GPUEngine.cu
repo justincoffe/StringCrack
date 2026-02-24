@@ -962,46 +962,22 @@ void GPUEngine::PrecomputeStringCrackMasks(StringCrackConfig *config) {
 }
 
 bool GPUEngine::SetStringCrackConfig(const StringCrackConfig *config) {
+    // Intentionally gutted. 
+    // The GPU no longer processes StringCrack configurations! The CPU acts as the brain.
     scConfig = *config;
     stringCrackEnabled = config->enabled;
-    if (!stringCrackEnabled) return true;
-
-    cudaError_t err;
-    err = cudaMemcpyToSymbol(d_lockMask, config->lockMask, sizeof(uint64_t) * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_lockMask: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_lockVals, config->lockVals, sizeof(uint64_t) * 4);
-    if (err != cudaSuccess) { printf("GPUEngine: d_lockVals: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_freeBitPos, config->freeBitPositions, sizeof(int) * 256);
-    if (err != cudaSuccess) { printf("GPUEngine: d_freeBitPos: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_numFreeBits, &config->numFreeBits, sizeof(int));
-    if (err != cudaSuccess) { printf("GPUEngine: d_numFreeBits: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_popcountMin, &config->popcountMin, sizeof(int));
-    if (err != cudaSuccess) { printf("GPUEngine: d_popcountMin: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_popcountMax, &config->popcountMax, sizeof(int));
-    if (err != cudaSuccess) { printf("GPUEngine: d_popcountMax: %s\n", cudaGetErrorString(err)); return false; }
-
-    printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
-    return true;
+    return true; 
 }
 
 bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi) {
-    cudaMemset(outputBuffer, 0, 4);
-    cudaError_t err = cudaMemcpyToSymbol(d_batchOffsetLo, &batchOffsetLo, sizeof(uint64_t));
-    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetLo: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_batchOffsetHi, &batchOffsetHi, sizeof(uint64_t));
-    if (err != cudaSuccess) { printf("GPUEngine: d_batchOffsetHi: %s\n", cudaGetErrorString(err)); return false; }
-
-    comp_keys_openclaw<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP>>>(
-        inputAddress, inputAddressLookUp, outputBuffer);
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) { printf("GPUEngine: OpenClaw Kernel: %s\n", cudaGetErrorString(err)); return false; }
-    return true;
+    // Remove functionality. Use standard callKernel() instead.
+    return false;
 }
 
 bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait) {
-    addressFound.clear();
-    if (!callOpenClawKernel(batchOffsetLo, batchOffsetHi)) return false;
+    // Remove functionality. Use standard Launch() instead.
+    return false;
+}
 
     if (spinWait) {
         cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
