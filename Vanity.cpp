@@ -1028,18 +1028,13 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			Int baseKey;
 			Int threadOffset;
 
-			// NEW: We must shift the starting key by +512 because the GPU kernel 
-			// evaluates a symmetric window [Center - 512, Center + 511].
-			Int centerShift; 
-			centerShift.SetInt32(g.GetGroupSize() / 2);
-
 			for (int i = 0; i < numThreadsGPU; i++) {
 				threadOffset.Set(&stepThread);
 				threadOffset.Mult(i);
 				
 				baseKey.Set(&bc->ksStart); // Apply our Hybrid Anchor
 				baseKey.Add(&threadOffset);
-				baseKey.Add(&centerShift); // Apply the mathematical center shift!
+				baseKey.Add((uint64_t)(g.GetGroupSize() / 2)); 
 				
 				publicKeys[i] = secp->ComputePublicKey(&baseKey);
 			}
