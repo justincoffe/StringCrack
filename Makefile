@@ -1,6 +1,7 @@
 #---------------------------------------------------------------------
-# V3 Bulletproof Makefile for VanitySearch (CUDA 12.8 / GCC 11)
-#---------------------------------------------------------------------
+# Makefile for vanitysearch
+#
+# Author : Jean-Luc PONS
 
 SRC = Base58.cpp IntGroup.cpp main.cpp Random.cpp \
       Timer.cpp Int.cpp IntMod.cpp Point.cpp SECP256K1.cpp \
@@ -17,34 +18,26 @@ OBJET = $(addprefix $(OBJDIR)/, \
         hash/ripemd160_sse.o hash/sha256_sse.o \
         GPU/GPUEngine.o Bech32.o Wildcard.o)
 
-# Locked strictly to your g++-11 installation
-CXX        = g++-11
+CXX        = g++-9
 CUDA       = /usr/local/cuda
-CXXCUDA    = g++-11
+CXXCUDA    = /usr/bin/g++-9
 NVCC       = $(CUDA)/bin/nvcc
 
-# CPU Optimization: -O3 and native AVX/AVX2 vectorization
 ifdef debug
-CXXFLAGS   = -g -Wno-write-strings -I. -I$(CUDA)/include
+CXXFLAGS   = -mssse3 -Wno-write-strings -g -I. -I$(CUDA)/include
 else
-CXXFLAGS   = -O3 -march=native -mtune=native -Wno-write-strings -I. -I$(CUDA)/include
+CXXFLAGS   = -mssse3 -Wno-write-strings -O2 -I. -I$(CUDA)/include
 endif
 LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart
-
-# GPU Architecture Targets (Ampere, Ada, Hopper, Blackwell)
-GENCODE    = -gencode=arch=compute_86,code=sm_86 \
-             -gencode=arch=compute_89,code=sm_89 \
-             -gencode=arch=compute_90,code=sm_90 \
-             -gencode=arch=compute_120,code=sm_120
 
 #--------------------------------------------------------------------
 
 ifdef debug
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include $(GENCODE) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
+	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -gencode=arch=compute_89,code=sm_89 -gencode=arch=compute_89,code=compute_89 -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 else
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) -maxrregcount=0 -Xptxas -O3 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O3 -I$(CUDA)/include $(GENCODE) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
+	$(NVCC) -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(CUDA)/include -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -gencode=arch=compute_89,code=sm_89 -gencode=arch=compute_89,code=compute_89 -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 endif
 
 $(OBJDIR)/%.o : %.cpp
@@ -53,7 +46,7 @@ $(OBJDIR)/%.o : %.cpp
 all: VanitySearch
 
 VanitySearch: $(OBJET)
-	@echo "Linking V3 Bulletproof VanitySearch..."
+	@echo Making VanitySearch...
 	$(CXX) $(OBJET) $(LFLAGS) -o vanitysearch
 
 $(OBJET): | $(OBJDIR) $(OBJDIR)/GPU $(OBJDIR)/hash
@@ -62,14 +55,13 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 $(OBJDIR)/GPU: $(OBJDIR)
-	cd $(OBJDIR) && mkdir -p GPU
+	cd $(OBJDIR) &&	mkdir -p GPU
 
 $(OBJDIR)/hash: $(OBJDIR)
-	cd $(OBJDIR) && mkdir -p hash
+	cd $(OBJDIR) &&	mkdir -p hash
 
 clean:
-	@echo "Cleaning up..."
+	@echo Cleaning...
 	@rm -f obj/*.o
 	@rm -f obj/GPU/*.o
 	@rm -f obj/hash/*.o
-	@rm -f vanitysearch
