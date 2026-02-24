@@ -885,7 +885,6 @@ void VanitySearch::getGPUStartingKeys(Int& tRangeStart, Int& tRangeEnd, int grou
 void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 	bool ok = true;
-
 	double t0;
 	double ttot;
 	uint64_t keys_n = 0;
@@ -907,44 +906,25 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	RandomJump_K.SetInt32(STEP_SIZE);
 	RandomJump_K_last.SetInt32(0);
 	RandomJump_K_tot.SetInt32(0);
-	bool kneg = false;
 
 	fprintf(stdout, "GPU: %s\n", g.deviceName.c_str());
 	fflush(stdout);
-
 	counters[thId] = 0;
 	
 	g.SetSearchMode(searchMode);
 	g.SetSearchType(searchType);
 	if (onlyFull) {
 		g.SetAddress(usedAddressL, nbAddress);
-	}
-	else {
+	} else {
 		g.SetAddress(usedAddress);
 	}
 
-	// StringCrack: Upload configuration to GPU if enabled
 	bool useStringCrack = (scConfig != NULL && scConfig->enabled);
-	if (useStringCrack) {
-		if (!g.SetStringCrackConfig(secp, scConfig)) {
-			printf("[StringCrack] Failed to upload config to GPU!\n");
-			useStringCrack = false;
-		} else {
-			printf("[StringCrack] GPU kernel ready\n");
-			fflush(stdout);
-		}
-	}
 
 	Int stepThread;
 	Int taskSize;
 	Int numthread;
-
-	taskSize.Set(&bc->ksFinish);
-	taskSize.Sub(&bc->ksStart);
-	taskSize.AddOne();
 	numthread.SetInt32(numThreadsGPU);
-	stepThread.Set(&taskSize);
-	stepThread.Div(&numthread);
 
 	Int privkey;
 	Int part_key;
@@ -952,45 +932,135 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 	t0 = Timer::get_tick();
 
+	// ==========================================
+	// HYBRID ENGINE STATE
+	// ==========================================
+	Int sc_currentSeed;
+	Int sc_limitSeed;
+	int sc_lowerFreeBitsCount = 0;
+	bool needsNewBlock = true;
+	uint64_t sc_keys_n = 0;
+	static uint64_t sc_keys_n_prev = 0;
+
 	if (useStringCrack) {
-		printf("[StringCrack] Skipping traditional key setup (Bit Injection mode)\n");
-		delete[] publicKeys;
-		ok = true;
+		printf("[Hybrid Engine] Initializing CPU-GPU Workload Split...\n");
+		
+		// CPU detects the contiguous block of lower free bits for the GPU
+		while (sc_lowerFreeBitsCount < scConfig->numFreeBits &&
+			   scConfig->freeBitPositions[sc_lowerFreeBitsCount] == sc_lowerFreeBitsCount) {
+			sc_lowerFreeBitsCount++;
+		}
+
+		if (sc_lowerFreeBitsCount < 20) {
+			printf("[Hybrid Engine] WARNING: Low contiguous free bits (%d). CPU bottleneck highly likely on massive arrays.\n", sc_lowerFreeBitsCount);
+		}
+
+		printf("[Hybrid Engine] Muscle: %d contiguous lower free bits (Block size: 2^%d).\n", sc_lowerFreeBitsCount, sc_lowerFreeBitsCount);
+		
+		sc_currentSeed.Set(&scConfig->seedOffsetInt);
+		if (scConfig->endBits > 0) {
+			sc_limitSeed.Set(&scConfig->seedEndInt);
+		} else {
+			sc_limitSeed.Set(&scConfig->seedCountInt);
+		}
 	} else {
+		// Normal Mode Setup
+		taskSize.Set(&bc->ksFinish);
+		taskSize.Sub(&bc->ksStart);
+		taskSize.AddOne();
+		stepThread.Set(&taskSize);
+		stepThread.Div(&numthread);
+
 		getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * idxcount * g.GetStepSize()));
 		ok = g.SetKeys(publicKeys);
-		delete[] publicKeys;
+		needsNewBlock = false;
 	}
 
 	ttot = Timer::get_tick() - t0;
-
-
-	printf("Starting keys set in %.2f seconds \n", ttot);
+	printf("Initialization completed in %.2f seconds \n", ttot);
 	fflush(stdout);
 
 	ph->hasStarted = true;
-
 	printf("GPU Started ! \r");
 	fflush(stdout);
 
 	t0 = Timer::get_tick();
-
 	endOfSearch = false;
 
-	// Track offsets per stream for async double-buffering
-	uint64_t streamOffsetLo[2] = {0, 0};
-	uint64_t streamOffsetHi[2] = {0, 0};
-	bool firstBatch = true;
+	// Hybrid Engine Bit Expander (CPU Side Only)
+	auto expand_seed = [&](Int& seed, Int& key) {
+		key.SetInt32(0);
+		key.bits64[0] = scConfig->lockVals[0];
+		key.bits64[1] = scConfig->lockVals[1];
+		key.bits64[2] = scConfig->lockVals[2];
+		key.bits64[3] = scConfig->lockVals[3];
+
+		for (int fb = 0; fb < scConfig->numFreeBits; fb++) {
+			int pos = scConfig->freeBitPositions[fb];
+			int seedLimb = fb >> 6;
+			int seedBit = fb & 63;
+			
+			if ((seed.bits64[seedLimb] >> seedBit) & 1ULL) {
+				key.bits64[pos >> 6] |= (1ULL << (pos & 63));
+			}
+		}
+	};
 
 	while (ok && !endOfSearch) {
 
 		if (!Pause) {	
+			
+			// ==========================================
+			// HYBRID BLOCK GENERATOR
+			// ==========================================
+			if (needsNewBlock && useStringCrack) {
+				if (sc_currentSeed.IsGreaterOrEqual(&sc_limitSeed)) {
+					endOfSearch = true;
+					break;
+				}
 
+				Int mask;
+				mask.SetInt32(1);
+				mask.ShiftL(sc_lowerFreeBitsCount);
+				mask.Sub(1);
+
+				Int blockEndSeed;
+				blockEndSeed.Set(&sc_currentSeed);
+				blockEndSeed.ShiftR(sc_lowerFreeBitsCount);
+				blockEndSeed.ShiftL(sc_lowerFreeBitsCount);
+				blockEndSeed.Add(&mask);
+
+				if (blockEndSeed.IsGreaterOrEqual(&sc_limitSeed)) {
+					blockEndSeed.Set(&sc_limitSeed);
+					blockEndSeed.Sub(1);
+				}
+
+				Int ksStart, ksFinish;
+				expand_seed(sc_currentSeed, ksStart);
+				expand_seed(blockEndSeed, ksFinish);
+
+				// Feed FixedPaul's optimized array builder
+				bc->ksStart.Set(&ksStart);
+				bc->ksFinish.Set(&ksFinish);
+
+				taskSize.Set(&ksFinish);
+				taskSize.Sub(&ksStart);
+				taskSize.AddOne();
+
+				stepThread.Set(&taskSize);
+				stepThread.Div(&numthread);
+
+				getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, 0);
+				ok = g.SetKeys(publicKeys);
+
+				idxcount = 0;
+				keycount.SetInt32(0);
+				needsNewBlock = false;
+			}
 
 			if (randomMode && !useStringCrack) {
 				RandomJump_K_last.Set(&RandomJump_K);
 				RandomJump_K_tot.Add(&RandomJump_K);
-
 				RandomJump_K.Rand(256);
 				RandomJump_K.Mod(&stepThread);
 				RandomJump_K.Sub(&RandomJump_K_tot);
@@ -1000,331 +1070,108 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 					RandomJump_P = secp->ComputePublicKey(&RandomJump_K);
 					RandomJump_P.y.ModNeg();
 					RandomJump_K.Neg();
-				}
-				else {
+				} else {
 					RandomJump_P = secp->ComputePublicKey(&RandomJump_K);
 				}
-				
 				ok = g.SetRandomJump(RandomJump_P);
 			}
 
-			if (useStringCrack) {
-				// Use Int for full 256-bit batch offset calculation
-				Int batchOffsetInt;
-				batchOffsetInt.Set(&scConfig->seedOffsetInt);
-				batchOffsetInt.Add((uint64_t)idxcount * (uint64_t)numThreadsGPU);
-				uint64_t batchOffsetLo = batchOffsetInt.bits64[0];
-				uint64_t batchOffsetHi = batchOffsetInt.bits64[1];
-				
-				// Determine which stream we are about to use
-				int current_s = g.currentStep % 2;
-				
-				// SAVE the offset for this specific stream before launching
-				streamOffsetLo[current_s] = batchOffsetLo;
-				streamOffsetHi[current_s] = batchOffsetHi;
-				
-				// Asynchronous double-buffered launch
-				g.LaunchOpenClawAsync(batchOffsetLo, batchOffsetHi);
-				
-				// Process previous batch results while GPU is working on current batch
-				if (!firstBatch) {
-					int prev_s = (g.currentStep - 2) % 2;
-					uint32_t nbFound = g.SyncAndGetResult(prev_s, found);
-					if (nbFound > 0) {
-						// Process found items using the saved offset for this stream
-						for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-							ITEM it = found[i];
-							
-							// Reconstruct the EXACT 128-bit seed that was sent to the kernel for this batch
-							Int seedInt;
-							seedInt.SetInt32(0); // Clear it
-							seedInt.bits64[0] = streamOffsetLo[prev_s];
-							seedInt.bits64[1] = streamOffsetHi[prev_s];
-							seedInt.Add((uint64_t)it.thId); // Add the thread ID just like the GPU did
-							
-							uint64_t keyBits[4];
-							keyBits[0] = scConfig->lockVals[0];
-							keyBits[1] = scConfig->lockVals[1];
-							keyBits[2] = scConfig->lockVals[2];
-							keyBits[3] = scConfig->lockVals[3];
-							
-							uint64_t seedLo = seedInt.bits64[0];
-							for (int fb = 0; fb < 64 && fb < scConfig->numFreeBits; fb++) {
-								if (seedLo & 1ULL) {
-									int pos = scConfig->freeBitPositions[fb];
-									keyBits[pos >> 6] |= (1ULL << (pos & 63));
-								}
-								seedLo >>= 1;
-							}
-							if (scConfig->numFreeBits > 64) {
-								uint64_t seedHi = seedInt.bits64[1];
-								for (int fb = 64; fb < scConfig->numFreeBits && fb < 128; fb++) {
-									if (seedHi & 1ULL) {
-										int pos = scConfig->freeBitPositions[fb];
-										keyBits[pos >> 6] |= (1ULL << (pos & 63));
-									}
-									seedHi >>= 1;
-								}
-							}
-							privkey.SetInt32(0);
-							privkey.bits64[0] = keyBits[0];
-							privkey.bits64[1] = keyBits[1];
-							privkey.bits64[2] = keyBits[2];
-							privkey.bits64[3] = keyBits[3];
-							checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
-						}
-						found.clear();
-					}
-				}
-				firstBatch = false;
-			} else {
-				ok = g.Launch(found, true);
-			}
+			// ==========================================
+			// THE MUSCLE: Standard Kernel Launch
+			// ==========================================
+			ok = g.Launch(found, true);
 			idxcount += 1;
 
-			if (!randomMode && idxcount%60==0) {
-				
+			if (!randomMode && idxcount % 60 == 0) {
 				saveBackup(idxcount, ttot, ph->gpuId);
 			}
-			//printf("\n rnd: %s  idx:  %d \n", RandomJump_K_tot.GetBase10().c_str(), idxcount);
 
 			ttot = Timer::get_tick() - t0 + t_Paused;
 
 			keycount.SetInt32(idxcount - 1);
 			keycount.Mult(STEP_SIZE);
 
-
+			// ==========================================
+			// RECONSTRUCTION (Linear and Flawless)
+			// ==========================================
 			for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-
 				ITEM it = found[i];
 
-				if (useStringCrack) {
-					// Reconstruct key from seed via expand_bits (CPU side)
-					// Use Int for full 256-bit support
-					Int prevBatchInt;
-					prevBatchInt.Set(&scConfig->seedOffsetInt);
-					prevBatchInt.Add((uint64_t)(idxcount - 1) * (uint64_t)numThreadsGPU);
-					Int seedInt;
-					seedInt.Set(&prevBatchInt);
-					seedInt.Add((uint64_t)it.thId);
-					
-					uint64_t keyBits[4];
-					keyBits[0] = scConfig->lockVals[0];
-					keyBits[1] = scConfig->lockVals[1];
-					keyBits[2] = scConfig->lockVals[2];
-					keyBits[3] = scConfig->lockVals[3];
-					
-					// Process lower 64 bits of seed
-					uint64_t seedLo = seedInt.bits64[0];
-					for (int fb = 0; fb < 64 && fb < scConfig->numFreeBits; fb++) {
-						if (seedLo & 1ULL) {
-							int pos = scConfig->freeBitPositions[fb];
-							keyBits[pos >> 6] |= (1ULL << (pos & 63));
-						}
-						seedLo >>= 1;
-					}
-					// Process upper bits (64+) of seed
-					uint64_t seedHi = seedInt.bits64[1];
-					for (int fb = 64; fb < scConfig->numFreeBits; fb++) {
-						if (seedHi & 1ULL) {
-							int pos = scConfig->freeBitPositions[fb];
-							keyBits[pos >> 6] |= (1ULL << (pos & 63));
-						}
-						seedHi >>= 1;
-					}
-					privkey.SetInt32(0);
-					privkey.bits64[0] = keyBits[0];
-					privkey.bits64[1] = keyBits[1];
-					privkey.bits64[2] = keyBits[2];
-					privkey.bits64[3] = keyBits[3];
-					checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
+				part_key.Set(&stepThread);
+				part_key.Mult(it.thId);
+				privkey.Set(&bc->ksStart);
+				privkey.Add(&part_key);
+				
+				if (randomMode && !useStringCrack) {
+					privkey.Add(&RandomJump_K_tot);
+					privkey.Sub(&RandomJump_K_last);
 				} else {
-					part_key.Set(&stepThread);
-					part_key.Mult(it.thId);
-					privkey.Set(&bc->ksStart);
-					privkey.Add(&part_key);
-					if (randomMode) {
-						privkey.Add(&RandomJump_K_tot);
-						privkey.Sub(&RandomJump_K_last);
-					} else {
-						privkey.Add(&keycount);
-					}
-					checkAddr(*(address_t*)(it.hash), it.hash, privkey, it.incr, it.endo, it.mode);
+					privkey.Add(&keycount);
 				}
+				
+				checkAddr(*(address_t*)(it.hash), it.hash, privkey, it.incr, it.endo, it.mode);
 			}
 
 			keycount.Add(STEP_SIZE);
 			keycount.Mult(numThreadsGPU);
-			// Fix the variable BEFORE it gets passed to PrintStatsStringCrack
-			if (useStringCrack) {
-				keys_n = 1ULL * numThreadsGPU;
-				keys_n = keys_n * idxcount;
-			} else {
-				keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
-				keys_n = keys_n * idxcount;
-			}
-		
-			
 
-			
+			keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
+			keys_n = keys_n * idxcount;
+
+			if (useStringCrack) {
+				Int step_adv;
+				step_adv.SetInt32(STEP_SIZE);
+				step_adv.Mult(numThreadsGPU);
+				sc_currentSeed.Add(&step_adv);
+				
+				sc_keys_n += (1ULL * STEP_SIZE * numThreadsGPU);
+
+				// Request next block from CPU when GPU reaches the end
+				if (keycount.IsGreaterOrEqual(&taskSize)) {
+					needsNewBlock = true;
+				}
+			}
 
 		} else {
 			printf("Pausing...\r");
 			fflush(stdout);
-
 			g.FreeGPUEngine();
-
 			Paused = true;
 			t_Paused = ttot;
 		}
 		
-
-		// StringCrack: Use custom progress display (throttled to every ~0.5 seconds)
+		// Stats Output
 		if (useStringCrack) {
-			static double lastStatsTime = 0.0;
-			static uint64_t lastStatsKeys = 0;
-			static double real_time_speed = 0.0;
-
-			if (ttot - lastStatsTime >= 0.5 || lastStatsTime == 0.0) {
-				
-				// 1. Calculate Real-Time Speed specifically over this ~0.5s window
-				double delta_time = ttot - lastStatsTime;
-				uint64_t delta_keys = keys_n - lastStatsKeys;
-
-				if (lastStatsTime > 0.0 && delta_time > 0.0) {
-					real_time_speed = static_cast<double>(delta_keys) / (delta_time * 1000000.0);
-				}
-
-				// 2. Update tracking variables for the next 0.5s window
-				lastStatsTime = ttot;
-				lastStatsKeys = keys_n;
-				
-				// Calculate current seed position = offset + (idxcount * numThreadsGPU)
-				uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
-				Int currentSeed;
-				currentSeed.Set(&scConfig->seedOffsetInt);
-				currentSeed.Add(scanned);
-				
-				// Use seedEndInt for progress if -end was specified, otherwise use seedCountInt
-				Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
-				
-				// 3. Pass the newly calculated real_time_speed to your print function
-				PrintStatsStringCrack(keys_n, keys_n_prev, ttot, tprev,
-					currentSeed, limitSeed, scConfig->seedOffsetInt,
-					scConfig->numLockedBits, nbFoundKey, real_time_speed);
+			PrintStatsStringCrack(sc_keys_n, sc_keys_n_prev, ttot, tprev,
+				sc_currentSeed, sc_limitSeed, scConfig->seedOffsetInt,
+				scConfig->numLockedBits, nbFoundKey, 0.0);
+			sc_keys_n_prev = sc_keys_n;
+			
+			if (sc_currentSeed.IsGreaterOrEqual(&sc_limitSeed)) {
+				double avg_speed = static_cast<double>(sc_keys_n) / (ttot * 1000000.0);
+				printf("\n[Hybrid Engine] Range Finished! Avg: %.1f [MK/s] - Found: %d\n", avg_speed, nbFoundKey);
+				fflush(stdout);
+				endOfSearch = true;
 			}
 		} else {
 			PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
-		}
-
-		
-
-		// StringCrack stop condition: check if we've scanned all seeds
-		if (useStringCrack) {
-			// Calculate current seed = offset + (idxcount * numThreadsGPU)
-			uint64_t scanned = (uint64_t)idxcount * (uint64_t)numThreadsGPU;
-			Int currentSeed;
-			currentSeed.Set(&scConfig->seedOffsetInt);
-			currentSeed.Add(scanned);
-			
-			// Use seedEndInt for stop condition if -end was specified
-			Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
-			
-			if (currentSeed.IsGreaterOrEqual(&limitSeed)) {
+			if (keycount.IsGreaterOrEqual(&taskSize) && (!randomMode)) {
 				double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0);
-				printf("\n");
-				std::string offsetStr = scConfig->seedOffsetInt.GetBase16();
-				std::string countStr = scConfig->seedCountInt.GetBase16();
-				printf("[StringCrack] Seed Range Finished! Offset: 0x%s, Seeds: 0x%s - Avg: %.1f [MK/s] - Found: %d\n",
-					offsetStr.c_str(), countStr.c_str(),
-					avg_speed, nbFoundKey);
+				printf("\nRange Finished! - Average Speed: %.1f [MK/s] - Found: %d   \r\n", avg_speed, nbFoundKey);
 				fflush(stdout);
-				char* ctimeBuff;
-				time_t now = time(NULL);
-				ctimeBuff = ctime(&now);
-				printf("Current task END time: %s", ctimeBuff);
 				endOfSearch = true;
 			}
+			keys_n_prev = keys_n;
 		}
 
-		if (keycount.IsGreaterOrEqual(&taskSize) && (!randomMode) && !useStringCrack)
-		{
-			double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0); // Avg speed in MK/s
-			printf("\n");
-			printf("Range Finished! - Average Speed: %.1f [MK/s] - Found: %d   \r", avg_speed, nbFoundKey);
-			printf("\n");
-			fflush(stdout);
-
-			char* ctimeBuff;
-			time_t now = time(NULL);
-			ctimeBuff = ctime(&now);
-			printf("Current task END time: %s", ctimeBuff);
-
-			endOfSearch = true;
-
-			
-
-		}
-
-		keys_n_prev = keys_n;
-		tprev = ttot ;
-
+		tprev = ttot;
 	}
-
-	// Process the final batch for async StringCrack mode
-	if (useStringCrack && !firstBatch) {
-		int last_s = (g.currentStep - 1) % 2;
-		uint32_t nbFound = g.SyncAndGetResult(last_s, found);
-		if (nbFound > 0) {
-			for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-				ITEM it = found[i];
-				// Reconstruct the EXACT 128-bit seed that was sent to the kernel for this batch
-				Int seedInt;
-				seedInt.SetInt32(0); // Clear it
-				seedInt.bits64[0] = streamOffsetLo[last_s];
-				seedInt.bits64[1] = streamOffsetHi[last_s];
-				seedInt.Add((uint64_t)it.thId); // Add the thread ID just like the GPU did
-				uint64_t keyBits[4];
-				keyBits[0] = scConfig->lockVals[0];
-				keyBits[1] = scConfig->lockVals[1];
-				keyBits[2] = scConfig->lockVals[2];
-				keyBits[3] = scConfig->lockVals[3];
-				uint64_t seedLo = seedInt.bits64[0];
-				for (int fb = 0; fb < 64 && fb < scConfig->numFreeBits; fb++) {
-					if (seedLo & 1ULL) {
-						int pos = scConfig->freeBitPositions[fb];
-						keyBits[pos >> 6] |= (1ULL << (pos & 63));
-					}
-					seedLo >>= 1;
-				}
-				if (scConfig->numFreeBits > 64) {
-					uint64_t seedHi = seedInt.bits64[1];
-					for (int fb = 64; fb < scConfig->numFreeBits && fb < 128; fb++) {
-						if (seedHi & 1ULL) {
-							int pos = scConfig->freeBitPositions[fb];
-							keyBits[pos >> 6] |= (1ULL << (pos & 63));
-						}
-						seedHi >>= 1;
-					}
-				}
-				privkey.SetInt32(0);
-				privkey.bits64[0] = keyBits[0];
-				privkey.bits64[1] = keyBits[1];
-				privkey.bits64[2] = keyBits[2];
-				privkey.bits64[3] = keyBits[3];
-				checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
-			}
-		}
-	}
-
 
 	ph->isRunning = false;
-
 	endOfSearch = true;
+	delete[] publicKeys; 
 }
 
-
-// Custom stats display for StringCrack mode
 void VanitySearch::PrintStatsStringCrack(
     uint64_t keys_n, uint64_t keys_n_prev, 
     double ttot, double tprev, 
