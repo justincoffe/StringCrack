@@ -400,6 +400,9 @@ GPUEngine::~GPUEngine() {
     if (inputAddressLookUp) cudaFree(inputAddressLookUp);
     cudaFreeHost(outputBufferPinned);
     cudaFree(outputBuffer);
+
+    // FIX: Safely clean up the pinned memory on exit
+    if (inputKeyPinned) cudaFreeHost(inputKeyPinned);
 }
 
 
@@ -596,9 +599,9 @@ bool GPUEngine::SetKeys(Point* p) {
     // Fill device memory
 
     cudaMemcpy(inputKey, inputKeyPinned, nbThread * 32 * 2, cudaMemcpyHostToDevice);
-    // We do not need the input pinned memory anymore
-    cudaFreeHost(inputKeyPinned);
-    inputKeyPinned = NULL;
+    // FIX: Do not free pinned memory so Hybrid Engine can feed continuous blocks
+    // cudaFreeHost(inputKeyPinned);
+    // inputKeyPinned = NULL;
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
