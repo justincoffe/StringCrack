@@ -931,16 +931,19 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	Int keycount;
 
 	t0 = Timer::get_tick();
+	endOfSearch = false;
 
-	// ==========================================
-	// HYBRID ENGINE STATE
-	// ==========================================
+	// Thread-safe tracking variables
 	Int sc_currentSeed;
 	Int sc_limitSeed;
+	Int sc_blockEndSeed; // NEW: Tracks the exact end of the block
 	int sc_lowerFreeBitsCount = 0;
 	bool needsNewBlock = true;
 	uint64_t sc_keys_n = 0;
 	static uint64_t sc_keys_n_prev = 0;
+	
+	Int previous_ksStart; // NEW: Local delta tracking
+	bool isFirstBlock = true; // NEW: Local init flag
 
 	if (useStringCrack) {
 		printf("[Hybrid Engine] Initializing CPU-GPU Workload Split...\n");
@@ -1024,22 +1027,21 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				mask.ShiftL(sc_lowerFreeBitsCount);
 				mask.Sub(1);
 
-				Int blockEndSeed;
-				blockEndSeed.Set(&sc_currentSeed);
-				blockEndSeed.ShiftR(sc_lowerFreeBitsCount);
-				blockEndSeed.ShiftL(sc_lowerFreeBitsCount);
-				blockEndSeed.Add(&mask);
+				// Lock the exact end boundary of this block
+				sc_blockEndSeed.Set(&sc_currentSeed);
+				sc_blockEndSeed.ShiftR(sc_lowerFreeBitsCount);
+				sc_blockEndSeed.ShiftL(sc_lowerFreeBitsCount);
+				sc_blockEndSeed.Add(&mask);
 
-				if (blockEndSeed.IsGreaterOrEqual(&sc_limitSeed)) {
-					blockEndSeed.Set(&sc_limitSeed);
-					blockEndSeed.Sub(1);
+				if (sc_blockEndSeed.IsGreaterOrEqual(&sc_limitSeed)) {
+					sc_blockEndSeed.Set(&sc_limitSeed);
+					sc_blockEndSeed.Sub(1);
 				}
 
 				Int ksStart, ksFinish;
 				expand_seed(sc_currentSeed, ksStart);
-				expand_seed(blockEndSeed, ksFinish);
+				expand_seed(sc_blockEndSeed, ksFinish);
 
-				// Feed FixedPaul's optimized array builder
 				bc->ksStart.Set(&ksStart);
 				bc->ksFinish.Set(&ksFinish);
 
@@ -1050,28 +1052,28 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				stepThread.Set(&taskSize);
 				stepThread.Div(&numthread);
 
-				// Save the old start for delta calculation
-				static Int oldStart;
-				static bool isFirstBlock = true;
-
-				if (!isFirstBlock) {
-					// Calculate scalar distance between old and new block start
+				if (isFirstBlock) {
+					// First block ONLY: Build geometry from scratch
+					getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, 0);
+					isFirstBlock = false;
+				} else {
+					// All subsequent blocks: Mathematically teleport
 					Int deltaScalar;
 					deltaScalar.Set(&bc->ksStart);
-					deltaScalar.Sub(&oldStart);
+					
+					// Failsafe for elliptic curve boundaries
+					if (deltaScalar.IsLower(&previous_ksStart)) {
+						deltaScalar.Add(&secp->order);
+					}
+					deltaScalar.Sub(&previous_ksStart);
 
-					// Teleport the grid instead of rebuilding it
 					TeleportGrid(publicKeys, numThreadsGPU, deltaScalar);
-					ok = g.SetKeys(publicKeys);
-				} else {
-					// First block: build from scratch
-					getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, 0);
-					ok = g.SetKeys(publicKeys);
-					isFirstBlock = false;
 				}
 
-				// Save current start for next iteration
-				oldStart.Set(&bc->ksStart);
+				// Store current anchor for the next jump calculation
+				previous_ksStart.Set(&bc->ksStart);
+
+				ok = g.SetKeys(publicKeys);
 
 				idxcount = 0;
 				keycount.SetInt32(0);
@@ -1135,18 +1137,21 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			keycount.Add(STEP_SIZE);
 			keycount.Mult(numThreadsGPU);
 
-			keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
-			keys_n = keys_n * idxcount;
-
 			if (useStringCrack) {
-				Int step_adv;
-				step_adv.SetInt32(STEP_SIZE);
-				step_adv.Mult(numThreadsGPU);
-				sc_currentSeed.Add(&step_adv);
-				
 				sc_keys_n += (1ULL * STEP_SIZE * numThreadsGPU);
 
-				// Request next block from CPU when GPU reaches the end
+				if (keycount.IsGreaterOrEqual(&taskSize)) {
+					needsNewBlock = true;
+					// THE FIX: Snap exactly to the start of the next block. DO NOT OVERSHOOT.
+					sc_currentSeed.Set(&sc_blockEndSeed);
+					sc_currentSeed.AddOne();
+				} else {
+					Int step_adv;
+					step_adv.SetInt32(STEP_SIZE);
+					step_adv.Mult(numThreadsGPU);
+					sc_currentSeed.Add(&step_adv);
+				}
+			} else {
 				if (keycount.IsGreaterOrEqual(&taskSize)) {
 					needsNewBlock = true;
 				}
