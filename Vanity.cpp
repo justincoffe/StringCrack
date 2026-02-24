@@ -1050,8 +1050,28 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				stepThread.Set(&taskSize);
 				stepThread.Div(&numthread);
 
-				getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, 0);
-				ok = g.SetKeys(publicKeys);
+				// Save the old start for delta calculation
+				static Int oldStart;
+				static bool isFirstBlock = true;
+
+				if (!isFirstBlock) {
+					// Calculate scalar distance between old and new block start
+					Int deltaScalar;
+					deltaScalar.Set(&bc->ksStart);
+					deltaScalar.Sub(&oldStart);
+
+					// Teleport the grid instead of rebuilding it
+					TeleportGrid(publicKeys, numThreadsGPU, deltaScalar);
+					ok = g.SetKeys(publicKeys);
+				} else {
+					// First block: build from scratch
+					getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, 0);
+					ok = g.SetKeys(publicKeys);
+					isFirstBlock = false;
+				}
+
+				// Save current start for next iteration
+				oldStart.Set(&bc->ksStart);
 
 				idxcount = 0;
 				keycount.SetInt32(0);
@@ -1470,4 +1490,64 @@ string VanitySearch::GetHex(vector<unsigned char> &buffer) {
 	}
 
 	return ret;
+}
+
+void VanitySearch::TeleportGrid(Point* p, int numThreads, Int& deltaScalar) {
+    // 1. Calculate the single Jump Point
+    Point P_delta = secp->ComputePublicKey(&deltaScalar);
+
+    Int* dx = new Int[numThreads];
+    Int* subp = new Int[numThreads];
+
+    // 2. Calculate dx_i for all points
+    for (int i = 0; i < numThreads; i++) {
+        dx[i].ModSub(&P_delta.x, &p[i].x);
+    }
+
+    // 3. Cumulative product for Montgomery batch inversion
+    subp[0].Set(&dx[0]);
+    for (int i = 1; i < numThreads; i++) {
+        subp[i].ModMulK1(&subp[i - 1], &dx[i]);
+    }
+
+    // 4. Invert the total product
+    Int inverse;
+    inverse.Set(&subp[numThreads - 1]);
+    inverse.ModInv();
+
+    // 5. Backtrack to find individual inverses
+    Int newValue;
+    for (int i = numThreads - 1; i > 0; i--) {
+        newValue.ModMulK1(&subp[i - 1], &inverse); // inverse of dx[i]
+        inverse.ModMulK1(&dx[i]);                  // pass inverse down to next
+        dx[i].Set(&newValue);
+    }
+    dx[0].Set(&inverse); // dx[0] is now its own inverse
+
+    // 6. Apply the EC addition formulas using the inverses
+    Int lambda, lambdaSq, dy, x_new, y_new;
+    for (int i = 0; i < numThreads; i++) {
+        // lambda = (y_delta - y_i) * dx_i^-1
+        dy.ModSub(&P_delta.y, &p[i].y);
+        lambda.ModMulK1(&dy, &dx[i]);
+
+        // lambdaSq = lambda^2
+        lambdaSq.ModSquareK1(&lambda);
+
+        // x_new = lambdaSq - x_i - x_delta
+        x_new.ModSub(&lambdaSq, &p[i].x);
+        x_new.ModSub(&P_delta.x);
+
+        // y_new = lambda * (x_i - x_new) - y_i
+        y_new.ModSub(&p[i].x, &x_new);
+        y_new.ModMulK1(&lambda);
+        y_new.ModSub(&p[i].y);
+
+        // Update the point in place
+        p[i].x.Set(&x_new);
+        p[i].y.Set(&y_new);
+    }
+
+    delete[] dx;
+    delete[] subp;
 }

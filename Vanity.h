@@ -100,6 +100,7 @@ public:
 
 	void Search(std::vector<int> gpuId, std::vector<int> gridSize);
 	void FindKeyGPU(TH_PARAM* p);
+	void TeleportGrid(Point* p, int numThreads, Int& deltaScalar);
 
 private:
 
