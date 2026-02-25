@@ -945,6 +945,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	Int previous_ksStart; // NEW: Local delta tracking
 	bool isFirstBlock = true; // NEW: Local init flag
 
+	// Thread-local seed variables for Multi-GPU support
+	Int thread_currentSeed;
+	Int thread_limitSeed;
+	Int thread_blockEndSeed;
+
 	if (useStringCrack) {
 		printf("[Hybrid Engine] Initializing CPU-GPU Workload Split...\n");
 		
@@ -993,8 +998,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		}
 
 		// Isolate the seed states to the local thread context
-		Int thread_currentSeed;
-		Int thread_limitSeed;
+		// (Variables are now declared at function level)
 		
 		thread_currentSeed.Set(&myStart);
 		thread_limitSeed.Set(&myEnd);
@@ -1011,6 +1015,14 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * idxcount * g.GetStepSize()));
 		ok = g.SetKeys(publicKeys);
 		needsNewBlock = false;
+
+		// For Single-GPU: thread_currentSeed = global start, thread_limitSeed = global end
+		thread_currentSeed.Set(&scConfig->seedOffsetInt);
+		if (scConfig->endBits > 0) {
+			thread_limitSeed.Set(&scConfig->seedEndInt);
+		} else {
+			thread_limitSeed.Set(&scConfig->seedCountInt);
+		}
 	}
 
 	ttot = Timer::get_tick() - t0;
@@ -1062,7 +1074,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				mask.Sub(1);
 
 				// Lock the exact end boundary of this block
-				Int thread_blockEndSeed;
+				// (thread_blockEndSeed is now declared at function level)
 				thread_blockEndSeed.Set(&thread_currentSeed);
 				thread_blockEndSeed.ShiftR(sc_lowerFreeBitsCount);
 				thread_blockEndSeed.ShiftL(sc_lowerFreeBitsCount);
