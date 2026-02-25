@@ -951,6 +951,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	bool needsNewBlock = true;
 	uint64_t sc_keys_n = 0;
 	static uint64_t sc_keys_n_prev = 0;
+	static double sc_last_print_time = 0.0; // FIX: Track exact time of last print
 	
 	Int previous_ksStart; // NEW: Local delta tracking
 	bool isFirstBlock = true; // NEW: Local init flag
@@ -1240,13 +1241,13 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				}
 
 				// UI Throttle: Only print every 0.5 seconds
-				static double last_print_time = 0.0;
-				if (ttot - last_print_time >= 0.5) {
-					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, tprev,
+				if (ttot - sc_last_print_time >= 0.5) {
+					// FIX: Pass sc_last_print_time instead of tprev
+					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, sc_last_print_time,
 						thread_currentSeed, thread_limitSeed, scConfig->seedOffsetInt,
 						scConfig->numLockedBits, nbFoundKey, 0.0);
 					sc_keys_n_prev = total_cluster_keys;
-					last_print_time = ttot;
+					sc_last_print_time = ttot;
 				}
 			}
 			
@@ -1256,7 +1257,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 					for (int i = 0; i < numGPUs; i++) {
 						total_cluster_keys += counters[i];
 					}
-					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, tprev,
+					// FIX: Pass sc_last_print_time instead of tprev
+					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, sc_last_print_time,
 						thread_currentSeed, thread_limitSeed, scConfig->seedOffsetInt,
 						scConfig->numLockedBits, nbFoundKey, 0.0);
 
@@ -1326,8 +1328,9 @@ void VanitySearch::PrintStatsStringCrack(
 	// 1. Get the Raw Seed Processing Speed
 	if (realTimeSpeed > 0.0) {
 		speed = realTimeSpeed;
-	} else if (ttot > 0.0001) {
-		speed = (double)keys_n / (ttot * 1000000.0);
+	} else if (ttot > tprev) {
+		// FIX: Use true instantaneous speed calculation instead of total average
+		speed = (double)(keys_n - keys_n_prev) / ((ttot - tprev) * 1000000.0);
 	} else {
 		speed = 0.0;
 	}
@@ -1336,17 +1339,23 @@ void VanitySearch::PrintStatsStringCrack(
 	// 2. NEW: CALCULATE EFFECTIVE SPEED (Ignoring Geographic Bits 64-70)
 	// =========================================================================
 	int free_under_64 = 0;
+	int puzzle_bits_under_64 = 64; // Default to 64
+	
 	if (scConfig != NULL) {
-		// Count how many "Free Bits" are located in the 0-63 range
+		// FIX: Bound the calculation if the search space is explicitly smaller than 64 bits
+		if (scConfig->puzzleBits > 0 && scConfig->puzzleBits < 64) {
+			puzzle_bits_under_64 = scConfig->puzzleBits;
+		}
+		// Count how many "Free Bits" are located in the relevant range
 		for(int i = 0; i < scConfig->numFreeBits; i++) {
-			if(scConfig->freeBitPositions[i] < 64) {
+			if(scConfig->freeBitPositions[i] < puzzle_bits_under_64) {
 				free_under_64++;
 			}
 		}
 	}
 	
-	// If there are 64 total bottom bits, the locked ones are (64 - free)
-	int algo_locks = 64 - free_under_64;
+	// The algorithmic multiplier is purely based on explicitly locked bits in that range
+	int algo_locks = puzzle_bits_under_64 - free_under_64;
 	if (algo_locks < 0) algo_locks = 0;
 	
 	// Effective Speed = Raw Speed * 2^(Algorithmic Locks)
