@@ -727,8 +727,8 @@ void VanitySearch::getGPUStartingKeys(Int& tRangeStart, Int& tRangeEnd, int grou
 	Int stepThread;
 	Int numthread;
 
-	stepThread.Set(&bc->ksFinish);
-	stepThread.Sub(&bc->ksStart);
+	stepThread.Set(&tRangeEnd);
+	stepThread.Sub(&tRangeStart);
 	stepThread.AddOne();
 	numthread.SetInt32(nbThread);
 	stepThread.Div(&numthread);
@@ -893,6 +893,16 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 	// Global init
 	int thId = ph->threadId;
+
+	// FIX: Make keyspace bounds completely thread-local
+	Int local_ksStart;
+	local_ksStart.Set(&bc->ksStart);
+	Int local_ksFinish;
+	local_ksFinish.Set(&bc->ksFinish);
+
+	// FIX: Localize the iteration counter so threads don't corrupt each other
+	int local_idxcount = 0;
+
 	GPUEngine g(ph->gpuId, maxFound, ph->smMultiplier);
 	int numThreadsGPU = g.GetNbThread();
 	int STEP_SIZE = g.GetStepSize();
@@ -1006,13 +1016,14 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		printf("[Hybrid Engine] GPU %d Workload: Seeds %s to %s\n", thId, myStart.GetBase16().c_str(), myEnd.GetBase16().c_str());
 	} else {
 		// Normal Mode Setup
-		taskSize.Set(&bc->ksFinish);
-		taskSize.Sub(&bc->ksStart);
+		taskSize.Set(&local_ksFinish);     // Changed from bc->
+		taskSize.Sub(&local_ksStart);      // Changed from bc->
 		taskSize.AddOne();
 		stepThread.Set(&taskSize);
 		stepThread.Div(&numthread);
 
-		getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * idxcount * g.GetStepSize()));
+		// Changed from bc-> and used local_idxcount
+		getGPUStartingKeys(local_ksStart, local_ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * local_idxcount * g.GetStepSize()));
 		ok = g.SetKeys(publicKeys);
 		needsNewBlock = false;
 
@@ -1089,11 +1100,12 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				expand_seed(thread_currentSeed, ksStart);
 				expand_seed(thread_blockEndSeed, ksFinish);
 
-				bc->ksStart.Set(&ksStart);
-				bc->ksFinish.Set(&ksFinish);
+				// FIX: Update local state, DO NOT touch global bc
+				local_ksStart.Set(&ksStart);
+				local_ksFinish.Set(&ksFinish);
 
-				taskSize.Set(&ksFinish);
-				taskSize.Sub(&ksStart);
+				taskSize.Set(&local_ksFinish);
+				taskSize.Sub(&local_ksStart);
 				taskSize.AddOne();
 
 				stepThread.Set(&taskSize);
@@ -1101,12 +1113,12 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 				if (isFirstBlock) {
 					// First block ONLY: Build geometry from scratch
-					getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, 0);
+					getGPUStartingKeys(local_ksStart, local_ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, 0);
 					isFirstBlock = false;
 				} else {
 					// All subsequent blocks: Mathematically teleport
 					Int deltaScalar;
-					deltaScalar.Set(&bc->ksStart);
+					deltaScalar.Set(&local_ksStart); // FIX
 					
 					// Failsafe for elliptic curve boundaries
 					if (deltaScalar.IsLower(&previous_ksStart)) {
@@ -1118,11 +1130,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				}
 
 				// Store current anchor for the next jump calculation
-				previous_ksStart.Set(&bc->ksStart);
+				previous_ksStart.Set(&local_ksStart); // FIX
 
 				ok = g.SetKeys(publicKeys);
 
-				idxcount = 0;
+				local_idxcount = 0; // FIX
 				keycount.SetInt32(0);
 				needsNewBlock = false;
 			}
@@ -1149,15 +1161,15 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			// THE MUSCLE: Standard Kernel Launch
 			// ==========================================
 			ok = g.Launch(found, true);
-			idxcount += 1;
+			local_idxcount += 1; // FIX
 
-			if (!randomMode && idxcount % 60 == 0) {
-				saveBackup(idxcount, ttot, ph->gpuId);
+			if (!randomMode && local_idxcount % 60 == 0) {
+				saveBackup(local_idxcount, ttot, ph->gpuId); // FIX
 			}
 
 			ttot = Timer::get_tick() - t0 + t_Paused;
 
-			keycount.SetInt32(idxcount - 1);
+			keycount.SetInt32(local_idxcount - 1); // FIX
 			keycount.Mult(STEP_SIZE);
 
 			// ==========================================
@@ -1168,7 +1180,9 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 				part_key.Set(&stepThread);
 				part_key.Mult(it.thId);
-				privkey.Set(&bc->ksStart);
+
+				// FIX: Reconstruct using the thread's local anchor!
+				privkey.Set(&local_ksStart);
 				privkey.Add(&part_key);
 				
 				if (randomMode && !useStringCrack) {
