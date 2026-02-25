@@ -719,6 +719,10 @@ int main(int argc, char* argv[]) {
 
 	fprintf(stdout, "StringCracker v" RELEASE "\n");
 
+	// 1. Properly parse the comma-separated GPU list FIRST
+	getInts("gpuId", gpuId, gpuParsed, ',');
+
+	// 2. NOW initialize the grid sizes based on the correct number of GPUs
 	if (gridSize.size() == 0) {
 		for (int i = 0; i < gpuId.size(); i++) {
 			gridSize.push_back(-1);
@@ -729,11 +733,6 @@ int main(int argc, char* argv[]) {
 		printf("Invalid gridSize or gpuId argument, must have coherent size\n");
 		exit(-1);
 	}
-
-	
-	size_t commaPos = gpuParsed.find(',');
-	std::string firstValue = gpuParsed.substr(0, commaPos);
-	gpuId[0] = std::stoi(firstValue);
 
 	if (range > 255)
 		range = 255;
