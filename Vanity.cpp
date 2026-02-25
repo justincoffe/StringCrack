@@ -992,8 +992,12 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			myEnd.Add(&chunkSpace);
 		}
 
-		sc_currentSeed.Set(&myStart);
-		sc_limitSeed.Set(&myEnd);
+		// Isolate the seed states to the local thread context
+		Int thread_currentSeed;
+		Int thread_limitSeed;
+		
+		thread_currentSeed.Set(&myStart);
+		thread_limitSeed.Set(&myEnd);
 		
 		printf("[Hybrid Engine] GPU %d Workload: Seeds %s to %s\n", thId, myStart.GetBase16().c_str(), myEnd.GetBase16().c_str());
 	} else {
@@ -1047,7 +1051,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			// HYBRID BLOCK GENERATOR
 			// ==========================================
 			if (needsNewBlock && useStringCrack) {
-				if (sc_currentSeed.IsGreaterOrEqual(&sc_limitSeed)) {
+				if (thread_currentSeed.IsGreaterOrEqual(&thread_limitSeed)) {
 					endOfSearch = true;
 					break;
 				}
@@ -1058,19 +1062,20 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				mask.Sub(1);
 
 				// Lock the exact end boundary of this block
-				sc_blockEndSeed.Set(&sc_currentSeed);
-				sc_blockEndSeed.ShiftR(sc_lowerFreeBitsCount);
-				sc_blockEndSeed.ShiftL(sc_lowerFreeBitsCount);
-				sc_blockEndSeed.Add(&mask);
+				Int thread_blockEndSeed;
+				thread_blockEndSeed.Set(&thread_currentSeed);
+				thread_blockEndSeed.ShiftR(sc_lowerFreeBitsCount);
+				thread_blockEndSeed.ShiftL(sc_lowerFreeBitsCount);
+				thread_blockEndSeed.Add(&mask);
 
-				if (sc_blockEndSeed.IsGreaterOrEqual(&sc_limitSeed)) {
-					sc_blockEndSeed.Set(&sc_limitSeed);
-					sc_blockEndSeed.Sub(1);
+				if (thread_blockEndSeed.IsGreaterOrEqual(&thread_limitSeed)) {
+					thread_blockEndSeed.Set(&thread_limitSeed);
+					thread_blockEndSeed.Sub(1);
 				}
 
 				Int ksStart, ksFinish;
-				expand_seed(sc_currentSeed, ksStart);
-				expand_seed(sc_blockEndSeed, ksFinish);
+				expand_seed(thread_currentSeed, ksStart);
+				expand_seed(thread_blockEndSeed, ksFinish);
 
 				bc->ksStart.Set(&ksStart);
 				bc->ksFinish.Set(&ksFinish);
@@ -1173,13 +1178,13 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				if (keycount.IsGreaterOrEqual(&taskSize)) {
 					needsNewBlock = true;
 					// THE FIX: Snap exactly to the start of the next block. DO NOT OVERSHOOT.
-					sc_currentSeed.Set(&sc_blockEndSeed);
-					sc_currentSeed.AddOne();
+					thread_currentSeed.Set(&thread_blockEndSeed);
+					thread_currentSeed.AddOne();
 				} else {
 					Int step_adv;
 					step_adv.SetInt32(STEP_SIZE);
 					step_adv.Mult(numThreadsGPU);
-					sc_currentSeed.Add(&step_adv);
+					thread_currentSeed.Add(&step_adv);
 				}
 			} else {
 				if (keycount.IsGreaterOrEqual(&taskSize)) {
@@ -1212,21 +1217,21 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				static double last_print_time = 0.0;
 				if (ttot - last_print_time >= 0.5) {
 					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, tprev,
-						sc_currentSeed, sc_limitSeed, scConfig->seedOffsetInt,
+						thread_currentSeed, thread_limitSeed, scConfig->seedOffsetInt,
 						scConfig->numLockedBits, nbFoundKey, 0.0);
 					sc_keys_n_prev = total_cluster_keys;
 					last_print_time = ttot;
 				}
 			}
 			
-			if (sc_currentSeed.IsGreaterOrEqual(&sc_limitSeed)) {
+			if (thread_currentSeed.IsGreaterOrEqual(&thread_limitSeed)) {
 				if (thId == 0) {
 					uint64_t total_cluster_keys = 0;
 					for (int i = 0; i < numGPUs; i++) {
 						total_cluster_keys += counters[i];
 					}
 					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, tprev,
-						sc_currentSeed, sc_limitSeed, scConfig->seedOffsetInt,
+						thread_currentSeed, thread_limitSeed, scConfig->seedOffsetInt,
 						scConfig->numLockedBits, nbFoundKey, 0.0);
 
 					double avg_speed = static_cast<double>(total_cluster_keys) / (ttot * 1000000.0);
