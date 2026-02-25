@@ -960,12 +960,42 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 		printf("[Hybrid Engine] Muscle: %d contiguous lower free bits (Block size: 2^%d).\n", sc_lowerFreeBitsCount, sc_lowerFreeBitsCount);
 		
-		sc_currentSeed.Set(&scConfig->seedOffsetInt);
+		Int globalStart, globalEnd, totalSpace, chunkSpace, myStart, myEnd;
+		globalStart.Set(&scConfig->seedOffsetInt);
+		
 		if (scConfig->endBits > 0) {
-			sc_limitSeed.Set(&scConfig->seedEndInt);
+			globalEnd.Set(&scConfig->seedEndInt);
 		} else {
-			sc_limitSeed.Set(&scConfig->seedCountInt);
+			globalEnd.Set(&scConfig->seedCountInt);
 		}
+
+		// Calculate total seeds and divide by number of GPUs
+		totalSpace.Set(&globalEnd);
+		totalSpace.Sub(&globalStart);
+		
+		Int gpusInt;
+		gpusInt.SetInt32(numGPUs);
+		chunkSpace.Set(&totalSpace);
+		chunkSpace.Div(&gpusInt);
+
+		// Calculate this specific GPU's start seed: offset + (thId * chunk)
+		myStart.Set(&chunkSpace);
+		myStart.Mult(thId);
+		myStart.Add(&globalStart);
+
+		// Calculate this specific GPU's end seed
+		if (thId == numGPUs - 1) {
+			// The last GPU always takes the exact remainder to the end
+			myEnd.Set(&globalEnd); 
+		} else {
+			myEnd.Set(&myStart);
+			myEnd.Add(&chunkSpace);
+		}
+
+		sc_currentSeed.Set(&myStart);
+		sc_limitSeed.Set(&myEnd);
+		
+		printf("[Hybrid Engine] GPU %d Workload: Seeds %s to %s\n", thId, myStart.GetBase16().c_str(), myEnd.GetBase16().c_str());
 	} else {
 		// Normal Mode Setup
 		taskSize.Set(&bc->ksFinish);
@@ -1167,16 +1197,44 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		
 		// Stats Output
 		if (useStringCrack) {
-			PrintStatsStringCrack(sc_keys_n, sc_keys_n_prev, ttot, tprev,
-				sc_currentSeed, sc_limitSeed, scConfig->seedOffsetInt,
-				scConfig->numLockedBits, nbFoundKey, 0.0);
-			sc_keys_n_prev = sc_keys_n;
+			
+			// Push local keys to the global array so Thread 0 can see them
+			counters[thId] = sc_keys_n;
+
+			// ONLY Thread 0 is allowed to print to prevent console garbling
+			if (thId == 0) {
+				uint64_t total_cluster_keys = 0;
+				for (int i = 0; i < numGPUs; i++) {
+					total_cluster_keys += counters[i];
+				}
+
+				// UI Throttle: Only print every 0.5 seconds
+				static double last_print_time = 0.0;
+				if (ttot - last_print_time >= 0.5) {
+					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, tprev,
+						sc_currentSeed, sc_limitSeed, scConfig->seedOffsetInt,
+						scConfig->numLockedBits, nbFoundKey, 0.0);
+					sc_keys_n_prev = total_cluster_keys;
+					last_print_time = ttot;
+				}
+			}
 			
 			if (sc_currentSeed.IsGreaterOrEqual(&sc_limitSeed)) {
-				double avg_speed = static_cast<double>(sc_keys_n) / (ttot * 1000000.0);
-				printf("\n[Hybrid Engine] Range Finished! Avg: %.1f [MK/s] - Found: %d\n", avg_speed, nbFoundKey);
-				fflush(stdout);
-				endOfSearch = true;
+				if (thId == 0) {
+					uint64_t total_cluster_keys = 0;
+					for (int i = 0; i < numGPUs; i++) {
+						total_cluster_keys += counters[i];
+					}
+					PrintStatsStringCrack(total_cluster_keys, sc_keys_n_prev, ttot, tprev,
+						sc_currentSeed, sc_limitSeed, scConfig->seedOffsetInt,
+						scConfig->numLockedBits, nbFoundKey, 0.0);
+
+					double avg_speed = static_cast<double>(total_cluster_keys) / (ttot * 1000000.0);
+					printf("\n[Hybrid Engine] Cluster Finished! Avg: %.1f [MK/s] - Found: %d\n", avg_speed, nbFoundKey);
+					fflush(stdout);
+				}
+				// All threads exit when their specific chunk is done
+				endOfSearch = true; 
 			}
 		} else {
 			PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
@@ -1436,8 +1494,7 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 	//double t0;
 	//double t1;
 	endOfSearch = false;
-	/*numGPUs = ((int)gpuId.size());*/
-	numGPUs = 1;
+	numGPUs = ((int)gpuId.size());
 	nbFoundKey = 0;
 
 	memset(counters, 0, sizeof(counters));	
