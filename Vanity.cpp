@@ -945,6 +945,22 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	Int previous_ksStart; // NEW: Local delta tracking
 	bool isFirstBlock = true; // NEW: Local init flag
 
+	// --- NEW: FAULT-TOLERANT MUTATION SETUP ---
+	int current_mutation = 0;
+	std::vector<uint64_t> xor_masks;
+	uint64_t weak_bits[] = {40, 45, 57, 60, 62};
+	
+	xor_masks.push_back(0ULL); // HD 0 (The exact AI prediction)
+	for(int i = 0; i < 5; i++) {
+		xor_masks.push_back(1ULL << weak_bits[i]); // HD 1 (1 bit flipped)
+	}
+	for(int i = 0; i < 5; i++) {
+		for(int j = i + 1; j < 5; j++) {
+			xor_masks.push_back((1ULL << weak_bits[i]) | (1ULL << weak_bits[j])); // HD 2 (2 bits flipped)
+		}
+	}
+	// ------------------------------------------
+
 	if (useStringCrack) {
 		printf("[Hybrid Engine] Initializing CPU-GPU Workload Split...\n");
 		
@@ -991,9 +1007,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	endOfSearch = false;
 
 	// Hybrid Engine Bit Expander (CPU Side Only)
-	auto expand_seed = [&](Int& seed, Int& key) {
+	auto expand_seed = [&](Int& seed, Int& key, uint64_t xor_mask) {
 		key.SetInt32(0);
-		key.bits64[0] = scConfig->lockVals[0];
+		// NATIVE XOR INJECTION: Flips the weak bits directly in the base prediction
+		key.bits64[0] = scConfig->lockVals[0] ^ xor_mask; 
 		key.bits64[1] = scConfig->lockVals[1];
 		key.bits64[2] = scConfig->lockVals[2];
 		key.bits64[3] = scConfig->lockVals[3];
@@ -1039,8 +1056,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				}
 
 				Int ksStart, ksFinish;
-				expand_seed(sc_currentSeed, ksStart);
-				expand_seed(sc_blockEndSeed, ksFinish);
+				expand_seed(sc_currentSeed, ksStart, xor_masks[current_mutation]);
+				expand_seed(sc_blockEndSeed, ksFinish, xor_masks[current_mutation]);
 
 				bc->ksStart.Set(&ksStart);
 				bc->ksFinish.Set(&ksFinish);
@@ -1142,9 +1159,16 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 				if (keycount.IsGreaterOrEqual(&taskSize)) {
 					needsNewBlock = true;
-					// THE FIX: Snap exactly to the start of the next block. DO NOT OVERSHOOT.
-					sc_currentSeed.Set(&sc_blockEndSeed);
-					sc_currentSeed.AddOne();
+					
+					// SHIFT REALITY: Check the same seed block against the next HD permutation
+					current_mutation++;
+					if (current_mutation >= 16) {
+						current_mutation = 0; // Reset mutations
+						
+						// THE FIX: Snap exactly to the start of the next block. DO NOT OVERSHOOT.
+						sc_currentSeed.Set(&sc_blockEndSeed);
+						sc_currentSeed.AddOne();
+					}
 				} else {
 					Int step_adv;
 					step_adv.SetInt32(STEP_SIZE);
