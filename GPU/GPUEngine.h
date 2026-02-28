@@ -94,6 +94,10 @@ typedef struct {
     Int seedOffsetInt;          // Full 256-bit seed offset
     Int seedCountInt;           // Full 256-bit seed count
     Int seedEndInt;             // Full 256-bit end offset (start + 2^endBits)
+    
+    // Weak bits for Fault-Tolerant Blast Radius
+    int weakBits[10];           // Array to hold the weak bit positions (max 10)
+    int numWeakBits;            // Number of weak bits provided
 } StringCrackConfig;
 
 // Second level lookup

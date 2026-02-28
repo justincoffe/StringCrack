@@ -128,6 +128,7 @@ void printUsage() {
 	printf(" -backup: Backup mode.\n");
 	printf("\n === StringCrack Mode ===\n");
 	printf(" -lock \"pos:val,...\": Lock bit positions. Example: -lock \"93:0,98:0,99:0,78:0\"\n");
+	printf(" -weak \"pos,pos,...\": Define weak bits for Fault-Tolerant Blast Radius. Example: -weak \"40,45,57,60,62\"\n");
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
 	exit(-1);
@@ -159,6 +160,27 @@ void parseLockString(const string& lockStr, StringCrackConfig* config) {
 	printf("[StringCrack] Parsed %d locked bits\n", config->numLockedBits);
 	for (int i = 0; i < config->numLockedBits; i++)
 		printf("  Bit %d = %d\n", config->lockedBits[i].position, config->lockedBits[i].value);
+	fflush(stdout);
+}
+
+
+// Parse -weak argument: "40,45,57,60,62"
+void parseWeakString(const string& weakStr, StringCrackConfig* config) {
+	config->numWeakBits = 0;
+	if (weakStr.empty()) return;
+	stringstream ss(weakStr);
+	string token;
+	while (getline(ss, token, ',')) {
+		size_t start = token.find_first_not_of(" \t");
+		size_t end = token.find_last_not_of(" \t");
+		if (start == string::npos) continue;
+		token = token.substr(start, end - start + 1);
+		int pos = stoi(token);
+		if (pos < 0 || pos > 255) { fprintf(stderr, "[ERROR] Weak pos %d out of range\n", pos); exit(-1); }
+		if (config->numWeakBits >= 10) { fprintf(stderr, "[ERROR] Too many weak bits (max 10)\n"); exit(-1); }
+		config->weakBits[config->numWeakBits++] = pos;
+	}
+	printf("[StringCrack] Parsed %d weak bits for Fault-Tolerant Blast Radius\n", config->numWeakBits);
 	fflush(stdout);
 }
 
@@ -684,6 +706,11 @@ int main(int argc, char* argv[]) {
 			a++;
 			lockStr = string(argv[a]);
 			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-weak") == 0) {
+			a++;
+			parseWeakString(string(argv[a]), &scConfig);
 			a++;
 		}
 		else if (strcmp(argv[a], "-popcount") == 0) {
