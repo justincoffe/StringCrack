@@ -956,6 +956,26 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	Int previous_ksStart; // NEW: Local delta tracking
 	bool isFirstBlock = true; // NEW: Local init flag
 
+	// --- NEW: DYNAMIC FAULT-TOLERANT MUTATION SETUP ---
+	int current_mutation = 0;
+	std::vector<uint64_t> xor_masks;
+	
+	xor_masks.push_back(0ULL); // HD 0 (The exact AI prediction)
+	
+	if (scConfig != NULL && scConfig->numWeakBits > 0) {
+		// HD 1 (1 bit flipped)
+		for(int i = 0; i < scConfig->numWeakBits; i++) {
+			xor_masks.push_back(1ULL << scConfig->weakBits[i]); 
+		}
+		// HD 2 (2 bits flipped)
+		for(int i = 0; i < scConfig->numWeakBits; i++) {
+			for(int j = i + 1; j < scConfig->numWeakBits; j++) {
+				xor_masks.push_back((1ULL << scConfig->weakBits[i]) | (1ULL << scConfig->weakBits[j])); 
+			}
+		}
+	}
+	// --------------------------------------------------
+
 	// Thread-local seed variables for Multi-GPU support
 	Int thread_currentSeed;
 	Int thread_limitSeed;
@@ -1049,9 +1069,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	endOfSearch = false;
 
 	// Hybrid Engine Bit Expander (CPU Side Only)
-	auto expand_seed = [&](Int& seed, Int& key) {
+	auto expand_seed = [&](Int& seed, Int& key, uint64_t xor_mask) {
 		key.SetInt32(0);
-		key.bits64[0] = scConfig->lockVals[0];
+		// NATIVE XOR INJECTION: Flips the weak bits directly in the base prediction
+		key.bits64[0] = scConfig->lockVals[0] ^ xor_mask; 
 		key.bits64[1] = scConfig->lockVals[1];
 		key.bits64[2] = scConfig->lockVals[2];
 		key.bits64[3] = scConfig->lockVals[3];
@@ -1098,8 +1119,8 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				}
 
 				Int ksStart, ksFinish;
-				expand_seed(thread_currentSeed, ksStart);
-				expand_seed(thread_blockEndSeed, ksFinish);
+				expand_seed(thread_currentSeed, ksStart, xor_masks[current_mutation]);
+				expand_seed(thread_blockEndSeed, ksFinish, xor_masks[current_mutation]);
 
 				// FIX: Update local state, DO NOT touch global bc
 				local_ksStart.Set(&ksStart);
@@ -1204,9 +1225,16 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 				if (keycount.IsGreaterOrEqual(&taskSize)) {
 					needsNewBlock = true;
-					// THE FIX: Snap exactly to the start of the next block. DO NOT OVERSHOOT.
-					thread_currentSeed.Set(&thread_blockEndSeed);
-					thread_currentSeed.AddOne();
+					
+					// SHIFT REALITY: Check the same seed block against the next HD permutation
+					current_mutation++;
+					if (current_mutation >= xor_masks.size()) {
+						current_mutation = 0; // Reset mutations
+						
+						// THE FIX: Snap exactly to the start of the next block. DO NOT OVERSHOOT.
+						thread_currentSeed.Set(&thread_blockEndSeed);
+						thread_currentSeed.AddOne();
+					}
 				} else {
 					Int step_adv;
 					step_adv.SetInt32(STEP_SIZE);
