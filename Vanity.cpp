@@ -956,25 +956,37 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	Int previous_ksStart; // NEW: Local delta tracking
 	bool isFirstBlock = true; // NEW: Local init flag
 
-	// --- NEW: DYNAMIC FAULT-TOLERANT MUTATION SETUP ---
+	// --- NEW: AUTO-HD2 (TWO-FAULTS-ANYWHERE) MUTATION SETUP ---
 	int current_mutation = 0;
 	std::vector<uint64_t> xor_masks;
 	
 	xor_masks.push_back(0ULL); // HD 0 (The exact AI prediction)
 	
-	if (scConfig != NULL && scConfig->numWeakBits > 0) {
-		// HD 1 (1 bit flipped)
-		for(int i = 0; i < scConfig->numWeakBits; i++) {
-			xor_masks.push_back(1ULL << scConfig->weakBits[i]); 
+	if (scConfig != NULL && scConfig->numLockedBits > 0) {
+		// HD 1 (1 bit flipped for EVERY predictive locked bit)
+		for(int i = 0; i < scConfig->numLockedBits; i++) {
+			int pos1 = scConfig->lockedBits[i].position;
+			
+			// GEOGRAPHIC LOCK BOUNDARY: Only flip bits 63 and below
+			if (pos1 < 64) {
+				xor_masks.push_back(1ULL << pos1); 
+			}
 		}
-		// HD 2 (2 bits flipped)
-		for(int i = 0; i < scConfig->numWeakBits; i++) {
-			for(int j = i + 1; j < scConfig->numWeakBits; j++) {
-				xor_masks.push_back((1ULL << scConfig->weakBits[i]) | (1ULL << scConfig->weakBits[j])); 
+
+		// HD 2 (2 bits flipped simultaneously for EVERY pair of predictive locked bits)
+		for(int i = 0; i < scConfig->numLockedBits; i++) {
+			for(int j = i + 1; j < scConfig->numLockedBits; j++) {
+				int pos1 = scConfig->lockedBits[i].position;
+				int pos2 = scConfig->lockedBits[j].position;
+				
+				// GEOGRAPHIC LOCK BOUNDARY: Both bits must be 63 or below
+				if (pos1 < 64 && pos2 < 64) {
+					xor_masks.push_back((1ULL << pos1) | (1ULL << pos2)); 
+				}
 			}
 		}
 	}
-	// --------------------------------------------------
+	// ----------------------------------------------------------
 
 	// Thread-local seed variables for Multi-GPU support
 	Int thread_currentSeed;
