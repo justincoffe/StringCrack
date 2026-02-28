@@ -1235,8 +1235,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 						thread_currentSeed.Set(&thread_blockEndSeed);
 						thread_currentSeed.AddOne();
 					}
-				// THE FIX: The 'else' block that advanced thread_currentSeed has been deleted!
-				// It must remain anchored to the block start so alternate realities can use it.
+				}
 			} else {
 				if (keycount.IsGreaterOrEqual(&taskSize)) {
 					needsNewBlock = true;
