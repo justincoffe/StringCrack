@@ -956,7 +956,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	Int previous_ksStart; // NEW: Local delta tracking
 	bool isFirstBlock = true; // NEW: Local init flag
 
-	// --- NEW: DYNAMIC FAULT-TOLERANT MUTATION SETUP ---
+	// --- NEW: DYNAMIC FAULT-TOLERANT MUTATION SETUP (UP TO HD 4) ---
 	int current_mutation = 0;
 	std::vector<uint64_t> xor_masks;
 	
@@ -973,8 +973,26 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				xor_masks.push_back((1ULL << scConfig->weakBits[i]) | (1ULL << scConfig->weakBits[j])); 
 			}
 		}
+		// HD 3 (3 bits flipped)
+		for(int i = 0; i < scConfig->numWeakBits; i++) {
+			for(int j = i + 1; j < scConfig->numWeakBits; j++) {
+				for(int k = j + 1; k < scConfig->numWeakBits; k++) {
+					xor_masks.push_back((1ULL << scConfig->weakBits[i]) | (1ULL << scConfig->weakBits[j]) | (1ULL << scConfig->weakBits[k])); 
+				}
+			}
+		}
+		// HD 4 (4 bits flipped)
+		for(int i = 0; i < scConfig->numWeakBits; i++) {
+			for(int j = i + 1; j < scConfig->numWeakBits; j++) {
+				for(int k = j + 1; k < scConfig->numWeakBits; k++) {
+					for(int l = k + 1; l < scConfig->numWeakBits; l++) {
+						xor_masks.push_back((1ULL << scConfig->weakBits[i]) | (1ULL << scConfig->weakBits[j]) | (1ULL << scConfig->weakBits[k]) | (1ULL << scConfig->weakBits[l])); 
+					}
+				}
+			}
+		}
 	}
-	// --------------------------------------------------
+	// ---------------------------------------------------------------
 
 	// Thread-local seed variables for Multi-GPU support
 	Int thread_currentSeed;
