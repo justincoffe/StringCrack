@@ -1096,6 +1096,10 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		// For Single/Multi-GPU Vanilla: Keep trackers aligned with local bounds
 		thread_currentSeed.Set(&local_ksStart);
 		thread_limitSeed.Set(&local_ksFinish);
+		
+		// PRINT THE SLICE
+		printf("[Vanilla Engine] GPU %d Workload: %s to %s\n", 
+			thId, local_ksStart.GetBase16().c_str(), local_ksFinish.GetBase16().c_str());
 	}
 
 	ttot = Timer::get_tick() - t0;
@@ -1334,14 +1338,40 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				endOfSearch = true; 
 			}
 		} else {
-			PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
+			// 1. Increment the local key counter
+			keys_n += (1ULL * STEP_SIZE * numThreadsGPU);
+			
+			// 2. Push local keys to the global array so Thread 0 can see them
+			counters[thId] = keys_n;
+
+			// 3. ONLY Thread 0 is allowed to print to prevent console garbling
+			if (thId == 0) {
+				uint64_t total_cluster_keys = 0;
+				for (int i = 0; i < numGPUs; i++) {
+					total_cluster_keys += counters[i];
+				}
+
+				// UI Throttle: Only print every 0.5 seconds (prevents terminal lag)
+				if (ttot - sc_last_print_time >= 0.5) {
+					PrintStats(total_cluster_keys, sc_keys_n_prev, ttot, sc_last_print_time, taskSize, keycount);
+					sc_keys_n_prev = total_cluster_keys;
+					sc_last_print_time = ttot;
+				}
+			}
+
 			if (keycount.IsGreaterOrEqual(&taskSize) && (!randomMode)) {
-				double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0);
-				printf("\nRange Finished! - Average Speed: %.1f [MK/s] - Found: %d   \r\n", avg_speed, nbFoundKey);
-				fflush(stdout);
+				// Only Thread 0 prints the final summary
+				if (thId == 0) {
+					uint64_t total_cluster_keys = 0;
+					for (int i = 0; i < numGPUs; i++) {
+						total_cluster_keys += counters[i];
+					}
+					double avg_speed = static_cast<double>(total_cluster_keys) / (ttot * 1000000.0);
+					printf("\nRange Finished! - Average Speed: %.1f [MK/s] - Found: %d   \r\n", avg_speed, nbFoundKey);
+					fflush(stdout);
+				}
 				endOfSearch = true;
 			}
-			keys_n_prev = keys_n;
 		}
 
 		tprev = ttot;
