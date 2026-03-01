@@ -1053,25 +1053,49 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		
 		printf("[Hybrid Engine] GPU %d Workload: Seeds %s to %s\n", thId, myStart.GetBase16().c_str(), myEnd.GetBase16().c_str());
 	} else {
-		// Normal Mode Setup
-		taskSize.Set(&local_ksFinish);     // Changed from bc->
-		taskSize.Sub(&local_ksStart);      // Changed from bc->
+		// Normal Mode Setup - WITH MULTI-GPU WORKLOAD SPLIT
+		// This block is ONLY executed if -lock is NOT provided. StringCrack is safe.
+		Int globalStart, globalEnd, totalSpace, chunkSpace;
+			globalStart.Set(&bc->ksStart);
+			globalEnd.Set(&bc->ksFinish);
+			
+			totalSpace.Set(&globalEnd);
+			totalSpace.Sub(&globalStart);
+			totalSpace.AddOne();
+			
+			Int gpusInt;
+			gpusInt.SetInt32(numGPUs);
+			chunkSpace.Set(&totalSpace);
+			chunkSpace.Div(&gpusInt);
+			
+			// Offset this specific GPU's starting point
+			local_ksStart.Set(&chunkSpace);
+			local_ksStart.Mult(thId);
+			local_ksStart.Add(&globalStart);
+			
+			// Set this specific GPU's end point
+			if (thId == numGPUs - 1) {
+				local_ksFinish.Set(&globalEnd);
+			} else {
+				local_ksFinish.Set(&local_ksStart);
+				local_ksFinish.Add(&chunkSpace);
+				local_ksFinish.SubOne(); // Prevent overlap with the next GPU
+			}
+
+		taskSize.Set(&local_ksFinish);     
+		taskSize.Sub(&local_ksStart);      
 		taskSize.AddOne();
 		stepThread.Set(&taskSize);
 		stepThread.Div(&numthread);
 
-		// Changed from bc-> and used local_idxcount
+		// Initialize GPU geometry with the isolated local anchors
 		getGPUStartingKeys(local_ksStart, local_ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * local_idxcount * g.GetStepSize()));
 		ok = g.SetKeys(publicKeys);
 		needsNewBlock = false;
 
-		// For Single-GPU: thread_currentSeed = global start, thread_limitSeed = global end
-		thread_currentSeed.Set(&scConfig->seedOffsetInt);
-		if (scConfig->endBits > 0) {
-			thread_limitSeed.Set(&scConfig->seedEndInt);
-		} else {
-			thread_limitSeed.Set(&scConfig->seedCountInt);
-		}
+		// For Single/Multi-GPU Vanilla: Keep trackers aligned with local bounds
+		thread_currentSeed.Set(&local_ksStart);
+		thread_limitSeed.Set(&local_ksFinish);
 	}
 
 	ttot = Timer::get_tick() - t0;
