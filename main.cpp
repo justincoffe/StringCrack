@@ -131,6 +131,7 @@ void printUsage() {
 	printf(" -weak \"pos,pos,...\": Define weak bits for Fault-Tolerant Blast Radius. Example: -weak \"40,45,57,60,62\"\n");
 	printf(" -weakHD N          : Max simultaneous flips for weak bits (default: 4). Example: -weakhd 3\n");
 	printf(" -autoHD <level>    : Automatically flip locked bits < 64. Level 1 (HD1) or 2 (HD2).\n");
+	printf(" -base HEX: Base string for SEP XOR mutation (S_base)\n");
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
 	exit(-1);
@@ -728,6 +729,21 @@ int main(int argc, char* argv[]) {
 				fprintf(stderr, "[ERROR] -autoHD level must be 1 or 2\n");
 				exit(-1);
 			}
+			a++;
+		}
+		else if (strcmp(argv[a], "-base") == 0) {
+			a++;
+			string baseStr = string(argv[a]);
+			scConfig.useXorBase = true;
+			
+			Int baseInt;
+			baseInt.SetBase16((char*)baseStr.c_str());
+			scConfig.baseVals[0] = baseInt.bits64[0];
+			scConfig.baseVals[1] = baseInt.bits64[1];
+			scConfig.baseVals[2] = baseInt.bits64[2];
+			scConfig.baseVals[3] = baseInt.bits64[3];
+			
+			scConfig.enabled = true;
 			a++;
 		}
 		else if (strcmp(argv[a], "-popcount") == 0) {

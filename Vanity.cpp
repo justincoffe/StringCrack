@@ -1174,19 +1174,38 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	// Hybrid Engine Bit Expander (CPU Side Only)
 	auto expand_seed = [&](Int& seed, Int& key, const XorMask256& xor_mask) {
 		key.SetInt32(0);
-		// 256-BIT NATIVE XOR INJECTION: Flips weak bits anywhere in the keyspace
-		key.bits64[0] = scConfig->lockVals[0] ^ xor_mask.m[0]; 
-		key.bits64[1] = scConfig->lockVals[1] ^ xor_mask.m[1];
-		key.bits64[2] = scConfig->lockVals[2] ^ xor_mask.m[2];
-		key.bits64[3] = scConfig->lockVals[3] ^ xor_mask.m[3];
+		
+		if (scConfig->useXorBase) {
+			// Start with S_base prediction
+			key.bits64[0] = scConfig->baseVals[0] ^ xor_mask.m[0]; 
+			key.bits64[1] = scConfig->baseVals[1] ^ xor_mask.m[1];
+			key.bits64[2] = scConfig->baseVals[2] ^ xor_mask.m[2];
+			key.bits64[3] = scConfig->baseVals[3] ^ xor_mask.m[3];
 
-		for (int fb = 0; fb < scConfig->numFreeBits; fb++) {
-			int pos = scConfig->freeBitPositions[fb];
-			int seedLimb = fb >> 6;
-			int seedBit = fb & 63;
-			
-			if ((seed.bits64[seedLimb] >> seedBit) & 1ULL) {
-				key.bits64[pos >> 6] |= (1ULL << (pos & 63));
+			for (int fb = 0; fb < scConfig->numFreeBits; fb++) {
+				int pos = scConfig->freeBitPositions[fb];
+				int seedLimb = fb >> 6;
+				int seedBit = fb & 63;
+				
+				if ((seed.bits64[seedLimb] >> seedBit) & 1ULL) {
+					key.bits64[pos >> 6] ^= (1ULL << (pos & 63)); // XOR Flip!
+				}
+			}
+		} else {
+			// Vanilla stringcrack behavior
+			key.bits64[0] = scConfig->lockVals[0] ^ xor_mask.m[0]; 
+			key.bits64[1] = scConfig->lockVals[1] ^ xor_mask.m[1];
+			key.bits64[2] = scConfig->lockVals[2] ^ xor_mask.m[2];
+			key.bits64[3] = scConfig->lockVals[3] ^ xor_mask.m[3];
+
+			for (int fb = 0; fb < scConfig->numFreeBits; fb++) {
+				int pos = scConfig->freeBitPositions[fb];
+				int seedLimb = fb >> 6;
+				int seedBit = fb & 63;
+				
+				if ((seed.bits64[seedLimb] >> seedBit) & 1ULL) {
+					key.bits64[pos >> 6] |= (1ULL << (pos & 63)); // Additive OR
+				}
 			}
 		}
 	};

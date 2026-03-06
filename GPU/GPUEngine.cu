@@ -1307,21 +1307,33 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
 void GPUEngine::ComputeBasePoint(Secp256K1 *secp, StringCrackConfig *config) {
     // 1. Calculate the true locked popcount (cross-platform safe)
     config->lockedPopcount = 0;
-    for(int i = 0; i < 4; i++) {
-        uint64_t v = config->lockVals[i];
-        while (v) {
-            v &= (v - 1);
-            config->lockedPopcount++;
-        }
-    }
     
-    // 2. Precompute the Base Point (sum of all locked bits)
     Int lockedKey;
     lockedKey.SetInt32(0);
-    lockedKey.bits64[0] = config->lockVals[0];
-    lockedKey.bits64[1] = config->lockVals[1];
-    lockedKey.bits64[2] = config->lockVals[2];
-    lockedKey.bits64[3] = config->lockVals[3];
+    
+    if (config->useXorBase) {
+        // In SEP mode, the seed popcount maps EXACTLY to the number of flips (k)
+        config->lockedPopcount = 0; 
+        
+        // Base point is the pure S_base prediction
+        lockedKey.bits64[0] = config->baseVals[0];
+        lockedKey.bits64[1] = config->baseVals[1];
+        lockedKey.bits64[2] = config->baseVals[2];
+        lockedKey.bits64[3] = config->baseVals[3];
+    } else {
+        // Vanilla mode
+        for(int i = 0; i < 4; i++) {
+            uint64_t v = config->lockVals[i];
+            while (v) {
+                v &= (v - 1);
+                config->lockedPopcount++;
+            }
+        }
+        lockedKey.bits64[0] = config->lockVals[0];
+        lockedKey.bits64[1] = config->lockVals[1];
+        lockedKey.bits64[2] = config->lockVals[2];
+        lockedKey.bits64[3] = config->lockVals[3];
+    }
 
     Point basePoint = secp->ComputePublicKey(&lockedKey);
     memcpy(config->basePointX, basePoint.x.bits64, 32);
@@ -1384,15 +1396,42 @@ bool GPUEngine::ComputeWindowTables(Secp256K1 *secp, StringCrackConfig *config) 
 
         int max_val = (1 << bits_in_window);
         for (int val = 1; val < max_val; val++) {
-            Int bitKey;
-            bitKey.SetInt32(0);
+            Int bitKeyAdd; bitKeyAdd.SetInt32(0);
+            Int bitKeySub; bitKeySub.SetInt32(0);
+            bool hasAdd = false;
+            bool hasSub = false;
+
             for (int b = 0; b < bits_in_window; b++) {
                 if ((val >> b) & 1) {
                     int pos = window_bit_positions[b];
-                    bitKey.bits64[pos >> 6] |= (1ULL << (pos & 63));
+                    int limb = pos >> 6;
+                    int bit = pos & 63;
+
+                    if (config->useXorBase && ((config->baseVals[limb] >> bit) & 1)) {
+                        // Base is 1. Flip means 1->0. We subtract the point.
+                        bitKeySub.bits64[limb] |= (1ULL << bit);
+                        hasSub = true;
+                    } else {
+                        // Base is 0. Flip means 0->1. We add the point.
+                        bitKeyAdd.bits64[limb] |= (1ULL << bit);
+                        hasAdd = true;
+                    }
                 }
             }
-            Point p = secp->ComputePublicKey(&bitKey);
+
+            Point p;
+            if (hasAdd && hasSub) {
+                Point pAdd = secp->ComputePublicKey(&bitKeyAdd);
+                Point pSub = secp->ComputePublicKey(&bitKeySub);
+                pSub.y.ModNeg(); // Negate Y to perform elliptic curve subtraction
+                p = secp->AddDirect(pAdd, pSub);
+            } else if (hasAdd) {
+                p = secp->ComputePublicKey(&bitKeyAdd);
+            } else if (hasSub) {
+                p = secp->ComputePublicKey(&bitKeySub);
+                p.y.ModNeg(); // Negate Y
+            }
+
             int idx = (w * 256 + val) * 4;
             memcpy(&h_window_GX[idx], p.x.bits64, 32);
             memcpy(&h_window_GY[idx], p.y.bits64, 32);
