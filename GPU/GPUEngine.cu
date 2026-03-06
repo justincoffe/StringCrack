@@ -40,6 +40,12 @@
 
 #include <omp.h>
 
+// ==========================================================
+// SEP ENGINE GLOBAL POINTERS
+// ==========================================================
+__device__ uint32_t* d_sep_buffer_ptr = nullptr;
+__device__ uint32_t  d_sep_count = 0;
+
 int _ConvertSMVer2Cores(int major, int minor) {
 
     // Defines for GPU Architecture types (using the SM version to determine
@@ -1005,6 +1011,13 @@ void comp_keys_openclaw(
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int tid_in_block = threadIdx.x;
     
+    // SEP ENGINE HIJACK BLOCK
+    uint32_t original_id = tid;
+    if (d_sep_buffer_ptr != nullptr) {
+        if (original_id >= d_sep_count) return; // Safely kill excess threads
+        tid = __ldg(&d_sep_buffer_ptr[original_id]); // The Hijack!
+    }
+    
     // ==========================================================
     // PHASE 1: STREAM COMPACTION QUEUE ALLOCATION
     // ==========================================================
@@ -1456,4 +1469,23 @@ uint32_t GPUEngine::SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressF
     // Removed: StringCrack kernel no longer used
     addressFound.clear();
     return 0;
+}
+
+// =====================================================================================
+// Host-side SEP methods
+// =====================================================================================
+bool GPUEngine::AllocateSEPBuffer(const std::vector<uint32_t>& host_seeds) {
+    uint32_t* d_buf = nullptr;
+    size_t bytes = host_seeds.size() * sizeof(uint32_t);
+    
+    cudaMalloc((void**)&d_buf, bytes);
+    cudaMemcpy(d_buf, host_seeds.data(), bytes, cudaMemcpyHostToDevice);
+    
+    // Map to the global device pointers
+    cudaMemcpyToSymbol(d_sep_buffer_ptr, &d_buf, sizeof(uint32_t*));
+    uint32_t count = host_seeds.size();
+    cudaMemcpyToSymbol(d_sep_count, &count, sizeof(uint32_t));
+    
+    printf("[SEP Engine] Successfully injected %zu combinatorial seeds (%.1f MB) into the kernel.\n", host_seeds.size(), (double)bytes / 1048576.0);
+    return true;
 }
