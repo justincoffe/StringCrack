@@ -1191,56 +1191,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		}
 	};
 
-	// ==========================================================
-	// SEP ENGINE RAPID TEST HOOK (THE SIMPLE GAME)
-	// ==========================================================
-	if (useStringCrack) {
-		printf("\n[SEP TEST] Launching Stratified Entropy Permutation Test...\n");
-		std::vector<uint32_t> sep_buffer;
-		uint32_t true_free_bits = 0xE9354; 
-		uint32_t markov_base = true_free_bits ^ 0x111; 
-		
-		printf("[SEP TEST] True Free Bits: 0x%X\n", true_free_bits);
-		printf("[SEP TEST] Markov Base:    0x%X\n", markov_base);
-		
-		// 1. Gosper's Hack Generator
-		uint32_t limit = (1U << 20);
-		for (int k = 1; k <= 5; k++) {
-			uint32_t set = (1U << k) - 1; 
-			while (set < limit) {
-				sep_buffer.push_back(set ^ markov_base);
-				uint32_t c = set & -set;
-				uint32_t r = set + c;
-				set = (((r ^ set) >> 2) / c) | r;
-			}
-		}
-		
-		// 2. Inject the buffer into VRAM
-		g.AllocateSEPBuffer(sep_buffer);
-		
-		// 3. We let the standard tool fire the EXACT SAME existing kernel
-		std::vector<ITEM> sep_found;
-		g.Launch(sep_found); 
-		
-		// 4. Verify Results using standard reconstruction
-		if (sep_found.size() > 0) {
-			printf("\n[SEP TEST] BOOM! %zu collisions found!\n", sep_found.size());
-			for (int i = 0; i < sep_found.size(); i++) {
-				printf("[SEP TEST] Winning Offset: 0x%X\n", sep_found[i].thId);
-				
-				Int privkey;
-				Int seedInt;
-				seedInt.SetInt32(sep_found[i].thId); // thId IS the combinatorial mask!
-				expand_seed(seedInt, privkey, xor_masks[0]); 
-				checkAddr(*(address_t*)(sep_found[i].hash), sep_found[i].hash, privkey, sep_found[i].incr, sep_found[i].endo, sep_found[i].mode);
-			}
-		} else {
-			printf("\n[SEP TEST] FAILED. No collision detected.\n");
-		}
-		exit(0); 
-	}
-	// ==========================================================
-
 	while (ok && !endOfSearch) {
 
 		if (!Pause) {	

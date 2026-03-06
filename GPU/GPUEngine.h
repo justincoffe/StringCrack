@@ -131,9 +131,6 @@ public:
   bool SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *config);
   bool LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait=false);
 
-  // --- NEW: SEP Engine Buffer Allocator ---
-  bool AllocateSEPBuffer(const std::vector<uint32_t>& host_seeds);
-
   // Asynchronous double-buffered StringCrack
   void LaunchOpenClawAsync(uint64_t batchOffsetLo, uint64_t batchOffsetHi);
   uint32_t SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressFound);
