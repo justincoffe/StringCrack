@@ -98,6 +98,7 @@ typedef struct {
     // Weak bits for Fault-Tolerant Blast Radius
     int weakBits[10];           // Array to hold the weak bit positions (max 10)
     int numWeakBits;            // Number of weak bits provided
+    int weakMaxHD;              // Max simultaneous flips for weak bits (default: 4)
     int autoHD;            // Auto-Hamming Distance limit (0 = Off, 1 = HD1, 2 = HD2)
 } StringCrackConfig;
 

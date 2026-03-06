@@ -1020,7 +1020,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			}
 			
 			int nW = wBits.size();
-			int max_weak_hd = 4; // Capped to prevent processing trillions of realities
+			int max_weak_hd = scConfig->weakMaxHD; // Now pulls dynamically from CLI
 
 			int total_combinations = 1 << nW; 
 			for (int mask = 1; mask < total_combinations; mask++) {

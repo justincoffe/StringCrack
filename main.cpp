@@ -129,6 +129,7 @@ void printUsage() {
 	printf("\n === StringCrack Mode ===\n");
 	printf(" -lock \"pos:val,...\": Lock bit positions. Example: -lock \"93:0,98:0,99:0,78:0\"\n");
 	printf(" -weak \"pos,pos,...\": Define weak bits for Fault-Tolerant Blast Radius. Example: -weak \"40,45,57,60,62\"\n");
+	printf(" -weakHD N          : Max simultaneous flips for weak bits (default: 4). Example: -weakhd 3\n");
 	printf(" -autoHD <level>    : Automatically flip locked bits < 64. Level 1 (HD1) or 2 (HD2).\n");
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
@@ -627,6 +628,7 @@ int main(int argc, char* argv[]) {
 	StringCrackConfig scConfig;
 	memset(&scConfig, 0, sizeof(StringCrackConfig));
 	scConfig.enabled = false;
+	scConfig.weakMaxHD = 4;
 	scConfig.popcountTarget = -1;
 	scConfig.popcountMin = 0;
 	scConfig.popcountMax = 256;
@@ -712,6 +714,11 @@ int main(int argc, char* argv[]) {
 		else if (strcmp(argv[a], "-weak") == 0) {
 			a++;
 			parseWeakString(string(argv[a]), &scConfig);
+			a++;
+		}
+		else if (strcmp(argv[a], "-weakhd") == 0) {
+			a++;
+			scConfig.weakMaxHD = getInt("weakhd", argv[a]);
 			a++;
 		}
 		else if (strcmp(argv[a], "-autoHD") == 0) {
