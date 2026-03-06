@@ -100,7 +100,8 @@ typedef struct {
     int numWeakBits;            // Number of weak bits provided
     int weakMaxHD;              // Max simultaneous flips for weak bits (default: 4)
     
-    // SEP Algorithm (XOR Base String)
+    // SEP Algorithm (Pure OpenClaw + XOR Base String)
+    bool useOpenClaw;
     bool useXorBase;
     uint64_t baseVals[4];
     

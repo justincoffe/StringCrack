@@ -1213,11 +1213,45 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	while (ok && !endOfSearch) {
 
 		if (!Pause) {	
-			
-			// ==========================================
-			// HYBRID BLOCK GENERATOR
-			// ==========================================
-			if (needsNewBlock && useStringCrack) {
+			bool useOpenClaw = (scConfig != NULL && scConfig->useOpenClaw);
+
+			if (useOpenClaw) {
+				// PURE OPENCLAW MODE
+				if (thread_currentSeed.IsGreaterOrEqual(&thread_limitSeed)) {
+					endOfSearch = true;
+					break;
+				}
+
+				uint64_t batchSize = 1ULL * numThreadsGPU; 
+				Int batchInt; batchInt.SetInt32(batchSize);
+
+				uint64_t currentLo = thread_currentSeed.bits64[0];
+				uint64_t currentHi = thread_currentSeed.bits64[1];
+
+				// Launch OpenClaw directly!
+				ok = g.LaunchOpenClaw(found, currentLo, currentHi, true);
+
+				// Advance Seed
+				thread_currentSeed.Add(&batchInt);
+
+				// CPU Reconstruction for hits
+				for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
+					ITEM it = found[i];
+					Int hitSeed; hitSeed.Set(&thread_currentSeed);
+					hitSeed.Sub(&batchInt); // Step back to batch start
+					
+					Int thIdInt; thIdInt.SetInt32(it.thId);
+					hitSeed.Add(&thIdInt); // Exact seed that hit
+					
+					Int privkey;
+					expand_seed(hitSeed, privkey, xor_masks[0]);
+					
+					checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, it.mode);
+				}
+				sc_keys_n += batchSize;
+
+			} else if (needsNewBlock && useStringCrack) {
+				// ... Keep existing Hybrid Block Generator here ...
 				if (thread_currentSeed.IsGreaterOrEqual(&thread_limitSeed)) {
 					endOfSearch = true;
 					break;

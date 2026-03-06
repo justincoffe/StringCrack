@@ -1479,9 +1479,41 @@ bool GPUEngine::callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetH
 }
 
 bool GPUEngine::LaunchOpenClaw(std::vector<ITEM> &addressFound, uint64_t batchOffsetLo, uint64_t batchOffsetHi, bool spinWait) {
-    // Removed: StringCrack kernel no longer used
     addressFound.clear();
-    return false;
+    
+    // Launch the kernel
+    if (!callOpenClawKernel(batchOffsetLo, batchOffsetHi, outputBuffer, 0)) return false;
+
+    // Retrieve results
+    if(spinWait) {
+        cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
+    } else {
+        cudaEvent_t evt;
+        cudaEventCreate(&evt);
+        cudaMemcpyAsync(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost, 0);
+        cudaEventRecord(evt, 0);
+        while (cudaEventQuery(evt) == cudaErrorNotReady) Timer::SleepMillis(1);
+        cudaEventDestroy(evt);
+    }
+
+    uint32_t nbFound = outputBufferPinned[0];
+    if (nbFound > maxFound) nbFound = maxFound;
+
+    if (nbFound > 0) {
+        cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE + 4, cudaMemcpyDeviceToHost);
+        for (uint32_t i = 0; i < nbFound; i++) {
+            uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE32 + 1);
+            ITEM it;
+            it.thId = itemPtr[0];
+            int16_t* ptr = (int16_t*)&(itemPtr[1]);
+            it.endo = ptr[0] & 0x7FFF;
+            it.mode = (ptr[0] & 0x8000) != 0;
+            it.incr = ptr[1];
+            it.hash = (uint8_t*)(itemPtr + 2);
+            addressFound.push_back(it);
+        }
+    }
+    return true;
 }
 
 // Asynchronous double-buffered launch

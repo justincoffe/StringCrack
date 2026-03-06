@@ -735,6 +735,8 @@ int main(int argc, char* argv[]) {
 			a++;
 			string baseStr = string(argv[a]);
 			scConfig.useXorBase = true;
+			scConfig.useOpenClaw = true; // This routes execution to the Pure OpenClaw loop
+			scConfig.enabled = true;
 			
 			Int baseInt;
 			baseInt.SetBase16((char*)baseStr.c_str());
@@ -743,7 +745,6 @@ int main(int argc, char* argv[]) {
 			scConfig.baseVals[2] = baseInt.bits64[2];
 			scConfig.baseVals[3] = baseInt.bits64[3];
 			
-			scConfig.enabled = true;
 			a++;
 		}
 		else if (strcmp(argv[a], "-popcount") == 0) {
