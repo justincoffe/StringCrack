@@ -1250,8 +1250,28 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				}
 				sc_keys_n += batchSize;
 
-			} else if (needsNewBlock && useStringCrack) {
-				// ... Keep existing Hybrid Block Generator here ...
+
+				// ==========================================
+				// NEW SEP STATS FOR PURE OPENCLAW
+				// ==========================================
+				double delta_time = ttot - tprev;
+				double real_time_speed = 0.0;
+				if (delta_time > 0.0) {
+					real_time_speed = static_cast<double>(batchSize) / (delta_time * 1000000.0);
+				}
+				
+				uint64_t scanned = sc_keys_n;
+				Int currentSeed;
+				currentSeed.Set(&scConfig->seedOffsetInt);
+				currentSeed.Add(scanned);
+				Int& limitSeed = (scConfig->endBits > 0) ? scConfig->seedEndInt : scConfig->seedCountInt;
+				
+				PrintStatsStringCrack(sc_keys_n, keys_n_prev, ttot, tprev, currentSeed, limitSeed, scConfig->seedOffsetInt, scConfig->numLockedBits, nbFoundKey, real_time_speed);
+			} else {
+				// ==========================================
+				// OLD HYBRID / VANILLA MODE (Quarantined)
+				// ==========================================
+				if (needsNewBlock && useStringCrack) {
 				if (thread_currentSeed.IsGreaterOrEqual(&thread_limitSeed)) {
 					endOfSearch = true;
 					break;
@@ -1398,6 +1418,7 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				}
 			}
 
+			}
 		} else {
 			printf("Pausing...\r");
 			fflush(stdout);
