@@ -956,42 +956,100 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	Int previous_ksStart; // NEW: Local delta tracking
 	bool isFirstBlock = true; // NEW: Local init flag
 
-	// --- NEW: CLI-CONTROLLED AUTO-HD MUTATION SETUP ---
+	// ==============================================================
+	// 256-BIT UNIFIED AUTO-HD & CAPPED WEAK BITS MUTATION SETUP
+	// ==============================================================
+	struct XorMask256 {
+		uint64_t m[4] = {0, 0, 0, 0};
+		// Natively comparable so std::sort and std::unique can deduplicate
+		bool operator<(const XorMask256& o) const {
+			for (int i = 3; i >= 0; i--) {
+				if (m[i] != o.m[i]) return m[i] < o.m[i];
+			}
+			return false;
+		}
+		bool operator==(const XorMask256& o) const {
+			return m[0] == o.m[0] && m[1] == o.m[1] && m[2] == o.m[2] && m[3] == o.m[3];
+		}
+	};
+
 	int current_mutation = 0;
-	std::vector<uint64_t> xor_masks;
+	std::vector<XorMask256> xor_masks;
 	
-	xor_masks.push_back(0ULL); // HD 0 (The exact AI prediction)
+	XorMask256 zero_mask;
+	xor_masks.push_back(zero_mask); // HD 0 (The exact AI prediction)
 	
-	if (scConfig != NULL && scConfig->numLockedBits > 0 && scConfig->autoHD > 0) {
+	if (scConfig != NULL) {
 		
-		// HD 1 (1 bit flipped for EVERY predictive locked bit)
-		if (scConfig->autoHD >= 1) {
-			for(int i = 0; i < scConfig->numLockedBits; i++) {
-				int pos1 = scConfig->lockedBits[i].position;
-				
-				// GEOGRAPHIC LOCK BOUNDARY: Only flip bits 63 and below
-				if (pos1 < 64) {
-					xor_masks.push_back(1ULL << pos1); 
+		// 1. AUTO-HD LOGIC (Geographically constrained to < 64 to prevent massive explosions)
+		if (scConfig->numLockedBits > 0 && scConfig->autoHD > 0) {
+			// HD 1
+			if (scConfig->autoHD >= 1) {
+				for(int i = 0; i < scConfig->numLockedBits; i++) {
+					int pos1 = scConfig->lockedBits[i].position;
+					if (pos1 < 64) {
+						XorMask256 mask;
+						mask.m[pos1 >> 6] |= (1ULL << (pos1 & 63));
+						xor_masks.push_back(mask); 
+					}
 				}
 			}
-		}
-
-		// HD 2 (2 bits flipped simultaneously for EVERY pair)
-		if (scConfig->autoHD >= 2) {
-			for(int i = 0; i < scConfig->numLockedBits; i++) {
-				for(int j = i + 1; j < scConfig->numLockedBits; j++) {
-					int pos1 = scConfig->lockedBits[i].position;
-					int pos2 = scConfig->lockedBits[j].position;
-					
-					// GEOGRAPHIC LOCK BOUNDARY: Both bits must be 63 or below
-					if (pos1 < 64 && pos2 < 64) {
-						xor_masks.push_back((1ULL << pos1) | (1ULL << pos2)); 
+			// HD 2
+			if (scConfig->autoHD >= 2) {
+				for(int i = 0; i < scConfig->numLockedBits; i++) {
+					for(int j = i + 1; j < scConfig->numLockedBits; j++) {
+						int pos1 = scConfig->lockedBits[i].position;
+						int pos2 = scConfig->lockedBits[j].position;
+						if (pos1 < 64 && pos2 < 64) {
+							XorMask256 mask;
+							mask.m[pos1 >> 6] |= (1ULL << (pos1 & 63));
+							mask.m[pos2 >> 6] |= (1ULL << (pos2 & 63));
+							xor_masks.push_back(mask); 
+						}
 					}
 				}
 			}
 		}
+
+		// 2. WEAK BITS LOGIC (Unleashed across the entire 256-bit space)
+		if (scConfig->numWeakBits > 0) {
+			std::vector<int> wBits;
+			// NO MORE 64-BIT LIMIT! Weak bits can be placed anywhere up to 255
+			for (int i = 0; i < scConfig->numWeakBits; i++) {
+				if (scConfig->weakBits[i] < 256) wBits.push_back(scConfig->weakBits[i]);
+			}
+			
+			int nW = wBits.size();
+			int max_weak_hd = 4; // Capped to prevent processing trillions of realities
+
+			int total_combinations = 1 << nW; 
+			for (int mask = 1; mask < total_combinations; mask++) {
+				
+				int current_hd = 0;
+				int temp_mask = mask;
+				while (temp_mask > 0) {
+					current_hd += (temp_mask & 1);
+					temp_mask >>= 1;
+				}
+
+				if (current_hd <= max_weak_hd) {
+					XorMask256 current_xor;
+					for (int b = 0; b < nW; b++) {
+						if ((mask >> b) & 1) {
+							int pos = wBits[b];
+							current_xor.m[pos >> 6] |= (1ULL << (pos & 63));
+						}
+					}
+					xor_masks.push_back(current_xor);
+				}
+			}
+		}
+
+		// 3. ZERO OVERHEAD GUARANTEE (Remove duplicate realities)
+		std::sort(xor_masks.begin(), xor_masks.end());
+		xor_masks.erase(std::unique(xor_masks.begin(), xor_masks.end()), xor_masks.end());
 	}
-	// --------------------------------------------------
+	// ==============================================================
 
 	// Thread-local seed variables for Multi-GPU support
 	Int thread_currentSeed;
@@ -1114,13 +1172,13 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	endOfSearch = false;
 
 	// Hybrid Engine Bit Expander (CPU Side Only)
-	auto expand_seed = [&](Int& seed, Int& key, uint64_t xor_mask) {
+	auto expand_seed = [&](Int& seed, Int& key, const XorMask256& xor_mask) {
 		key.SetInt32(0);
-		// NATIVE XOR INJECTION: Flips the weak bits directly in the base prediction
-		key.bits64[0] = scConfig->lockVals[0] ^ xor_mask; 
-		key.bits64[1] = scConfig->lockVals[1];
-		key.bits64[2] = scConfig->lockVals[2];
-		key.bits64[3] = scConfig->lockVals[3];
+		// 256-BIT NATIVE XOR INJECTION: Flips weak bits anywhere in the keyspace
+		key.bits64[0] = scConfig->lockVals[0] ^ xor_mask.m[0]; 
+		key.bits64[1] = scConfig->lockVals[1] ^ xor_mask.m[1];
+		key.bits64[2] = scConfig->lockVals[2] ^ xor_mask.m[2];
+		key.bits64[3] = scConfig->lockVals[3] ^ xor_mask.m[3];
 
 		for (int fb = 0; fb < scConfig->numFreeBits; fb++) {
 			int pos = scConfig->freeBitPositions[fb];
