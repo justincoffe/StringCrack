@@ -803,6 +803,8 @@ __device__ __constant__ uint64_t d_seedMaskHi;
 __device__ __constant__ uint64_t d_targetSeedLo;
 __device__ __constant__ uint64_t d_targetSeedHi;
 __device__ __constant__ bool     d_useSEP;
+__device__ __constant__ int      d_sepMin;
+__device__ __constant__ int      d_sepMax;
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
@@ -1050,7 +1052,12 @@ void comp_keys_openclaw(
         pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
     }
     
+    // Dual-Filter: Check both absolute popcount AND SEP mutation range
     bool is_valid = (pc >= d_popcountMin && pc <= d_popcountMax);
+    if (d_useSEP) {
+        // SEP Mode: Apply secondary filter on mutation distance
+        is_valid = is_valid && (pc >= d_sepMin && pc <= d_sepMax);
+    }
     
     // 2. Synchronize the warp and get a bitmask of all passing threads
     // 0xFFFFFFFF means all 32 threads in the warp participate in the ballot
@@ -1319,6 +1326,10 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     if (err != cudaSuccess) { printf("GPUEngine: d_targetSeedHi: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_useSEP, &config->useSEP, sizeof(bool));
     if (err != cudaSuccess) { printf("GPUEngine: d_useSEP: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_sepMin, &config->sepMin, sizeof(int));
+    if (err != cudaSuccess) { printf("GPUEngine: d_sepMin: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_sepMax, &config->sepMax, sizeof(int));
+    if (err != cudaSuccess) { printf("GPUEngine: d_sepMax: %s\n", cudaGetErrorString(err)); return false; }
 
     // Compute and upload Popcount Correction Masks
     uint64_t seedMaskLo = 0, seedMaskHi = 0;

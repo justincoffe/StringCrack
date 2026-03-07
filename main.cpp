@@ -131,6 +131,7 @@ void printUsage() {
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 30:40\n");
 	printf(" -center STRING: SEP center string (71-bit). Example: -center 10110...\n");
+	printf(" -seprange min:max: SEP mutation range. Example: -seprange 11:23\n");
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
 	exit(-1);
@@ -648,6 +649,22 @@ int main(int argc, char* argv[]) {
 		else if (strcmp(argv[a], "-center") == 0) {
 			a++;
 			strncpy(scConfig.centerString, argv[a], 255);
+			scConfig.useSEP = true;
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-seprange") == 0) {
+			a++;
+			char* seprange = argv[a];
+			char* colon = strchr(seprange, ':');
+			if (colon) {
+				*colon = '\0';
+				scConfig.sepMin = atoi(seprange);
+				scConfig.sepMax = atoi(colon + 1);
+			} else {
+				scConfig.sepMin = 0;
+				scConfig.sepMax = atoi(seprange);
+			}
 			scConfig.useSEP = true;
 			scConfig.enabled = true;
 			a++;

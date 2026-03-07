@@ -100,6 +100,8 @@ typedef struct {
     char centerString[256];
     uint64_t targetSeedLo;
     uint64_t targetSeedHi;
+    int sepMin;
+    int sepMax;
 } StringCrackConfig;
 
 // Second level lookup
