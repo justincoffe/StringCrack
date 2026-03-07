@@ -133,6 +133,8 @@ void printUsage() {
 	printf(" -autoHD <level>    : Automatically flip locked bits < 64. Level 1 (HD1) or 2 (HD2).\n");
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
+	printf(" -center STRING: SEP center string (256-bit). Example: -center 10110...\n");
+	printf(" -seprange min:max: SEP mutation range. Example: -seprange 11:23\n");
 	exit(-1);
 
 }
@@ -746,6 +748,24 @@ int main(int argc, char* argv[]) {
 			if (colonPos == string::npos) { fprintf(stderr, "[ERROR] -poprange format: min:max\n"); exit(-1); }
 			scConfig.popcountMin = stoi(prStr.substr(0, colonPos));
 			scConfig.popcountMax = stoi(prStr.substr(colonPos + 1));
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-center") == 0) {
+			a++;
+			strncpy(scConfig.centerString, argv[a], 255);
+			scConfig.useSEP = true;
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-seprange") == 0) {
+			a++;
+			string srStr = string(argv[a]);
+			size_t colonPos = srStr.find(':');
+			if (colonPos == string::npos) { fprintf(stderr, "[ERROR] -seprange format: min:max\n"); exit(-1); }
+			scConfig.sepMin = stoi(srStr.substr(0, colonPos));
+			scConfig.sepMax = stoi(srStr.substr(colonPos + 1));
+			scConfig.useSEP = true;
 			scConfig.enabled = true;
 			a++;
 		}

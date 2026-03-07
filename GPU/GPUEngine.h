@@ -100,6 +100,13 @@ typedef struct {
     int numWeakBits;            // Number of weak bits provided
     int weakMaxHD;              // Max simultaneous flips for weak bits (default: 4)
     int autoHD;            // Auto-Hamming Distance limit (0 = Off, 1 = HD1, 2 = HD2)
+    
+    // SEP (Stratified Entropy Permutation) Mode
+    bool useSEP;               // Enable SEP mode
+    char centerString[256];    // Human-readable center string
+    int sepMin;                // SEP mutation range min
+    int sepMax;                // SEP mutation range max
+    uint64_t rawTarget[4];     // 256-bit raw center string (physical layout)
 } StringCrackConfig;
 
 // Second level lookup
@@ -122,7 +129,7 @@ public:
   void SetSearchMode(int searchMode);
   void SetSearchType(int searchType);
   void SetPattern(const char *pattern);
-  bool Launch(std::vector<ITEM> &addressFound,bool spinWait=false);
+  bool Launch(std::vector<ITEM> &addressFound, bool spinWait=false, uint64_t ks_start_lo=0, uint64_t step_thread_lo=0, uint32_t launch_idx=0, int upper_hd=0, int upper_abs_pop=0);
   int GetNbThread();
   int GetGroupSize();
   int GetStepSize();

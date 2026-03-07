@@ -81,7 +81,9 @@ int _ConvertSMVer2Cores(int major, int minor) {
 #define GRP_SIZE 1024
 #define STEP_SIZE GRP_SIZE*1
 
-__global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out) {
+__global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out,
+                          uint64_t ks_start_lo, uint64_t step_thread_lo, uint32_t launch_idx, 
+                          int upper_hd, int upper_abs_pop) {
 
 
     uint64_t* startx = keys + (blockIdx.x * blockDim.x) * 8;
@@ -103,6 +105,9 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
 
     uint64_t subp[GRP_SIZE/2][4];
     
+    // Calculate physical base key for SEP dual-filter
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t my_base_lo = ks_start_lo + (uint64_t)tid * step_thread_lo + (uint64_t)launch_idx * 1024;
 
     __syncthreads();
     Load256A(sx, startx);
@@ -111,10 +116,24 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
 
     uint32_t i;
 
-    // Check starting point
-    odd_py = sy[0] & 1;
-    _GetHash160Comp(sx, odd_py, (uint8_t*)h);
-    CheckPoint(h, GRP_SIZE / 2, sAddress, lookup32, out);
+    // Check starting point (BLOCK 1)
+    {
+        uint64_t current_lo = my_base_lo + GRP_SIZE / 2;
+        bool valid = true;
+        if (d_useSEP) {
+            int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+            if (hd < d_sepMin || hd > d_sepMax) valid = false;
+        }
+        if (valid && d_popcountMax < 256) {
+            int abs_pc = __popcll(current_lo) + upper_abs_pop;
+            if (abs_pc < d_popcountMin || abs_pc > d_popcountMax) valid = false;
+        }
+        if (valid) {
+            odd_py = sy[0] & 1;
+            _GetHash160Comp(sx, odd_py, (uint8_t*)h);
+            CheckPoint(h, GRP_SIZE / 2, sAddress, lookup32, out);
+        }
+    }
     __syncthreads();
 
     ModSub256(sxn, _2Gnx, sx);
@@ -155,8 +174,23 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
         _ModMult(py, dy);
         ModSub256isOdd(py, sy, &odd_py);
 
-        _GetHash160Comp(px, odd_py, (uint8_t*)h);
-        CheckPoint(h, GRP_SIZE / 2 + (i + 1), sAddress, lookup32, out);
+        // BLOCK 2 (inside loop, first check +i+1)
+        {
+            uint64_t current_lo = my_base_lo + GRP_SIZE / 2 + (i + 1);
+            bool valid = true;
+            if (d_useSEP) {
+                int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+                if (hd < d_sepMin || hd > d_sepMax) valid = false;
+            }
+            if (valid && d_popcountMax < 256) {
+                int abs_pc = __popcll(current_lo) + upper_abs_pop;
+                if (abs_pc < d_popcountMin || abs_pc > d_popcountMax) valid = false;
+            }
+            if (valid) {
+                _GetHash160Comp(px, odd_py, (uint8_t*)h);
+                CheckPoint(h, GRP_SIZE / 2 + (i + 1), sAddress, lookup32, out);
+            }
+        }
 
         //////////////////
 
@@ -171,8 +205,23 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
         _ModMult(py, dy);
         ModSub256isOdd(syn, py, &odd_py);
 
-        _GetHash160Comp(px, odd_py, (uint8_t*)h);
-        CheckPoint(h, GRP_SIZE / 2 - (i + 1), sAddress, lookup32, out);
+        // BLOCK 3 (inside loop, second check -i-1)
+        {
+            uint64_t current_lo = my_base_lo + GRP_SIZE / 2 - (i + 1);
+            bool valid = true;
+            if (d_useSEP) {
+                int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+                if (hd < d_sepMin || hd > d_sepMax) valid = false;
+            }
+            if (valid && d_popcountMax < 256) {
+                int abs_pc = __popcll(current_lo) + upper_abs_pop;
+                if (abs_pc < d_popcountMin || abs_pc > d_popcountMax) valid = false;
+            }
+            if (valid) {
+                _GetHash160Comp(px, odd_py, (uint8_t*)h);
+                CheckPoint(h, GRP_SIZE / 2 - (i + 1), sAddress, lookup32, out);
+            }
+        }
 
         //////////////////
 
@@ -195,8 +244,23 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
     _ModMult(py, dy);
     ModSub256isOdd(syn, py, &odd_py);
 
-    _GetHash160Comp(px, odd_py, (uint8_t*)h);
-    CheckPoint(h, 0, sAddress, lookup32, out);
+    // BLOCK 4 (bottom of kernel, final check at index 0)
+    {
+        uint64_t current_lo = my_base_lo + 0;
+        bool valid = true;
+        if (d_useSEP) {
+            int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+            if (hd < d_sepMin || hd > d_sepMax) valid = false;
+        }
+        if (valid && d_popcountMax < 256) {
+            int abs_pc = __popcll(current_lo) + upper_abs_pop;
+            if (abs_pc < d_popcountMin || abs_pc > d_popcountMax) valid = false;
+        }
+        if (valid) {
+            _GetHash160Comp(px, odd_py, (uint8_t*)h);
+            CheckPoint(h, 0, sAddress, lookup32, out);
+        }
+    }
 
     //////////////////
 
@@ -547,14 +611,14 @@ int GPUEngine::GetGroupSize() {
 }
 
 
-bool GPUEngine::callKernel() {
+bool GPUEngine::callKernel(uint64_t ks_start_lo, uint64_t step_thread_lo, uint32_t launch_idx, int upper_hd, int upper_abs_pop) {
 
    
     // Reset nbFound
     cudaMemset(outputBuffer, 0, 4);
 
     comp_keys << < nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP >> >
-        (inputAddress, inputAddressLookUp, inputKey, outputBuffer);
+        (inputAddress, inputAddressLookUp, inputKey, outputBuffer, ks_start_lo, step_thread_lo, launch_idx, upper_hd, upper_abs_pop);
 
 
 
@@ -606,7 +670,7 @@ bool GPUEngine::SetKeys(Point* p) {
         printf("GPUEngine: SetKeys: %s\n", cudaGetErrorString(err));
     }
 
-    return callKernel();
+    return callKernel(0, 0, 0, 0, 0);
     //return true;
 
 }
@@ -649,7 +713,7 @@ bool GPUEngine::SetRandomJump(Point p) {
 
 
 
-bool GPUEngine::Launch(std::vector<ITEM>& addressFound, bool spinWait) {
+bool GPUEngine::Launch(std::vector<ITEM>& addressFound, bool spinWait, uint64_t ks_start_lo, uint64_t step_thread_lo, uint32_t launch_idx, int upper_hd, int upper_abs_pop) {
 
     addressFound.clear();
     
@@ -712,7 +776,7 @@ bool GPUEngine::Launch(std::vector<ITEM>& addressFound, bool spinWait) {
         addressFound.push_back(it);
     }
 
-    return callKernel();
+    return callKernel(ks_start_lo, step_thread_lo, launch_idx, upper_hd, upper_abs_pop);
 
 }
 
@@ -799,6 +863,12 @@ __device__ __constant__ uint64_t d_basePointY[4];
 __device__ __constant__ int      d_lockedPopcount;
 __device__ __constant__ uint64_t d_seedMaskLo;
 __device__ __constant__ uint64_t d_seedMaskHi;
+
+// SEP Mode device symbols
+__device__ __constant__ uint64_t d_rawTargetLo;
+__device__ __constant__ int      d_sepMin;
+__device__ __constant__ int      d_sepMax;
+__device__ __constant__ bool     d_useSEP;
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
@@ -1271,6 +1341,18 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
 
+    // Upload SEP configuration if enabled
+    if (config->useSEP) {
+        err = cudaMemcpyToSymbol(d_rawTargetLo, &config->rawTarget[0], sizeof(uint64_t));
+        if (err != cudaSuccess) { printf("GPUEngine: d_rawTargetLo: %s\n", cudaGetErrorString(err)); return false; }
+        err = cudaMemcpyToSymbol(d_sepMin, &config->sepMin, sizeof(int));
+        if (err != cudaSuccess) { printf("GPUEngine: d_sepMin: %s\n", cudaGetErrorString(err)); return false; }
+        err = cudaMemcpyToSymbol(d_sepMax, &config->sepMax, sizeof(int));
+        if (err != cudaSuccess) { printf("GPUEngine: d_sepMax: %s\n", cudaGetErrorString(err)); return false; }
+        err = cudaMemcpyToSymbol(d_useSEP, &config->useSEP, sizeof(bool));
+        if (err != cudaSuccess) { printf("GPUEngine: d_useSEP: %s\n", cudaGetErrorString(err)); return false; }
+    }
+
     // Compute and upload Popcount Correction Masks
     uint64_t seedMaskLo = 0, seedMaskHi = 0;
     if (config->numFreeBits <= 0) {
@@ -1297,6 +1379,25 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     // Safely execute and catch memory allocation errors
     if (!ComputeWindowTables(secp, (StringCrackConfig*)config)) {
         return false;
+    }
+
+    // Generate raw 256-bit target from center string for SEP mode
+    config->rawTarget[0] = 0; config->rawTarget[1] = 0;
+    config->rawTarget[2] = 0; config->rawTarget[3] = 0;
+
+    if (config->useSEP) {
+        int len = strlen(config->centerString);
+        for (int pos = 0; pos < 256; pos++) {
+            int char_index = (len - 1) - pos;
+            if (char_index >= 0 && char_index < len) {
+                if (config->centerString[char_index] == '1') {
+                    config->rawTarget[pos >> 6] |= (1ULL << (pos & 63));
+                }
+            }
+        }
+        printf("[StringCrack] SEP Mode Enabled. Center mapped to Hybrid rawTarget.\n");
+        printf("[StringCrack] Dual Filter Target: SEP %d-%d | ABS %d-%d\n", 
+               config->sepMin, config->sepMax, config->popcountMin, config->popcountMax);
     }
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
