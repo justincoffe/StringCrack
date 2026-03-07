@@ -929,6 +929,11 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		g.SetAddress(usedAddress);
 	}
 
+	// Upload SEP configuration to GPU
+	if (scConfig != NULL && scConfig->enabled) {
+		g.SetStringCrackConfig(secp, scConfig);
+	}
+
 	bool useStringCrack = (scConfig != NULL && scConfig->enabled);
 
 	// SEP dual-filter tracking variables
