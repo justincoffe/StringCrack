@@ -87,6 +87,10 @@ __device__ __constant__ int      d_sepMin;
 __device__ __constant__ int      d_sepMax;
 __device__ __constant__ bool     d_useSEP;
 
+// Device symbols for Soft Lock Architecture
+__device__ __constant__ uint64_t d_softLockMask;
+__device__ __constant__ uint64_t d_softLockVals;
+
 // Device symbols for popcount (must be before kernel)
 __device__ __constant__ int      d_popcountMin;
 __device__ __constant__ int      d_popcountMax;
@@ -130,9 +134,15 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
     {
         uint64_t current_lo = my_base_lo + GRP_SIZE / 2;
         bool valid = true;
+        
         if (d_useSEP) {
-            int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
-            if (hd < d_sepMin || hd > d_sepMax) valid = false;
+            // NEW: 1-Cycle Soft Lock Evaluation
+            if ((current_lo & d_softLockMask) != d_softLockVals) valid = false;
+            
+            if (valid) {
+                int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+                if (hd < d_sepMin || hd > d_sepMax) valid = false;
+            }
         }
         if (valid && d_popcountMax < 256) {
             int abs_pc = __popcll(current_lo) + upper_abs_pop;
@@ -189,8 +199,13 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
             uint64_t current_lo = my_base_lo + GRP_SIZE / 2 + (i + 1);
             bool valid = true;
             if (d_useSEP) {
-                int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
-                if (hd < d_sepMin || hd > d_sepMax) valid = false;
+                // NEW: 1-Cycle Soft Lock Evaluation
+                if ((current_lo & d_softLockMask) != d_softLockVals) valid = false;
+                
+                if (valid) {
+                    int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+                    if (hd < d_sepMin || hd > d_sepMax) valid = false;
+                }
             }
             if (valid && d_popcountMax < 256) {
                 int abs_pc = __popcll(current_lo) + upper_abs_pop;
@@ -220,8 +235,13 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
             uint64_t current_lo = my_base_lo + GRP_SIZE / 2 - (i + 1);
             bool valid = true;
             if (d_useSEP) {
-                int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
-                if (hd < d_sepMin || hd > d_sepMax) valid = false;
+                // NEW: 1-Cycle Soft Lock Evaluation
+                if ((current_lo & d_softLockMask) != d_softLockVals) valid = false;
+                
+                if (valid) {
+                    int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+                    if (hd < d_sepMin || hd > d_sepMax) valid = false;
+                }
             }
             if (valid && d_popcountMax < 256) {
                 int abs_pc = __popcll(current_lo) + upper_abs_pop;
@@ -259,8 +279,13 @@ __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* key
         uint64_t current_lo = my_base_lo + 0;
         bool valid = true;
         if (d_useSEP) {
-            int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
-            if (hd < d_sepMin || hd > d_sepMax) valid = false;
+            // NEW: 1-Cycle Soft Lock Evaluation
+            if ((current_lo & d_softLockMask) != d_softLockVals) valid = false;
+            
+            if (valid) {
+                int hd = __popcll(current_lo ^ d_rawTargetLo) + upper_hd;
+                if (hd < d_sepMin || hd > d_sepMax) valid = false;
+            }
         }
         if (valid && d_popcountMax < 256) {
             int abs_pc = __popcll(current_lo) + upper_abs_pop;
@@ -1376,6 +1401,16 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
         if (err != cudaSuccess) { printf("GPUEngine: d_sepMax: %s\n", cudaGetErrorString(err)); return false; }
         err = cudaMemcpyToSymbol(d_useSEP, &config->useSEP, sizeof(bool));
         if (err != cudaSuccess) { printf("GPUEngine: d_useSEP: %s\n", cudaGetErrorString(err)); return false; }
+    }
+
+    // Upload Soft Lock configuration
+    if (config->softLockMask != 0) {
+        err = cudaMemcpyToSymbol(d_softLockMask, &config->softLockMask, sizeof(uint64_t));
+        if (err != cudaSuccess) { printf("GPUEngine: d_softLockMask: %s\n", cudaGetErrorString(err)); return false; }
+        err = cudaMemcpyToSymbol(d_softLockVals, &config->softLockVals, sizeof(uint64_t));
+        if (err != cudaSuccess) { printf("GPUEngine: d_softLockVals: %s\n", cudaGetErrorString(err)); return false; }
+        printf("[Hybrid Engine] Soft Lock uploaded to GPU. Mask: %016llX, Vals: %016llX\n", 
+               config->softLockMask, config->softLockVals);
     }
 
     // Compute and upload Popcount Correction Masks

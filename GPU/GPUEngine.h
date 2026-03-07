@@ -107,6 +107,10 @@ typedef struct {
     int sepMin;                // SEP mutation range min
     int sepMax;                // SEP mutation range max
     uint64_t rawTarget[4];     // 256-bit raw center string (physical layout)
+    
+    // Soft Lock Architecture
+    uint64_t softLockMask;        // Bitmask for soft-locked positions
+    uint64_t softLockVals;        // Expected values at soft-locked positions
 } StringCrackConfig;
 
 // Second level lookup

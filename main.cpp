@@ -713,6 +713,23 @@ int main(int argc, char* argv[]) {
 			scConfig.enabled = true;
 			a++;
 		}
+		else if (strcmp(argv[a], "-softlock") == 0) {
+			a++;
+			string slStr = string(argv[a]);
+			stringstream ss(slStr);
+			string token;
+			while (getline(ss, token, ',')) {
+				size_t colonPos = token.find(':');
+				if (colonPos != string::npos) {
+					int pos = stoi(token.substr(0, colonPos));
+					int val = stoi(token.substr(colonPos + 1));
+					scConfig.softLockMask |= (1ULL << pos);
+					if (val == 1) scConfig.softLockVals |= (1ULL << pos);
+				}
+			}
+			printf("[Hybrid Engine] Soft Locks active. Mask: %016llX\n", scConfig.softLockMask);
+			a++;
+		}
 		else if (strcmp(argv[a], "-weak") == 0) {
 			a++;
 			parseWeakString(string(argv[a]), &scConfig);
