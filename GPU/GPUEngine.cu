@@ -1042,21 +1042,21 @@ void comp_keys_openclaw(
     seed_lo &= d_seedMaskLo;
     seed_hi &= d_seedMaskHi;
 
-    // SEP Logic: Calculate Hamming distance vs target seed
-    int pc;
-    if (d_useSEP) {
-        // Hamming distance: XOR generated bits with the target center bits
-        pc = __popcll(seed_lo ^ d_targetSeedLo) + __popcll(seed_hi ^ d_targetSeedHi);
-    } else {
-        // Standard StringCrack mode (Absolute Popcount)
-        pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
-    }
+    // 1. Always calculate the Absolute Density (Total 1s)
+    int pc_abs = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
     
-    // Dual-Filter: Check both absolute popcount AND SEP mutation range
-    bool is_valid = (pc >= d_popcountMin && pc <= d_popcountMax);
+    bool is_valid = false;
+    
     if (d_useSEP) {
-        // SEP Mode: Apply secondary filter on mutation distance
-        is_valid = is_valid && (pc >= d_sepMin && pc <= d_sepMax);
+        // 2. Calculate the Mutations (Hamming Distance)
+        int pc_mut = __popcll(seed_lo ^ d_targetSeedLo) + __popcll(seed_hi ^ d_targetSeedHi);
+        
+        // 3. DUAL FILTER: Must pass absolute density AND mutation count
+        is_valid = (pc_mut >= d_sepMin && pc_mut <= d_sepMax) &&
+                   (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax);
+    } else {
+        // Standard StringCrack mode (Absolute Popcount only)
+        is_valid = (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax);
     }
     
     // 2. Synchronize the warp and get a bitmask of all passing threads
