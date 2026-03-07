@@ -81,6 +81,16 @@ int _ConvertSMVer2Cores(int major, int minor) {
 #define GRP_SIZE 1024
 #define STEP_SIZE GRP_SIZE*1
 
+// Device symbols for SEP dual-filter (must be before kernel)
+__device__ __constant__ uint64_t d_rawTargetLo;
+__device__ __constant__ int      d_sepMin;
+__device__ __constant__ int      d_sepMax;
+__device__ __constant__ bool     d_useSEP;
+
+// Device symbols for popcount (must be before kernel)
+__device__ __constant__ int      d_popcountMin;
+__device__ __constant__ int      d_popcountMax;
+
 __global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out,
                           uint64_t ks_start_lo, uint64_t step_thread_lo, uint32_t launch_idx, 
                           int upper_hd, int upper_abs_pop) {
@@ -849,8 +859,7 @@ __device__ __constant__ uint64_t d_lockMask[4];
 __device__ __constant__ uint64_t d_lockVals[4];
 __device__ __constant__ int      d_freeBitPos[256];
 __device__ __constant__ int      d_numFreeBits;
-__device__ __constant__ int      d_popcountMin;
-__device__ __constant__ int      d_popcountMax;
+// Note: d_popcountMin, d_popcountMax defined at top of file
 
 // Global read-only pointers for window tables (use __ldg() in kernel)
 __device__ uint64_t* d_window_GX;
@@ -864,11 +873,7 @@ __device__ __constant__ int      d_lockedPopcount;
 __device__ __constant__ uint64_t d_seedMaskLo;
 __device__ __constant__ uint64_t d_seedMaskHi;
 
-// SEP Mode device symbols
-__device__ __constant__ uint64_t d_rawTargetLo;
-__device__ __constant__ int      d_sepMin;
-__device__ __constant__ int      d_sepMax;
-__device__ __constant__ bool     d_useSEP;
+// Note: SEP device symbols (d_rawTargetLo, d_sepMin, d_sepMax, d_useSEP) are defined at the top of the file
 
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)

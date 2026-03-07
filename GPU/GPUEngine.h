@@ -153,7 +153,7 @@ public:
 
 private:
 
-  bool callKernel();
+  bool callKernel(uint64_t ks_start_lo = 0, uint64_t step_thread_lo = 0, uint32_t launch_idx = 0, int upper_hd = 0, int upper_abs_pop = 0);
   bool callOpenClawKernel(uint64_t batchOffsetLo, uint64_t batchOffsetHi, uint32_t* d_out, cudaStream_t stream);
   static void ComputeIndex(std::vector<int> &s, int depth, int n);
   static void Browse(FILE *f,int depth, int max, int s);
