@@ -94,6 +94,12 @@ typedef struct {
     Int seedOffsetInt;          // Full 256-bit seed offset
     Int seedCountInt;           // Full 256-bit seed count
     Int seedEndInt;             // Full 256-bit end offset (start + 2^endBits)
+    
+    // SEP (Stratified Entropy Permutation) Configuration
+    bool useSEP;
+    char centerString[256];
+    uint64_t targetSeedLo;
+    uint64_t targetSeedHi;
 } StringCrackConfig;
 
 // Second level lookup

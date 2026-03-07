@@ -129,6 +129,9 @@ void printUsage() {
 	printf("\n === StringCrack Mode ===\n");
 	printf(" -lock \"pos:val,...\": Lock bit positions. Example: -lock \"93:0,98:0,99:0,78:0\"\n");
 	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
+	printf(" -poprange min:max: Popcount range. Example: -poprange 30:40\n");
+	printf(" -center STRING: SEP center string (71-bit). Example: -center 10110...\n");
+	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
 	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
 	exit(-1);
 
@@ -640,6 +643,13 @@ int main(int argc, char* argv[]) {
 		else if (strcmp(argv[a], "-start") == 0) {
 			a++;
 			start = string(argv[a]);
+			a++;
+		}
+		else if (strcmp(argv[a], "-center") == 0) {
+			a++;
+			strncpy(scConfig.centerString, argv[a], 255);
+			scConfig.useSEP = true;
+			scConfig.enabled = true;
 			a++;
 		}
 		else if (strcmp(argv[a], "-i") == 0) {

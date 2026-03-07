@@ -799,6 +799,11 @@ __device__ __constant__ int      d_lockedPopcount;
 __device__ __constant__ uint64_t d_seedMaskLo;
 __device__ __constant__ uint64_t d_seedMaskHi;
 
+// SEP (Stratified Entropy Permutation) device symbols
+__device__ __constant__ uint64_t d_targetSeedLo;
+__device__ __constant__ uint64_t d_targetSeedHi;
+__device__ __constant__ bool     d_useSEP;
+
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
 __device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, uint64_t key[4]) {
@@ -1035,7 +1040,16 @@ void comp_keys_openclaw(
     seed_lo &= d_seedMaskLo;
     seed_hi &= d_seedMaskHi;
 
-    int pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
+    // SEP Logic: Calculate Hamming distance vs target seed
+    int pc;
+    if (d_useSEP) {
+        // Hamming distance: XOR generated bits with the target center bits
+        pc = __popcll(seed_lo ^ d_targetSeedLo) + __popcll(seed_hi ^ d_targetSeedHi);
+    } else {
+        // Standard StringCrack mode (Absolute Popcount)
+        pc = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
+    }
+    
     bool is_valid = (pc >= d_popcountMin && pc <= d_popcountMax);
     
     // 2. Synchronize the warp and get a bitmask of all passing threads
@@ -1231,6 +1245,34 @@ void GPUEngine::PrecomputeStringCrackMasks(StringCrackConfig *config) {
         }
     }
 
+    // SEP Logic: Map the center string to targetSeedLo/Hi
+    config->targetSeedLo = 0;
+    config->targetSeedHi = 0;
+    
+    if (config->useSEP) {
+        int len = strlen(config->centerString);
+        for (int i = 0; i < config->numFreeBits; i++) {
+            int pos = config->freeBitPositions[i];
+            
+            // Map the MSB->LSB string index to the physical bit position
+            // Bit 1 (Index 0) corresponds to pos (len - 1) e.g., pos 70
+            int char_index = (len - 1) - pos; 
+            
+            if (char_index >= 0 && char_index < len) {
+                if (config->centerString[char_index] == '1') {
+                    if (i < 64) {
+                        config->targetSeedLo |= (1ULL << i);
+                    } else {
+                        config->targetSeedHi |= (1ULL << (i - 64));
+                    }
+                }
+            }
+        }
+        printf("[StringCrack] SEP Mode Enabled. Center string mapped.\n");
+        printf("[StringCrack] Target Seed Lo: %016llX\n", (unsigned long long)config->targetSeedLo);
+        printf("[StringCrack] Target Seed Hi: %016llX\n", (unsigned long long)config->targetSeedHi);
+    }
+
     printf("[StringCrack] Locked bits: %d, Free bits: %d\n", config->numLockedBits, config->numFreeBits);
     printf("[StringCrack] Lock mask: %016llX %016llX %016llX %016llX\n",
            (unsigned long long)config->lockMask[3], (unsigned long long)config->lockMask[2],
@@ -1269,6 +1311,14 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Upload SEP (Stratified Entropy Permutation) variables
+    err = cudaMemcpyToSymbol(d_targetSeedLo, &config->targetSeedLo, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_targetSeedLo: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_targetSeedHi, &config->targetSeedHi, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_targetSeedHi: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_useSEP, &config->useSEP, sizeof(bool));
+    if (err != cudaSuccess) { printf("GPUEngine: d_useSEP: %s\n", cudaGetErrorString(err)); return false; }
 
     // Compute and upload Popcount Correction Masks
     uint64_t seedMaskLo = 0, seedMaskHi = 0;
