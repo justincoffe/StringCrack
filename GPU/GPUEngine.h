@@ -106,7 +106,7 @@ typedef struct {
     char centerString[256];    // Human-readable center string
     int sepMin;                // SEP mutation range min
     int sepMax;                // SEP mutation range max
-    uint64_t rawTarget[4];     // 256-bit raw center string (physical layout)
+    uint64_t sepRawTarget[4];  // 256-bit raw center string (physical layout)
 } StringCrackConfig;
 
 // Second level lookup

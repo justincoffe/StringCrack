@@ -1387,8 +1387,8 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     }
 
     // Generate raw 256-bit target from center string for SEP mode
-    config->rawTarget[0] = 0; config->rawTarget[1] = 0;
-    config->rawTarget[2] = 0; config->rawTarget[3] = 0;
+    config->sepRawTarget[0] = 0; config->sepRawTarget[1] = 0;
+    config->sepRawTarget[2] = 0; config->sepRawTarget[3] = 0;
 
     if (config->useSEP) {
         int len = strlen(config->centerString);
@@ -1396,7 +1396,7 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
             int char_index = (len - 1) - pos;
             if (char_index >= 0 && char_index < len) {
                 if (config->centerString[char_index] == '1') {
-                    config->rawTarget[pos >> 6] |= (1ULL << (pos & 63));
+                    config->sepRawTarget[pos >> 6] |= (1ULL << (pos & 63));
                 }
             }
         }
