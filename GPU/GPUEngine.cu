@@ -1387,22 +1387,24 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     }
 
     // Generate raw 256-bit target from center string for SEP mode
-    config->sepRawTarget[0] = 0; config->sepRawTarget[1] = 0;
-    config->sepRawTarget[2] = 0; config->sepRawTarget[3] = 0;
+    StringCrackConfig* cfg = (StringCrackConfig*)config; // Bypass read-only lock
+    
+    cfg->rawTarget[0] = 0; cfg->rawTarget[1] = 0;
+    cfg->rawTarget[2] = 0; cfg->rawTarget[3] = 0;
 
-    if (config->useSEP) {
-        int len = strlen(config->centerString);
+    if (cfg->useSEP) {
+        int len = strlen(cfg->centerString);
         for (int pos = 0; pos < 256; pos++) {
             int char_index = (len - 1) - pos;
             if (char_index >= 0 && char_index < len) {
-                if (config->centerString[char_index] == '1') {
-                    config->sepRawTarget[pos >> 6] |= (1ULL << (pos & 63));
+                if (cfg->centerString[char_index] == '1') {
+                    cfg->rawTarget[pos >> 6] |= (1ULL << (pos & 63));
                 }
             }
         }
-        printf("[StringCrack] SEP Mode Enabled. Center mapped to Hybrid rawTarget.\n");
-        printf("[StringCrack] Dual Filter Target: SEP %d-%d | ABS %d-%d\n", 
-               config->sepMin, config->sepMax, config->popcountMin, config->popcountMax);
+        printf("[Hybrid Engine] SEP Mode Enabled. Center mapped to Hybrid rawTarget.\n");
+        printf("[Hybrid Engine] Dual Filter Target: SEP %d-%d | ABS %d-%d\n", 
+               cfg->sepMin, cfg->sepMax, cfg->popcountMin, cfg->popcountMax);
     }
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);

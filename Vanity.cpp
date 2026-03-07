@@ -1294,9 +1294,9 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 			// EVALUATE THE DYNAMIC CPU TELEPORT BLOCK
 			if (scConfig != NULL && (scConfig->useSEP || scConfig->enabled)) {
-				upper_hd = __builtin_popcountll(local_ksStart.bits64[1] ^ scConfig->sepRawTarget[1]) +
-				           __builtin_popcountll(local_ksStart.bits64[2] ^ scConfig->sepRawTarget[2]) +
-				           __builtin_popcountll(local_ksStart.bits64[3] ^ scConfig->sepRawTarget[3]);
+				upper_hd = __builtin_popcountll(local_ksStart.bits64[1] ^ scConfig->rawTarget[1]) +
+				           __builtin_popcountll(local_ksStart.bits64[2] ^ scConfig->rawTarget[2]) +
+				           __builtin_popcountll(local_ksStart.bits64[3] ^ scConfig->rawTarget[3]);
 				
 				upper_abs_pop = __builtin_popcountll(local_ksStart.bits64[1]) +
 				                __builtin_popcountll(local_ksStart.bits64[2]) +
