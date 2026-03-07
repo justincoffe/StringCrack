@@ -49,20 +49,25 @@ void printHex(const unsigned char* bytes, int len) {
 
 int main() {
     // ========================================================================
-    // === USER CONFIGURATION: CHANGE THESE FOR YOUR SEARCH                 ===
+    // === INDEX 71: STRATIFIED ENTROPY PERMUTATION (SEP) STRIKE            ===
     // ========================================================================
     
-    std::string targetAddress = "1MEzite4ReNuWaL5Ds17ePKt2dCxWEofwk";
+    std::string targetAddress = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU";
     
-    std::string baseHex = "22BD43C2E9483"; // Your base prediction (S_base)
-    int puzzleBits = 50;                   // The puzzle boundary
+    // The Base Hex: 101101001010110011010100101001101011 (shifted up 35 bits)
+    // We pad the bottom 35 bits with 0s for the base prediction.
+    std::string baseHex = "5A566A53500000000"; 
     
-    // Deterministic Anchors (Indices from 0 to puzzleBits-1 that NEVER flip)
-    std::vector<int> lockedBits = {49, 48, 25, 12, 3}; 
+    int puzzleBits = 71;                    
     
-    // Binomial distribution bounds (k bit-flips)
-    int minFlips = 8;
-    int maxFlips = 16;
+    // The 8 Indestructible Anchors (Deterministically Locked)
+    // Plus the bottom 35 bits if you are doing this pure CPU, 
+    // OR just the 8 anchors if passing to the GPU SCPRO muscle.
+    std::vector<int> lockedBits = {70, 69, 66, 62, 54, 52, 46, 41}; 
+    
+    // The Binomial Boundaries for the 28 Volatile Bits
+    int minFlips = 11;
+    int maxFlips = 23;
     
     // ========================================================================
 
