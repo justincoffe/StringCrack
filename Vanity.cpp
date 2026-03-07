@@ -1155,19 +1155,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 		ok = g.SetKeys(publicKeys);
 		needsNewBlock = false;
 
-		// Calculate static upper bits for SEP dual-filter
-		if (scConfig != NULL && (scConfig->useSEP || scConfig->enabled)) {
-			// Calculate static HD for the upper geographic bits
-			upper_hd = __builtin_popcountll(local_ksStart.bits64[1] ^ scConfig->rawTarget[1]) +
-			           __builtin_popcountll(local_ksStart.bits64[2] ^ scConfig->rawTarget[2]) +
-			           __builtin_popcountll(local_ksStart.bits64[3] ^ scConfig->rawTarget[3]);
-			
-			// Calculate static absolute density for the upper geographic bits
-			upper_abs_pop = __builtin_popcountll(local_ksStart.bits64[1]) +
-			                __builtin_popcountll(local_ksStart.bits64[2]) +
-			                __builtin_popcountll(local_ksStart.bits64[3]);
-		}
-
 		// For Single/Multi-GPU Vanilla: Keep trackers aligned with local bounds
 		thread_currentSeed.Set(&local_ksStart);
 		thread_limitSeed.Set(&local_ksFinish);
@@ -1304,6 +1291,18 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			// ==========================================
 			uint64_t step_thread_lo = stepThread.bits64[0];
 			uint64_t ks_start_lo = local_ksStart.bits64[0];
+
+			// EVALUATE THE DYNAMIC CPU TELEPORT BLOCK
+			if (scConfig != NULL && (scConfig->useSEP || scConfig->enabled)) {
+				upper_hd = __builtin_popcountll(local_ksStart.bits64[1] ^ scConfig->rawTarget[1]) +
+				           __builtin_popcountll(local_ksStart.bits64[2] ^ scConfig->rawTarget[2]) +
+				           __builtin_popcountll(local_ksStart.bits64[3] ^ scConfig->rawTarget[3]);
+				
+				upper_abs_pop = __builtin_popcountll(local_ksStart.bits64[1]) +
+				                __builtin_popcountll(local_ksStart.bits64[2]) +
+				                __builtin_popcountll(local_ksStart.bits64[3]);
+			}
+
 			ok = g.Launch(found, true, ks_start_lo, step_thread_lo, local_idxcount, upper_hd, upper_abs_pop);
 			local_idxcount += 1; // FIX
 
