@@ -102,6 +102,10 @@ typedef struct {
     uint64_t targetSeedHi;
     int sepMin;
     int sepMax;
+    
+    // Radius Mode (Combinadic Search)
+    int radius;                    // Hamming radius for sphere search
+    uint64_t totalCombinations;    // Total nCr(numFreeBits, radius) combinations
 } StringCrackConfig;
 
 // Second level lookup
@@ -136,6 +140,12 @@ public:
   // Asynchronous double-buffered StringCrack
   void LaunchOpenClawAsync(uint64_t batchOffsetLo, uint64_t batchOffsetHi);
   uint32_t SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressFound);
+
+  // Radius Mode (Combinadic Search)
+  uint64_t* d_stateLo;
+  uint64_t* d_stateHi;
+  bool InitRadiusState(uint64_t* h_lo, uint64_t* h_hi);
+  bool LaunchRadius(std::vector<ITEM> &addressFound, int steps_per_thread);
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;

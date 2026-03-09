@@ -973,6 +973,29 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	printf("GPU Started ! \r");
 	fflush(stdout);
 
+	// --- CPU Combinadic Dispatcher for Radius Mode ---
+	uint64_t combos_per_thread = 0;
+	if (useStringCrack && scConfig->radius > 0) {
+		printf("[StringCrack] Distributing %llu combinations to %d threads via CPU Combinadics...\n", 
+				(unsigned long long)scConfig->totalCombinations, numThreadsGPU);
+		
+		uint64_t* h_startLo = new uint64_t[numThreadsGPU];
+		uint64_t* h_startHi = new uint64_t[numThreadsGPU];
+		
+		combos_per_thread = scConfig->totalCombinations / numThreadsGPU;
+		
+		for (int i = 0; i < numThreadsGPU; i++) {
+			uint64_t rank = i * combos_per_thread;
+			unrank_combination(scConfig->numFreeBits, scConfig->radius, rank, h_startLo[i], h_startHi[i]);
+		}
+		
+		g.InitRadiusState(h_startLo, h_startHi);
+		delete[] h_startLo;
+		delete[] h_startHi;
+		printf("[StringCrack] GPU State Initialized.\n");
+		fflush(stdout);
+	}
+
 	t0 = Timer::get_tick();
 
 	endOfSearch = false;
@@ -1008,7 +1031,27 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				ok = g.SetRandomJump(RandomJump_P);
 			}
 
-			if (useStringCrack) {
+			if (useStringCrack && scConfig->radius > 0) {
+				// Radius Mode: Use stateful Gosper's Hack kernel
+				int steps_per_kernel = 4096;
+				
+				ok = g.LaunchRadius(found, steps_per_kernel);
+				
+				idxcount += steps_per_kernel;
+				keys_n = 1ULL * numThreadsGPU * idxcount;
+				
+				// Process found keys
+				for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
+					ITEM it = found[i];
+					// TODO: CPU reconstruction of full private key
+					// (use existing seed reconstruction code adapted for mut_mask)
+				}
+
+				if (idxcount >= combos_per_thread) {
+					printf("\n[StringCrack] Hamming Sphere Search Complete!\n");
+					endOfSearch = true;
+				}
+			} else if (useStringCrack) {
 				// Use Int for full 256-bit batch offset calculation
 				Int batchOffsetInt;
 				batchOffsetInt.Set(&scConfig->seedOffsetInt);

@@ -571,6 +571,30 @@ bool loadBackup(int& idxcount, double& t_Paused, int gpuid) {
 	}
 }
 
+// Combinatorics functions for Radius Mode
+uint64_t nCr(int n, int r) {
+	if (r < 0 || r > n) return 0;
+	if (r > n / 2) r = n - r;
+	uint64_t res = 1;
+	for (int i = 1; i <= r; i++) {
+		res = res * (n - i + 1) / i;
+	}
+	return res;
+}
+
+void unrank_combination(int n, int k, uint64_t rank, uint64_t &lo, uint64_t &hi) {
+	lo = 0; hi = 0;
+	for (int i = n - 1; i >= 0 && k > 0; --i) {
+		uint64_t count = nCr(i, k);
+		if (rank >= count) {
+			rank -= count;
+			if (i < 64) lo |= (1ULL << i);
+			else hi |= (1ULL << (i - 64));
+			k--;
+		}
+	}
+}
+
 int main(int argc, char* argv[]) {
 
 	std::thread inputThread(monitorKeypress);
@@ -732,6 +756,12 @@ int main(int argc, char* argv[]) {
 			scConfig.enabled = true;
 			a++;
 		}
+		else if (strcmp(argv[a], "-radius") == 0) {
+			a++;
+			scConfig.radius = getInt("radius", argv[a]);
+			scConfig.enabled = true;
+			a++;
+		}
 
 		else if (a == argc - 1) {
 			address.push_back(string(argv[a]));
@@ -868,6 +898,14 @@ int main(int argc, char* argv[]) {
 		}
 	repeatP:
 		Paused = false;
+
+		// Radius Mode initialization
+		if (scConfig.enabled && scConfig.radius > 0) {
+			scConfig.totalCombinations = nCr(scConfig.numFreeBits, scConfig.radius);
+			printf("[StringCrack] Radius %d Mode Activated.\n", scConfig.radius);
+			printf("[StringCrack] Total Valid Seeds: %llu\n", (unsigned long long)scConfig.totalCombinations);
+		}
+
 		VanitySearch* v = new VanitySearch(secp, address, searchMode, stop, outputFile, maxFound, bc,
 			scConfig.enabled ? &scConfig : NULL);
 		v->smMultiplier = smMultiplier;

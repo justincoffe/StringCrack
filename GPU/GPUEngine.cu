@@ -806,6 +806,40 @@ __device__ __constant__ bool     d_useSEP;
 __device__ __constant__ int      d_sepMin;
 __device__ __constant__ int      d_sepMax;
 
+// Gosper's Hack for 128-bit combination advancement
+__device__ __forceinline__ void next_combination_128(uint64_t &lo, uint64_t &hi) {
+    uint64_t c_lo = lo & (~lo + 1);
+    uint64_t c_hi = (lo == 0) ? (hi & (~hi + 1)) : 0;
+
+    uint64_t r_lo = lo + c_lo;
+    uint64_t carry = (r_lo < lo) ? 1 : 0;
+    uint64_t r_hi = hi + c_hi + carry;
+
+    uint64_t xor_lo = r_lo ^ lo;
+    uint64_t xor_hi = r_hi ^ hi;
+
+    uint64_t shift_hi = xor_hi >> 2;
+    uint64_t shift_lo = (xor_lo >> 2) | (xor_hi << 62);
+
+    int shift_amt = (lo == 0) ? __ffsll(c_hi) - 1 : __ffsll(c_lo) - 1;
+
+    uint64_t div_hi = 0, div_lo = 0;
+    if (lo == 0) {
+        div_lo = shift_hi >> shift_amt;
+    } else {
+        if (shift_amt == 0) {
+            div_lo = shift_lo;
+            div_hi = shift_hi;
+        } else {
+            div_lo = (shift_lo >> shift_amt) | (shift_hi << (64 - shift_amt));
+            div_hi = shift_hi >> shift_amt;
+        }
+    }
+
+    lo = r_lo | div_lo;
+    hi = r_hi | div_hi;
+}
+
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
 __device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, uint64_t key[4]) {
@@ -1581,4 +1615,125 @@ uint32_t GPUEngine::SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressF
         }
     }
     return nbFound;
+}
+
+// ============================================================================
+// Stateful Radius Kernel (Gosper's Hack Combinadic Search)
+// ============================================================================
+#define NB_TRHEAD_PER_GROUP 256
+
+__global__ __launch_bounds__(256, 2)
+void comp_keys_radius(
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out,
+    uint64_t* d_stateLo, uint64_t* d_stateHi, int steps_per_thread)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // 1. Read state from global memory
+    uint64_t mut_lo = d_stateLo[tid];
+    uint64_t mut_hi = d_stateHi[tid];
+
+    int num_windows = (d_numFreeBits + 7) / 8;
+
+    // 2. Loop through assigned chunk
+    for(int step = 0; step < steps_per_thread; step++) {
+        
+        // XOR mutation against center target
+        uint64_t seed_lo = d_targetSeedLo ^ mut_lo;
+        uint64_t seed_hi = d_targetSeedHi ^ mut_hi;
+
+        // Initialize Jacobian Accumulator
+        uint64_t accX[4], accY[4], accZ[4];
+        Load256(accX, d_basePointX);
+        Load256(accY, d_basePointY);
+        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+
+        // 8-Bit Windows Math (Lower 64)
+        uint64_t seed = seed_lo;
+        for (int w = 0; w < 8 && w < num_windows; w++) {
+            int byte_val = seed & 0xFF;
+            if (byte_val != 0) {
+                int idx = (w * 256 + byte_val) * 4; 
+                ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+                ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+                ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+                ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
+                uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
+                uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+            }
+            seed >>= 8;
+        }
+
+        // 8-Bit Windows Math (Upper 64)
+        seed = seed_hi;
+        for (int w = 8; w < 16 && w < num_windows; w++) {
+            int byte_val = seed & 0xFF;
+            if (byte_val != 0) {
+                int idx = (w * 256 + byte_val) * 4; 
+                ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+                ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+                ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+                ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
+                uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
+                uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+            }
+            seed >>= 8;
+        }
+
+        // Convert and Hash
+        uint64_t px[4], py[4];
+        jacobian_to_affine(accX, accY, accZ, px, py);
+        uint8_t odd_py = (uint8_t)(py[0] & 1);
+        uint32_t h[5];
+        _GetHash160Comp(px, odd_py, (uint8_t*)h);
+        
+        // Bloom Filter Check
+        if (sAddress[h[0] & 0xFFFF] != 0) {
+            CheckPoint(h, 0, sAddress, lookup32, out);
+        }
+
+        // 3. Advance to the exact next combination instantly (O(1))
+        next_combination_128(mut_lo, mut_hi);
+    }
+
+    // 4. Write state back to global memory for the next batch launch
+    d_stateLo[tid] = mut_lo;
+    d_stateHi[tid] = mut_hi;
+}
+
+// ============================================================================
+// Host Launch Wrappers for Radius Mode
+// ============================================================================
+bool GPUEngine::InitRadiusState(uint64_t* h_lo, uint64_t* h_hi) {
+    size_t sz = nbThread * sizeof(uint64_t);
+    cudaMalloc(&d_stateLo, sz);
+    cudaMalloc(&d_stateHi, sz);
+    cudaMemcpy(d_stateLo, h_lo, sz, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_stateHi, h_hi, sz, cudaMemcpyHostToDevice);
+    return true;
+}
+
+bool GPUEngine::LaunchRadius(std::vector<ITEM> &addressFound, int steps_per_thread) {
+    addressFound.clear();
+    cudaMemset(outputBuffer, 0, 4);
+
+    comp_keys_radius<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP>>>(
+        inputAddress, inputAddressLookUp, outputBuffer,
+        d_stateLo, d_stateHi, steps_per_thread);
+
+    cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
+    
+    uint32_t nbFound = outputBufferPinned[0];
+    if (nbFound > maxFound) nbFound = maxFound;
+    
+    for (uint32_t i = 0; i < nbFound; i++) {
+        uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE32 + 1);
+        ITEM it;
+        it.thId = itemPtr[0];
+        it.hash = (uint8_t*)(itemPtr + 2);
+        addressFound.push_back(it);
+    }
+    return true;
 }
