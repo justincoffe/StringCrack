@@ -1540,20 +1540,28 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 			offset             += batchSize;
 			totalKeysProcessed += batchSize;
 			
-			// Stats (throttled to 0.5 s)
-			ttot = Timer::get_tick() - t0 + t_Paused;
-			static double lastStatsTime_r  = 0.0;
-			static uint64_t lastStatsKeys_r = 0;
-			if (ttot - lastStatsTime_r >= 0.5 || lastStatsTime_r == 0.0) {
-				double dt = ttot - lastStatsTime_r;
-				uint64_t dk = totalKeysProcessed - lastStatsKeys_r;
-				double spd = (lastStatsTime_r > 0.0 && dt > 0.0)
-				             ? (double)dk / (dt * 1e6) : 0.0;
-				lastStatsTime_r  = ttot;
-				lastStatsKeys_r  = totalKeysProcessed;
-				printf("[SEP5] GPU[%d] h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
-				       sliceId, h, spd, (double)totalKeysProcessed / 1e9, nbFoundKey);
-				fflush(stdout);
+			// Publish this GPU's local count to the global array so getGPUCount() sums correctly
+			counters[thId] = totalKeysProcessed;
+			
+			// Global aggregated stats — only GPU 0 prints to prevent console garbling.
+			// The static throttle variables are safely owned by a single thread (sliceId==0).
+			if (sliceId == 0) {
+				ttot = Timer::get_tick() - t0 + t_Paused;
+				static double   lastStatsTime_r  = 0.0;
+				static uint64_t lastStatsKeys_r  = 0;
+				if (ttot - lastStatsTime_r >= 0.5 || lastStatsTime_r == 0.0) {
+					double   dt         = ttot - lastStatsTime_r;
+					uint64_t globalKeys = getGPUCount(); // sums counters[] of all active GPUs
+					uint64_t dk         = (globalKeys >= lastStatsKeys_r)
+					                      ? globalKeys - lastStatsKeys_r : 0;
+					double spd = (lastStatsTime_r > 0.0 && dt > 0.0)
+					             ? (double)dk / (dt * 1e6) : 0.0;
+					lastStatsTime_r  = ttot;
+					lastStatsKeys_r  = globalKeys;
+					printf("[SEP5] GLOBAL h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
+					       h, spd, (double)globalKeys / 1e9, nbFoundKey);
+					fflush(stdout);
+				}
 			}
 		}
 	}
