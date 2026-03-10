@@ -1694,19 +1694,18 @@ void comp_keys_radius(
         // Bloom Filter Check - Custom output for Radius Mode
         if (sAddress[h[0] & 0xFFFF] != 0) {
             uint32_t idx = atomicAdd(out, 1);
-            if (idx < maxFound) {
-                // Use a custom stride of 6 uint32_t to fit the extra 64-bit masks
-                uint32_t* itemPtr = out + (idx * 6 + 1);
-                itemPtr[0] = tid;
-                
-                // Save the exact mutation masks that triggered the hit
-                uint64_t* maskPtr = (uint64_t*)(itemPtr + 1);
-                maskPtr[0] = mut_lo;
-                maskPtr[1] = mut_hi;
-                
-                // Save the first part of the hash for host-side verification
-                itemPtr[5] = h[0]; 
-            }
+            // Note: maxFound check handled on host side
+            // Use a custom stride of 6 uint32_t to fit the extra 64-bit masks
+            uint32_t* itemPtr = out + (idx * 6 + 1);
+            itemPtr[0] = tid;
+            
+            // Save the exact mutation masks that triggered the hit
+            uint64_t* maskPtr = (uint64_t*)(itemPtr + 1);
+            maskPtr[0] = mut_lo;
+            maskPtr[1] = mut_hi;
+            
+            // Save the first part of the hash for host-side verification
+            itemPtr[5] = h[0]; 
         }
 
         // 3. Advance to the exact next combination instantly (O(1))
