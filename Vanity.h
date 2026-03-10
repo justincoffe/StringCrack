@@ -57,6 +57,12 @@ typedef struct {
 	int  smMultiplier;
 	Int  THnextKey;
 
+	// SEP5: Multi-GPU radius slicing
+	// Each GPU owns an independent, non-overlapping slice of each Hamming layer.
+	// GPU i handles ranks [i*sliceSize, (i+1)*sliceSize) for each layer.
+	int  gpuSliceId;    // This GPU's index (0..gpuSliceCount-1)
+	int  gpuSliceCount; // Total number of GPUs participating
+
 } TH_PARAM;
 
 typedef struct {

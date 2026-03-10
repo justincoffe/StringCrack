@@ -760,8 +760,24 @@ int main(int argc, char* argv[]) {
 
 	fprintf(stdout, "StringCracker v" RELEASE "\n");
 
+	// SEP5: Parse the full comma-separated -gpuId list (e.g. "0,1,2,3")
+	gpuId.clear();
+	{
+		stringstream ss(gpuParsed);
+		string token;
+		while (getline(ss, token, ',')) {
+			// Trim whitespace
+			size_t s = token.find_first_not_of(" \t");
+			if (s != string::npos) token = token.substr(s);
+			size_t e = token.find_last_not_of(" \t");
+			if (e != string::npos) token = token.substr(0, e + 1);
+			if (!token.empty()) gpuId.push_back(stoi(token));
+		}
+		if (gpuId.empty()) gpuId.push_back(0);
+	}
+
 	if (gridSize.size() == 0) {
-		for (int i = 0; i < gpuId.size(); i++) {
+		for (int i = 0; i < (int)gpuId.size(); i++) {
 			gridSize.push_back(-1);
 			gridSize.push_back(128);
 		}
@@ -771,10 +787,9 @@ int main(int argc, char* argv[]) {
 		exit(-1);
 	}
 
-	
-	size_t commaPos = gpuParsed.find(',');
-	std::string firstValue = gpuParsed.substr(0, commaPos);
-	gpuId[0] = std::stoi(firstValue);
+	fprintf(stdout, "[SEP5] GPUs requested: %d — IDs:", (int)gpuId.size());
+	for (int id : gpuId) fprintf(stdout, " %d", id);
+	fprintf(stdout, "\n");
 
 	if (range > 255)
 		range = 255;

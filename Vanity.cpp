@@ -1356,22 +1356,25 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 
 // =====================================================================================
-// SEP4: FindKeyGPU_Radius — GPU-native Gosper (combinatorial unranking in registers)
-// CPU sends (hamming_h, batchOffset) only. GPU does all combination generation.
-// On hit, CPU reconstructs key via rank = batchOffset + tid → unrank → XOR → expand
+// SEP5: FindKeyGPU_Radius — GPU-native Gosper, multi-GPU sliced
+// Each GPU owns an independent rank slice of each Hamming layer.
+// GPU i of N covers ranks [i*sliceSize, (i+1)*sliceSize) per layer.
+// Key reconstruction: rank = sliceStart + batchOffset + tid (globally unique).
 // =====================================================================================
 void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
-	bool ok = true;
 	double t0;
 	double ttot;
 	uint64_t totalKeysProcessed = 0;
 	
-	int thId = ph->threadId;
+	int thId        = ph->threadId;
+	int sliceId     = ph->gpuSliceId;     // This GPU's index (0..N-1)
+	int sliceCount  = ph->gpuSliceCount;  // Total GPUs (N)
+
 	GPUEngine g(ph->gpuId, maxFound, ph->smMultiplier);
 	int numThreadsGPU = g.GetNbThread();
 	vector<ITEM> found;
 	
-	fprintf(stdout, "GPU: %s\n", g.deviceName.c_str());
+	fprintf(stdout, "[SEP5] GPU[%d] device: %s\n", sliceId, g.deviceName.c_str());
 	fflush(stdout);
 	
 	counters[thId] = 0;
@@ -1386,76 +1389,52 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 	
 	// Upload StringCrack config + C(n,k) table to GPU
 	if (!g.SetStringCrackConfig(secp, scConfig)) {
-		printf("[SEP4] Failed to upload config to GPU!\n");
+		printf("[SEP5] GPU[%d] Failed to upload config!\n", sliceId);
 		ph->isRunning = false;
 		return;
 	}
 	
-	int n = scConfig->numFreeBits;
-	int maxRadius = scConfig->radius;
+	int n          = scConfig->numFreeBits;
+	int maxRadius  = scConfig->radius;
 	uint64_t targetLo = scConfig->targetSeedLo;
 	uint64_t targetHi = scConfig->targetSeedHi;
 	
 	if (n > 128) {
-		printf("[SEP4] ERROR: Radius mode supports up to 128 free bits, got %d\n", n);
+		printf("[SEP5] GPU[%d] ERROR: Radius mode supports up to 128 free bits, got %d\n", sliceId, n);
 		ph->isRunning = false;
-		endOfSearch = true;
 		return;
 	}
-	if (maxRadius > n) {
-		printf("[SEP4] WARNING: radius %d > numFreeBits %d, clamping to %d\n", maxRadius, n, n);
-		maxRadius = n;
-	}
+	if (maxRadius > n) maxRadius = n;
 	
-	// Build host-side C(n,k) table for key reconstruction on hit
-	int tableN = 129, tableK = 129;
+	// -----------------------------------------------------------------------
+	// Build host-side C(n,k) table (Pascal's triangle, saturating uint64_t).
+	// Used for:
+	//   1. Computing slice boundaries (layerCombs, sliceStart, sliceEnd)
+	//   2. Key reconstruction on hit (cpu_unrank_combination)
+	// -----------------------------------------------------------------------
+	const int tableN = 129, tableK = 129;
 	uint64_t* h_combTable = (uint64_t*)calloc((size_t)tableN * tableK, sizeof(uint64_t));
 	for (int i = 0; i < tableN; i++) {
 		h_combTable[i * tableK + 0] = 1;
 		for (int j = 1; j <= i && j < tableK; j++) {
-			uint64_t a = h_combTable[(i - 1) * tableK + (j - 1)];
-			uint64_t b = h_combTable[(i - 1) * tableK + j];
-			if (a > 0xFFFFFFFFFFFFFFFFULL - b) {
-				h_combTable[i * tableK + j] = 0xFFFFFFFFFFFFFFFFULL;
-			} else {
-				h_combTable[i * tableK + j] = a + b;
-			}
+			uint64_t a = h_combTable[(i-1)*tableK + (j-1)];
+			uint64_t b = h_combTable[(i-1)*tableK + j];
+			h_combTable[i*tableK + j] = (a > 0xFFFFFFFFFFFFFFFFULL - b)
+			                            ? 0xFFFFFFFFFFFFFFFFULL : a + b;
 		}
 	}
-	
-	printf("[SEP4] GPU kernel ready — GPU-native Gosper (unranking in registers)\n");
-	printf("[SEP4] No PCIe seed transfer. CPU sends (h, offset) only.\n");
-	fflush(stdout);
-	
-	// Seed mask for masking seeds to valid range (for key reconstruction)
+
+	// Seed mask for key reconstruction
 	uint64_t seedMaskLo, seedMaskHi;
-	if (n <= 0) {
-		seedMaskLo = 0; seedMaskHi = 0;
-	} else if (n < 64) {
-		seedMaskLo = (1ULL << n) - 1ULL;
-		seedMaskHi = 0;
-	} else if (n == 64) {
-		seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
-		seedMaskHi = 0;
-	} else if (n < 128) {
-		seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
-		seedMaskHi = (1ULL << (n - 64)) - 1ULL;
-	} else {
-		seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
-		seedMaskHi = 0xFFFFFFFFFFFFFFFFULL;
-	}
-	
-	ph->hasStarted = true;
-	t0 = Timer::get_tick();
-	endOfSearch = false;
-	bool firstBatch = true;
-	
-	// Track (hamming_h, batchOffset) for each double-buffered stream
-	int streamH[2] = {0, 0};
-	uint64_t streamOffset[2] = {0, 0};
-	
-	// Helper lambda-like: reconstruct key from (h, rank)
-	// rank = batchOffset + tid → unrank → flip_mask → XOR target → seed → expand_bits → key
+	if      (n <= 0)   { seedMaskLo = 0;                          seedMaskHi = 0; }
+	else if (n <  64)  { seedMaskLo = (1ULL << n) - 1ULL;        seedMaskHi = 0; }
+	else if (n == 64)  { seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;      seedMaskHi = 0; }
+	else if (n <  128) { seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;      seedMaskHi = (1ULL << (n-64)) - 1ULL; }
+	else               { seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;      seedMaskHi = 0xFFFFFFFFFFFFFFFFULL; }
+
+	// -----------------------------------------------------------------------
+	// Key reconstruction helper — takes global rank, returns private key
+	// -----------------------------------------------------------------------
 	auto reconstructKey = [&](int h_val, uint64_t rank, uint8_t* hash) {
 		uint64_t flip_lo, flip_hi;
 		cpu_unrank_combination(rank, n, h_val, flip_lo, flip_hi, h_combTable, tableK);
@@ -1463,56 +1442,67 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 		uint64_t seed_lo = (flip_lo ^ targetLo) & seedMaskLo;
 		uint64_t seed_hi = (flip_hi ^ targetHi) & seedMaskHi;
 		
-		uint64_t keyBits[4];
-		keyBits[0] = scConfig->lockVals[0];
-		keyBits[1] = scConfig->lockVals[1];
-		keyBits[2] = scConfig->lockVals[2];
-		keyBits[3] = scConfig->lockVals[3];
+		uint64_t keyBits[4] = {
+			scConfig->lockVals[0], scConfig->lockVals[1],
+			scConfig->lockVals[2], scConfig->lockVals[3]
+		};
 		
 		uint64_t sl = seed_lo;
 		for (int fb = 0; fb < 64 && fb < n; fb++) {
-			if (sl & 1ULL) {
-				int pos = scConfig->freeBitPositions[fb];
-				keyBits[pos >> 6] |= (1ULL << (pos & 63));
-			}
+			if (sl & 1ULL) keyBits[scConfig->freeBitPositions[fb] >> 6] |=
+			                 (1ULL << (scConfig->freeBitPositions[fb] & 63));
 			sl >>= 1;
 		}
 		if (n > 64) {
 			uint64_t sh = seed_hi;
 			for (int fb = 64; fb < n && fb < 128; fb++) {
-				if (sh & 1ULL) {
-					int pos = scConfig->freeBitPositions[fb];
-					keyBits[pos >> 6] |= (1ULL << (pos & 63));
-				}
+				if (sh & 1ULL) keyBits[scConfig->freeBitPositions[fb] >> 6] |=
+				                 (1ULL << (scConfig->freeBitPositions[fb] & 63));
 				sh >>= 1;
 			}
 		}
 		
 		Int privkey;
 		privkey.SetInt32(0);
-		privkey.bits64[0] = keyBits[0];
-		privkey.bits64[1] = keyBits[1];
-		privkey.bits64[2] = keyBits[2];
-		privkey.bits64[3] = keyBits[3];
+		privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
+		privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
 		checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
 	};
+
+	ph->hasStarted = true;
+	t0 = Timer::get_tick();
+	bool firstBatch = true;
 	
-	// Iterate over each Hamming distance layer: h = 0, 1, 2, ..., maxRadius
+	// Track (hamming_h, absolute_rank_base) for each double-buffered stream
+	int      streamH[2]      = {0, 0};
+	uint64_t streamRankBase[2] = {0, 0}; // sliceStart + batchOffset
+
+	// -----------------------------------------------------------------------
+	// Main loop: iterate Hamming layers, walk this GPU's slice
+	// -----------------------------------------------------------------------
 	for (int h = 0; h <= maxRadius && !endOfSearch; h++) {
 		
-		// Compute C(n, h) = total combinations for this layer
 		uint64_t layerCombs = h_combTable[n * tableK + h];
 		if (layerCombs == 0) continue;
-		
-		printf("[SEP4] Layer h=%d: C(%d,%d) = %llu combinations\n", h, n, h, (unsigned long long)layerCombs);
+
+		// ---- Compute this GPU's slice of the layer ----
+		// sliceSize = ceil(layerCombs / sliceCount)
+		uint64_t sliceSize  = (layerCombs + (uint64_t)sliceCount - 1) / (uint64_t)sliceCount;
+		uint64_t sliceStart = (uint64_t)sliceId * sliceSize;
+		uint64_t sliceEnd   = sliceStart + sliceSize;
+		if (sliceEnd > layerCombs) sliceEnd = layerCombs;
+		if (sliceStart >= layerCombs) continue; // this GPU has nothing to do for this layer
+
+		printf("[SEP5] GPU[%d] h=%d: ranks [%llu, %llu) of %llu total\n",
+		       sliceId, h,
+		       (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
+		       (unsigned long long)layerCombs);
 		fflush(stdout);
-		
-		uint64_t offset = 0;
-		while (offset < layerCombs && !endOfSearch) {
+
+		uint64_t offset = sliceStart; // local batch offset within the layer (absolute rank)
+		while (offset < sliceEnd && !endOfSearch) {
 			
 			if (Pause) {
-				printf("Pausing...\r");
-				fflush(stdout);
 				Paused = true;
 				t_Paused = Timer::get_tick() - t0 + t_Paused;
 				while (Pause && !endOfSearch) Timer::SleepMillis(100);
@@ -1521,91 +1511,79 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 				break;
 			}
 			
-			// Save stream state for reconstruction
+			// Save state for this stream slot
 			int s = g.currentStep % 2;
-			streamH[s] = h;
-			streamOffset[s] = offset;
-			
-			// Launch: just three scalars over PCIe!
+			streamH[s]        = h;
+			streamRankBase[s] = offset;  // absolute rank of thread 0 in this batch
+
+			// Launch — GPU self-computes: if (batchOffset + tid >= totalCombs) return
 			g.LaunchGosperAsync(h, offset, layerCombs);
 			
-			// Process previous batch while GPU is working
+			// Process previous batch while GPU works
 			if (!firstBatch) {
 				int prev_s = (g.currentStep - 2) % 2;
 				uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
-				if (nbFound > 0) {
-					for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-						ITEM it = found[fi];
-						uint64_t rank = streamOffset[prev_s] + (uint64_t)it.thId;
-						reconstructKey(streamH[prev_s], rank, it.hash);
-					}
-					found.clear();
+				for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+					ITEM it = found[fi];
+					// rank is fully determined: base + tid
+					uint64_t rank = streamRankBase[prev_s] + (uint64_t)it.thId;
+					reconstructKey(streamH[prev_s], rank, it.hash);
 				}
+				found.clear();
 			}
 			firstBatch = false;
 			
-			// Advance offset by number of threads launched
-			uint64_t remaining = layerCombs - offset;
-			uint64_t batchSize = (remaining < (uint64_t)numThreadsGPU) ? remaining : (uint64_t)numThreadsGPU;
-			offset += batchSize;
+			// Advance by actual batch size (may be less than numThreadsGPU at slice end)
+			uint64_t remaining = sliceEnd - offset;
+			uint64_t batchSize = (remaining < (uint64_t)numThreadsGPU)
+			                     ? remaining : (uint64_t)numThreadsGPU;
+			offset             += batchSize;
 			totalKeysProcessed += batchSize;
 			
-			// Stats display (throttled)
+			// Stats (throttled to 0.5 s)
 			ttot = Timer::get_tick() - t0 + t_Paused;
-			static double lastStatsTime_r = 0.0;
+			static double lastStatsTime_r  = 0.0;
 			static uint64_t lastStatsKeys_r = 0;
 			if (ttot - lastStatsTime_r >= 0.5 || lastStatsTime_r == 0.0) {
-				double delta_time = ttot - lastStatsTime_r;
-				uint64_t delta_keys = totalKeysProcessed - lastStatsKeys_r;
-				double realTimeSpeed = 0.0;
-				if (lastStatsTime_r > 0.0 && delta_time > 0.0) {
-					realTimeSpeed = (double)delta_keys / (delta_time * 1000000.0);
-				}
-				lastStatsTime_r = ttot;
-				lastStatsKeys_r = totalKeysProcessed;
-				
-				printf("[SEP4] h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
-					h, realTimeSpeed, (double)totalKeysProcessed / 1e9, nbFoundKey);
+				double dt = ttot - lastStatsTime_r;
+				uint64_t dk = totalKeysProcessed - lastStatsKeys_r;
+				double spd = (lastStatsTime_r > 0.0 && dt > 0.0)
+				             ? (double)dk / (dt * 1e6) : 0.0;
+				lastStatsTime_r  = ttot;
+				lastStatsKeys_r  = totalKeysProcessed;
+				printf("[SEP5] GPU[%d] h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
+				       sliceId, h, spd, (double)totalKeysProcessed / 1e9, nbFoundKey);
 				fflush(stdout);
 			}
 		}
 	}
 	
-	// Process the final batch
+	// Drain the final in-flight batch
 	if (!firstBatch) {
 		int last_s = (g.currentStep - 1) % 2;
 		uint32_t nbFound = g.SyncGosperBatch(last_s, found);
-		if (nbFound > 0) {
-			for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-				ITEM it = found[fi];
-				uint64_t rank = streamOffset[last_s] + (uint64_t)it.thId;
-				reconstructKey(streamH[last_s], rank, it.hash);
-			}
+		for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+			ITEM it = found[fi];
+			uint64_t rank = streamRankBase[last_s] + (uint64_t)it.thId;
+			reconstructKey(streamH[last_s], rank, it.hash);
 		}
 	}
 	
-	// Cleanup
 	free(h_combTable);
 	
 	ttot = Timer::get_tick() - t0 + t_Paused;
-	double avg_speed = (ttot > 0.0) ? (double)totalKeysProcessed / (ttot * 1000000.0) : 0.0;
-	printf("\n[SEP4] ============================================\n");
-	printf("[SEP4] Radius search COMPLETE\n");
-	printf("[SEP4] Total keys processed: %llu (%.2f BKeys)\n", 
-		(unsigned long long)totalKeysProcessed, (double)totalKeysProcessed / 1e9);
-	printf("[SEP4] Average speed: %.1f MK/s\n", avg_speed);
-	printf("[SEP4] Total time: %.1f seconds\n", ttot);
-	printf("[SEP4] Found: %d\n", nbFoundKey);
-	printf("[SEP4] ============================================\n");
+	double avg_speed = (ttot > 0.0) ? (double)totalKeysProcessed / (ttot * 1e6) : 0.0;
+	printf("\n[SEP5] GPU[%d] slice COMPLETE — %.2f BKeys in %.1fs (%.1f MK/s avg) | Found: %d\n",
+	       sliceId, (double)totalKeysProcessed / 1e9, ttot, avg_speed, nbFoundKey);
 	fflush(stdout);
 	
-	char* ctimeBuff;
-	time_t now = time(NULL);
-	ctimeBuff = ctime(&now);
-	printf("Current task END time: %s", ctimeBuff);
+	time_t now_t = time(NULL);
+	char* ct = ctime(&now_t);
+	printf("[SEP5] GPU[%d] END time: %s", sliceId, ct);
 	
 	ph->isRunning = false;
-	endOfSearch = true;
+	// Do NOT set endOfSearch = true here — Search() polls isRunning on all GPUs.
+	// Only set it on a hard abort (e.g., error), not on normal completion.
 }
 
 // Custom stats display for StringCrack mode
@@ -1845,11 +1823,8 @@ void VanitySearch::saveProgress(TH_PARAM* p, Int& lastSaveKey, BITCRACK_PARAM* b
 
 void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 
-	//double t0;
-	//double t1;
 	endOfSearch = false;
-	/*numGPUs = ((int)gpuId.size());*/
-	numGPUs = 1;
+	numGPUs = (int)gpuId.size(); // Restored multi-GPU support (SEP5)
 	nbFoundKey = 0;
 
 	memset(counters, 0, sizeof(counters));	
@@ -1874,9 +1849,12 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 		params[i].isRunning = true;
 		params[i].gpuId = gpuId[i];
 		params[i].smMultiplier = this->smMultiplier;
-		params[i].gridSizeX = gridSize[i];
-		params[i].gridSizeY = gridSize[i+1];
+		params[i].gridSizeX = gridSize[2 * i];
+		params[i].gridSizeY = gridSize[2 * i + 1];
 		params[i].THnextKey.Set(&bc->ksNext);
+		// SEP5: slice assignment — each GPU gets a unique, non-overlapping index
+		params[i].gpuSliceId    = i;
+		params[i].gpuSliceCount = numGPUs;
 		
 		threads[i] = std::thread(_FindKeyGPU, params + i);
 	}
@@ -1885,11 +1863,27 @@ void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
 		Timer::SleepMillis(500);
 	}
 
-	while (!endOfSearch) {
+	// SEP5: Wait for ALL GPU threads to finish, not just the first one.
+	// endOfSearch is set by the last thread to complete, so keep polling
+	// thread liveness and only declare done when every thread has stopped.
+	bool anyRunning = true;
+	while (anyRunning) {
 		Timer::SleepMillis(100);
+		anyRunning = false;
+		for (int i = 0; i < numGPUs; i++) {
+			if (params[i].isRunning) {
+				anyRunning = true;
+				break;
+			}
+		}
 	}
+	endOfSearch = true;
 
-	
+	for (int i = 0; i < numGPUs; i++) {
+		if (threads[i].joinable()) threads[i].join();
+	}
+	delete[] threads;
+
 	if (params != nullptr) {
 		free(params);
 	}
