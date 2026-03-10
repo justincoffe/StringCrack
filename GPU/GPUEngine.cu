@@ -1644,11 +1644,17 @@ void comp_keys_radius(
         uint64_t seed_lo = d_targetSeedLo ^ mut_lo;
         uint64_t seed_hi = d_targetSeedHi ^ mut_hi;
 
-        // Initialize Jacobian Accumulator
-        uint64_t accX[4], accY[4], accZ[4];
-        Load256(accX, d_basePointX);
-        Load256(accY, d_basePointY);
-        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+        // 1. Initialize empty accumulator
+        uint64_t accX[4] = {0}, accY[4] = {0}, accZ[4] = {0};
+        bool pointSet = false;
+
+        // 2. Only load the precomputed Base Point if it actually has value
+        if (d_lockedPopcount > 0) {
+            Load256(accX, d_basePointX);
+            Load256(accY, d_basePointY);
+            accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+            pointSet = true;
+        }
 
         // 8-Bit Windows Math (Lower 64)
         uint64_t seed = seed_lo;
@@ -1662,7 +1668,16 @@ void comp_keys_radius(
                 ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
                 uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
                 uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
-                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+                
+                // 3. The Safe Load: If accumulator is empty, set it to the first point
+                if (!pointSet) {
+                    Load256(accX, curGX);
+                    Load256(accY, curGY);
+                    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                    pointSet = true;
+                } else {
+                    jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+                }
             }
             seed >>= 8;
         }
@@ -1679,7 +1694,16 @@ void comp_keys_radius(
                 ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
                 uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
                 uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
-                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+                
+                // 4. Safe Load logic repeated for the upper window
+                if (!pointSet) {
+                    Load256(accX, curGX);
+                    Load256(accY, curGY);
+                    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                    pointSet = true;
+                } else {
+                    jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+                }
             }
             seed >>= 8;
         }
