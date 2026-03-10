@@ -33,7 +33,9 @@
 #include <iostream>
 #include <fstream>
 
-
+// Forward declarations for Radius Mode combinatorics
+uint64_t nCr(int n, int r);
+void unrank_combination(int n, int k, uint64_t rank, uint64_t &lo, uint64_t &hi);
 
 //#define GRP_SIZE 256
 
