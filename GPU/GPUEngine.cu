@@ -1843,31 +1843,9 @@ bool GPUEngine::SetupRadiusBuffers() {
 }
 
 void GPUEngine::LaunchRadiusBatchAsync(uint64_t* seedsLo, uint64_t* seedsHi, int count) {
-    int s = currentStep % 2;
-    
-    // Copy pre-computed seeds from caller's arrays to pinned staging buffer
-    memcpy(h_radiusSeedsLo[s], seedsLo, (size_t)count * sizeof(uint64_t));
-    memcpy(h_radiusSeedsHi[s], seedsHi, (size_t)count * sizeof(uint64_t));
-    
-    // Reset the found counter
-    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
-    
-    // Async H2D transfer of seeds
-    cudaMemcpyAsync(d_radiusSeedsLo[s], h_radiusSeedsLo[s], 
-                    (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice, streams[s]);
-    cudaMemcpyAsync(d_radiusSeedsHi[s], h_radiusSeedsHi[s],
-                    (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice, streams[s]);
-    
-    // Launch the lean radius kernel — every thread does useful work
-    int blocks = (count + NB_TRHEAD_PER_GROUP - 1) / NB_TRHEAD_PER_GROUP;
-    comp_keys_radius_batch<<<blocks, NB_TRHEAD_PER_GROUP, 0, streams[s]>>>(
-        inputAddress, inputAddressLookUp, d_output[s],
-        d_radiusSeedsLo[s], d_radiusSeedsHi[s], count);
-    
-    // Queue the result transfer back
-    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
-    
-    currentStep++;
+    // SEP3 legacy — replaced by LaunchGosperAsync in SEP4
+    // Kept as stub to satisfy the linker; should not be called in radius mode.
+    printf("[SEP4] ERROR: LaunchRadiusBatchAsync is deprecated. Use LaunchGosperAsync.\n");
 }
 
 uint32_t GPUEngine::SyncRadiusBatch(int stepToSync, std::vector<ITEM> &addressFound) {
