@@ -164,8 +164,12 @@ private:
 	Int beta2;
 	Int lambda2;
 
-	// StringCrack configuration
+public:
+	// StringCrack configuration (public for thread routing)
 	StringCrackConfig* scConfig;
+
+	// SEP3: Radius mode — Gosper generator state
+	void FindKeyGPU_Radius(TH_PARAM* p);
 };
 
 #endif // VANITYH

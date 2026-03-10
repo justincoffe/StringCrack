@@ -31,6 +31,7 @@
 #include <thread>
 #include <atomic>
 #include <iostream>
+#include <cmath>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <conio.h> // For _kbhit and _getch on Windows
@@ -132,8 +133,10 @@ void printUsage() {
 	printf(" -poprange min:max: Popcount range. Example: -poprange 30:40\n");
 	printf(" -center STRING: SEP center string (71-bit). Example: -center 10110...\n");
 	printf(" -seprange min:max: SEP mutation range. Example: -seprange 11:23\n");
-	printf(" -popcount N: Target popcount. Example: -popcount 37\n");
-	printf(" -poprange min:max: Popcount range. Example: -poprange 36:38\n");
+	printf("\n === SEP3 Radius Mode (CPU Gosper + GPU Batch) ===\n");
+	printf(" -radius N: Test only seeds within N Hamming-distance from center.\n");
+	printf("            Generates ONLY valid combinations — zero wasted GPU cycles.\n");
+	printf("            Example: -center 10011...10110 -radius 20\n");
 	exit(-1);
 
 }
@@ -611,6 +614,8 @@ int main(int argc, char* argv[]) {
 	scConfig.popcountTarget = -1;
 	scConfig.popcountMin = 0;
 	scConfig.popcountMax = 256;
+	scConfig.useRadius = false;
+	scConfig.radius = 0;
 	string lockStr = "";
 	
 	// bitcrack mod
@@ -666,6 +671,14 @@ int main(int argc, char* argv[]) {
 				scConfig.sepMax = atoi(seprange);
 			}
 			scConfig.useSEP = true;
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-radius") == 0) {
+			a++;
+			scConfig.radius = getInt("radius", argv[a]);
+			scConfig.useRadius = true;
+			scConfig.useSEP = true;      // Radius requires a center
 			scConfig.enabled = true;
 			a++;
 		}
@@ -798,6 +811,60 @@ int main(int argc, char* argv[]) {
 		seedCountInt.SetInt32(1);
 		if (scConfig.numFreeBits < 256) {
 			seedCountInt.ShiftL(scConfig.numFreeBits);
+		}
+		
+		// SEP3 Radius Mode: Override seedCount with exact combination count
+		if (scConfig.useRadius) {
+			if (strlen(scConfig.centerString) == 0) {
+				fprintf(stderr, "[ERROR] -radius requires -center. Provide a center binary string.\n");
+				exit(-1);
+			}
+			if (scConfig.radius > scConfig.numFreeBits) {
+				fprintf(stderr, "[ERROR] -radius %d exceeds numFreeBits %d\n", scConfig.radius, scConfig.numFreeBits);
+				exit(-1);
+			}
+			
+			// Compute exact combination count: sum(C(n, h) for h=0..radius)
+			// Use double for the sum (sufficient for display; actual enumeration is exact)
+			int n = scConfig.numFreeBits;
+			int r = scConfig.radius;
+			double totalCombinations = 0.0;
+			
+			// Use log-space to compute C(n,k) precisely for large n
+			// Precompute log-factorials
+			double* logFact = new double[n + 1];
+			logFact[0] = 0.0;
+			for (int i = 1; i <= n; i++) logFact[i] = logFact[i-1] + log((double)i);
+			
+			for (int h = 0; h <= r; h++) {
+				double logC = logFact[n] - logFact[h] - logFact[n - h];
+				totalCombinations += exp(logC);
+			}
+			delete[] logFact;
+			
+			printf("\n[SEP3] ============================================\n");
+			printf("[SEP3] RADIUS MODE: CPU Gosper + GPU Batch Hybrid\n");
+			printf("[SEP3] Center: %s\n", scConfig.centerString);
+			printf("[SEP3] Free bits: %d, Radius: %d\n", n, r);
+			printf("[SEP3] Total combinations: %.0f (~%.2e)\n", totalCombinations, totalCombinations);
+			printf("[SEP3] Log2(combinations): %.2f\n", log2(totalCombinations));
+			printf("[SEP3] Full space would be: 2^%d = %.2e\n", n, pow(2.0, n));
+			printf("[SEP3] Compression ratio: %.4f%% of full space\n", (totalCombinations / pow(2.0, n)) * 100.0);
+			printf("[SEP3] ============================================\n\n");
+			fflush(stdout);
+			
+			// For radius mode, seedCount is the total combinations (approximate for stop condition)
+			// The actual enumeration is exact via Gosper's hack
+			seedCountInt.SetInt32(0);
+			// Encode the double as a rough 256-bit integer for stop condition
+			// We'll use the actual Gosper state exhaustion as the real stop
+			if (totalCombinations < 1.8e19) {
+				seedCountInt.bits64[0] = (uint64_t)totalCombinations;
+			} else {
+				// For very large counts, set high bits too
+				seedCountInt.bits64[0] = (uint64_t)fmod(totalCombinations, 1.8446744073709552e19);
+				seedCountInt.bits64[1] = (uint64_t)(totalCombinations / 1.8446744073709552e19);
+			}
 		}
 		
 		// Calculate end offset based on -end argument

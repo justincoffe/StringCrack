@@ -664,13 +664,114 @@ void VanitySearch::checkAddr(int prefIdx, uint8_t* hash160, Int& key, int32_t in
 
 }
 
+// =====================================================================================
+// SEP3: 128-bit Gosper's Hack — generates next combination with same Hamming weight
+// Returns false when all combinations are exhausted (wrap-around)
+// =====================================================================================
+static inline bool gosper_next_128(uint64_t &lo, uint64_t &hi, int n) {
+    // Gosper's hack: given a bit-set v with k bits set among n bits,
+    // produce the next lexicographic bit-set with the same popcount.
+    // Standard formula: c = v & -v; r = v + c; v' = r | ((r^v)/c >> 2)
+    
+    // Step 1: c = v & (-v) — isolate lowest set bit
+    // For 128-bit, if lo has any set bits, lowest is in lo; otherwise in hi
+    uint64_t c_lo, c_hi;
+    if (lo != 0) {
+        c_lo = lo & ((~lo) + 1ULL);  // lo & (-lo)
+        c_hi = 0;
+    } else if (hi != 0) {
+        c_lo = 0;
+        c_hi = hi & ((~hi) + 1ULL);  // hi & (-hi)
+    } else {
+        return false; // v = 0, no combinations
+    }
+    
+    // Step 2: r = v + c (128-bit addition with carry)
+    uint64_t r_lo = lo + c_lo;
+    uint64_t carry = (r_lo < lo) ? 1ULL : 0ULL;
+    uint64_t r_hi = hi + c_hi + carry;
+    
+    // Step 3: Check if r overflows the n-bit space → exhausted
+    uint64_t mask_lo, mask_hi;
+    if (n >= 128) {
+        mask_lo = 0xFFFFFFFFFFFFFFFFULL;
+        mask_hi = 0xFFFFFFFFFFFFFFFFULL;
+    } else if (n > 64) {
+        mask_lo = 0xFFFFFFFFFFFFFFFFULL;
+        mask_hi = (1ULL << (n - 64)) - 1ULL;
+    } else if (n == 64) {
+        mask_lo = 0xFFFFFFFFFFFFFFFFULL;
+        mask_hi = 0;
+    } else {
+        mask_lo = (1ULL << n) - 1ULL;
+        mask_hi = 0;
+    }
+    
+    // If r has bits outside the n-bit mask, all combinations are exhausted
+    if ((r_hi & ~mask_hi) != 0) return false;
+    if (mask_hi == 0 && r_hi != 0) return false;
+    if (n < 64 && (r_lo & ~mask_lo) != 0) return false;
+    
+    // Step 4: t = (r ^ v) — bits that flipped
+    uint64_t t_lo = r_lo ^ lo;
+    uint64_t t_hi = r_hi ^ hi;
+    
+    // Step 5: t / c  (right-shift t by ctz(c) positions)
+    // Then right-shift by 2 more: total shift = ctz(c) + 2
+    int ctz_c;
+    if (c_lo != 0) {
+        ctz_c = __builtin_ctzll(c_lo);
+    } else {
+        ctz_c = 64 + __builtin_ctzll(c_hi);
+    }
+    
+    int total_shift = ctz_c + 2;
+    uint64_t s_lo, s_hi;
+    if (total_shift >= 128) {
+        s_lo = 0; s_hi = 0;
+    } else if (total_shift >= 64) {
+        int sh = total_shift - 64;
+        s_lo = (sh < 64) ? (t_hi >> sh) : 0ULL;
+        s_hi = 0;
+    } else {
+        s_lo = (t_lo >> total_shift) | (t_hi << (64 - total_shift));
+        s_hi = t_hi >> total_shift;
+    }
+    
+    // Step 6: v' = r | s
+    lo = (r_lo | s_lo) & mask_lo;
+    hi = (r_hi | s_hi) & mask_hi;
+    
+    return true;
+}
+
+// Compute initial Gosper state: lowest n-bit integer with exactly k bits set
+// This is: (1 << k) - 1  (the k lowest bits)
+static inline void gosper_init(uint64_t &lo, uint64_t &hi, int k) {
+    if (k == 0) {
+        lo = 0; hi = 0;
+    } else if (k <= 64) {
+        lo = (k == 64) ? 0xFFFFFFFFFFFFFFFFULL : ((1ULL << k) - 1ULL);
+        hi = 0;
+    } else {
+        lo = 0xFFFFFFFFFFFFFFFFULL;
+        int rem = k - 64;
+        hi = (rem == 64) ? 0xFFFFFFFFFFFFFFFFULL : ((1ULL << rem) - 1ULL);
+    }
+}
+
 #ifdef WIN64
 DWORD WINAPI _FindKeyGPU(LPVOID lpParam) {
 #else
 void* _FindKeyGPU(void* lpParam) {
 #endif
 	TH_PARAM* p = (TH_PARAM*)lpParam;
-	p->obj->FindKeyGPU(p);
+	// Route to radius mode if enabled
+	if (p->obj->scConfig && p->obj->scConfig->useRadius) {
+		p->obj->FindKeyGPU_Radius(p);
+	} else {
+		p->obj->FindKeyGPU(p);
+	}
 	return 0;
 }
 
@@ -1323,6 +1424,407 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	endOfSearch = true;
 }
 
+
+// =====================================================================================
+// SEP3: FindKeyGPU_Radius — CPU Gosper + GPU Batch Hybrid
+// Generates ONLY valid combinations via Gosper's hack, zero wasted GPU cycles
+// =====================================================================================
+void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
+	bool ok = true;
+	double t0;
+	double ttot;
+	uint64_t totalKeysProcessed = 0;
+	static uint64_t keys_n_prev = 0;
+	static double tprev = 0.0;
+	
+	int thId = ph->threadId;
+	GPUEngine g(ph->gpuId, maxFound, ph->smMultiplier);
+	int numThreadsGPU = g.GetNbThread();
+	vector<ITEM> found;
+	
+	fprintf(stdout, "GPU: %s\n", g.deviceName.c_str());
+	fflush(stdout);
+	
+	counters[thId] = 0;
+	
+	g.SetSearchMode(searchMode);
+	g.SetSearchType(searchType);
+	if (onlyFull) {
+		g.SetAddress(usedAddressL, nbAddress);
+	} else {
+		g.SetAddress(usedAddress);
+	}
+	
+	// Upload StringCrack config to GPU (window tables, base point, etc.)
+	if (!g.SetStringCrackConfig(secp, scConfig)) {
+		printf("[SEP3] Failed to upload config to GPU!\n");
+		ph->isRunning = false;
+		return;
+	}
+	
+	// Setup radius mode double-buffered seed arrays
+	if (!g.SetupRadiusBuffers()) {
+		printf("[SEP3] Failed to allocate radius buffers!\n");
+		ph->isRunning = false;
+		return;
+	}
+	
+	printf("[SEP3] GPU kernel ready — Radius mode active\n");
+	fflush(stdout);
+	
+	int n = scConfig->numFreeBits;     // Total free bits
+	int maxRadius = scConfig->radius;  // Max Hamming distance from center
+	uint64_t targetLo = scConfig->targetSeedLo;
+	uint64_t targetHi = scConfig->targetSeedHi;
+	
+	if (n > 128) {
+		printf("[SEP3] ERROR: Radius mode supports up to 128 free bits, got %d\n", n);
+		ph->isRunning = false;
+		endOfSearch = true;
+		return;
+	}
+	if (maxRadius > n) {
+		printf("[SEP3] WARNING: radius %d > numFreeBits %d, clamping to %d\n", maxRadius, n, n);
+		maxRadius = n;
+	}
+	
+	// Allocate CPU-side batch buffers (these get memcpy'd to pinned memory in LaunchRadiusBatchAsync)
+	uint64_t* batchSeedsLo = (uint64_t*)malloc((size_t)numThreadsGPU * sizeof(uint64_t));
+	uint64_t* batchSeedsHi = (uint64_t*)malloc((size_t)numThreadsGPU * sizeof(uint64_t));
+	
+	// Track which seeds are in each batch for key reconstruction
+	// We store the raw seeds (already XOR'd with target) so we can reconstruct on hit
+	uint64_t* batchTrackLo[2];
+	uint64_t* batchTrackHi[2];
+	int batchTrackCount[2] = {0, 0};
+	batchTrackLo[0] = (uint64_t*)malloc((size_t)numThreadsGPU * sizeof(uint64_t));
+	batchTrackHi[0] = (uint64_t*)malloc((size_t)numThreadsGPU * sizeof(uint64_t));
+	batchTrackLo[1] = (uint64_t*)malloc((size_t)numThreadsGPU * sizeof(uint64_t));
+	batchTrackHi[1] = (uint64_t*)malloc((size_t)numThreadsGPU * sizeof(uint64_t));
+	
+	// Seed mask for masking seeds to valid range
+	uint64_t seedMaskLo, seedMaskHi;
+	if (n <= 0) {
+		seedMaskLo = 0; seedMaskHi = 0;
+	} else if (n < 64) {
+		seedMaskLo = (1ULL << n) - 1ULL;
+		seedMaskHi = 0;
+	} else if (n == 64) {
+		seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
+		seedMaskHi = 0;
+	} else if (n < 128) {
+		seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
+		seedMaskHi = (1ULL << (n - 64)) - 1ULL;
+	} else {
+		seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
+		seedMaskHi = 0xFFFFFFFFFFFFFFFFULL;
+	}
+	
+	ph->hasStarted = true;
+	printf("[SEP3] Starting Gosper enumeration...\n");
+	fflush(stdout);
+	
+	t0 = Timer::get_tick();
+	endOfSearch = false;
+	bool firstBatch = true;
+	
+	// Iterate over each Hamming distance layer: h = 0, 1, 2, ..., maxRadius
+	for (int h = 0; h <= maxRadius && !endOfSearch; h++) {
+		
+		if (h == 0) {
+			// Distance 0: only the center itself — exactly 1 combination
+			int batchIdx = 0;
+			
+			// The seed IS the target (XOR with flip-mask 0 = target itself)
+			batchSeedsLo[0] = targetLo & seedMaskLo;
+			batchSeedsHi[0] = targetHi & seedMaskHi;
+			batchIdx = 1;
+			
+			// Pad remaining slots with the center (they'll just re-check it — harmless)
+			for (int i = 1; i < numThreadsGPU; i++) {
+				batchSeedsLo[i] = targetLo & seedMaskLo;
+				batchSeedsHi[i] = targetHi & seedMaskHi;
+			}
+			
+			// Track for reconstruction
+			int s = g.currentStep % 2;
+			memcpy(batchTrackLo[s], batchSeedsLo, (size_t)numThreadsGPU * sizeof(uint64_t));
+			memcpy(batchTrackHi[s], batchSeedsHi, (size_t)numThreadsGPU * sizeof(uint64_t));
+			batchTrackCount[s] = batchIdx;
+			
+			g.LaunchRadiusBatchAsync(batchSeedsLo, batchSeedsHi, batchIdx);
+			
+			// Process previous batch if exists
+			if (!firstBatch) {
+				int prev_s = (g.currentStep - 2) % 2;
+				uint32_t nbFound = g.SyncRadiusBatch(prev_s, found);
+				if (nbFound > 0) {
+					for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+						ITEM it = found[fi];
+						uint32_t tid = it.thId;
+						if (tid >= (uint32_t)batchTrackCount[prev_s]) continue;
+						
+						// Reconstruct the private key from the seed
+						uint64_t seed_lo = batchTrackLo[prev_s][tid];
+						uint64_t seed_hi = batchTrackHi[prev_s][tid];
+						
+						uint64_t keyBits[4];
+						keyBits[0] = scConfig->lockVals[0];
+						keyBits[1] = scConfig->lockVals[1];
+						keyBits[2] = scConfig->lockVals[2];
+						keyBits[3] = scConfig->lockVals[3];
+						
+						uint64_t sl = seed_lo;
+						for (int fb = 0; fb < 64 && fb < n; fb++) {
+							if (sl & 1ULL) {
+								int pos = scConfig->freeBitPositions[fb];
+								keyBits[pos >> 6] |= (1ULL << (pos & 63));
+							}
+							sl >>= 1;
+						}
+						if (n > 64) {
+							uint64_t sh = seed_hi;
+							for (int fb = 64; fb < n && fb < 128; fb++) {
+								if (sh & 1ULL) {
+									int pos = scConfig->freeBitPositions[fb];
+									keyBits[pos >> 6] |= (1ULL << (pos & 63));
+								}
+								sh >>= 1;
+							}
+						}
+						
+						Int privkey;
+						privkey.SetInt32(0);
+						privkey.bits64[0] = keyBits[0];
+						privkey.bits64[1] = keyBits[1];
+						privkey.bits64[2] = keyBits[2];
+						privkey.bits64[3] = keyBits[3];
+						checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
+					}
+					found.clear();
+				}
+			}
+			firstBatch = false;
+			totalKeysProcessed += batchIdx;
+			continue;
+		}
+		
+		// h >= 1: Use Gosper's hack to enumerate all C(n, h) flip-masks
+		if (h > n) break; // Can't have more flips than bits
+		
+		uint64_t gosper_lo, gosper_hi;
+		gosper_init(gosper_lo, gosper_hi, h);
+		
+		// The initial state IS the first valid combination
+		bool gosperDone = false;
+		int batchIdx = 0;
+		
+		// Count combinations for this layer (for progress display)
+		printf("[SEP3] Layer h=%d: generating C(%d,%d) combinations...\n", h, n, h);
+		fflush(stdout);
+		
+		while (!gosperDone && !endOfSearch) {
+			
+			if (Pause) {
+				printf("Pausing...\r");
+				fflush(stdout);
+				g.FreeGPUEngine();
+				Paused = true;
+				t_Paused = Timer::get_tick() - t0 + t_Paused;
+				// Wait until resumed
+				while (Pause && !endOfSearch) {
+					Timer::SleepMillis(100);
+				}
+				if (endOfSearch) break;
+				// Can't easily resume GPU after FreeGPUEngine — signal end
+				endOfSearch = true;
+				break;
+			}
+			
+			// Fill the batch buffer with Gosper-generated seeds
+			batchIdx = 0;
+			while (batchIdx < numThreadsGPU && !gosperDone) {
+				// Current gosper state is a flip-mask with exactly h bits set
+				// XOR with target to get actual seed
+				uint64_t seed_lo = (gosper_lo ^ targetLo) & seedMaskLo;
+				uint64_t seed_hi = (gosper_hi ^ targetHi) & seedMaskHi;
+				
+				batchSeedsLo[batchIdx] = seed_lo;
+				batchSeedsHi[batchIdx] = seed_hi;
+				batchIdx++;
+				
+				// Advance Gosper state
+				if (!gosper_next_128(gosper_lo, gosper_hi, n)) {
+					gosperDone = true;
+				}
+			}
+			
+			if (batchIdx == 0) break;
+			
+			// Track seeds for key reconstruction
+			int s = g.currentStep % 2;
+			memcpy(batchTrackLo[s], batchSeedsLo, (size_t)batchIdx * sizeof(uint64_t));
+			memcpy(batchTrackHi[s], batchSeedsHi, (size_t)batchIdx * sizeof(uint64_t));
+			batchTrackCount[s] = batchIdx;
+			
+			// Launch GPU batch
+			g.LaunchRadiusBatchAsync(batchSeedsLo, batchSeedsHi, batchIdx);
+			
+			// Process previous batch results while GPU works on current batch
+			if (!firstBatch) {
+				int prev_s = (g.currentStep - 2) % 2;
+				uint32_t nbFound = g.SyncRadiusBatch(prev_s, found);
+				if (nbFound > 0) {
+					for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+						ITEM it = found[fi];
+						uint32_t tid = it.thId;
+						if (tid >= (uint32_t)batchTrackCount[prev_s]) continue;
+						
+						uint64_t seed_lo = batchTrackLo[prev_s][tid];
+						uint64_t seed_hi = batchTrackHi[prev_s][tid];
+						
+						uint64_t keyBits[4];
+						keyBits[0] = scConfig->lockVals[0];
+						keyBits[1] = scConfig->lockVals[1];
+						keyBits[2] = scConfig->lockVals[2];
+						keyBits[3] = scConfig->lockVals[3];
+						
+						uint64_t sl = seed_lo;
+						for (int fb = 0; fb < 64 && fb < n; fb++) {
+							if (sl & 1ULL) {
+								int pos = scConfig->freeBitPositions[fb];
+								keyBits[pos >> 6] |= (1ULL << (pos & 63));
+							}
+							sl >>= 1;
+						}
+						if (n > 64) {
+							uint64_t sh = seed_hi;
+							for (int fb = 64; fb < n && fb < 128; fb++) {
+								if (sh & 1ULL) {
+									int pos = scConfig->freeBitPositions[fb];
+									keyBits[pos >> 6] |= (1ULL << (pos & 63));
+								}
+								sh >>= 1;
+							}
+						}
+						
+						Int privkey;
+						privkey.SetInt32(0);
+						privkey.bits64[0] = keyBits[0];
+						privkey.bits64[1] = keyBits[1];
+						privkey.bits64[2] = keyBits[2];
+						privkey.bits64[3] = keyBits[3];
+						checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
+					}
+					found.clear();
+				}
+			}
+			firstBatch = false;
+			totalKeysProcessed += batchIdx;
+			
+			// Stats display (throttled)
+			ttot = Timer::get_tick() - t0 + t_Paused;
+			static double lastStatsTime_r = 0.0;
+			static uint64_t lastStatsKeys_r = 0;
+			if (ttot - lastStatsTime_r >= 0.5 || lastStatsTime_r == 0.0) {
+				double delta_time = ttot - lastStatsTime_r;
+				uint64_t delta_keys = totalKeysProcessed - lastStatsKeys_r;
+				double realTimeSpeed = 0.0;
+				if (lastStatsTime_r > 0.0 && delta_time > 0.0) {
+					realTimeSpeed = (double)delta_keys / (delta_time * 1000000.0);
+				}
+				lastStatsTime_r = ttot;
+				lastStatsKeys_r = totalKeysProcessed;
+				
+				// Calculate progress
+				Int currentCount;
+				currentCount.SetInt32(0);
+				currentCount.bits64[0] = totalKeysProcessed;
+				
+				printf("[SEP3] h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
+					h, realTimeSpeed, (double)totalKeysProcessed / 1e9, nbFoundKey);
+				fflush(stdout);
+			}
+		}
+	}
+	
+	// Process the final batch
+	if (!firstBatch) {
+		int last_s = (g.currentStep - 1) % 2;
+		uint32_t nbFound = g.SyncRadiusBatch(last_s, found);
+		if (nbFound > 0) {
+			for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+				ITEM it = found[fi];
+				uint32_t tid = it.thId;
+				if (tid >= (uint32_t)batchTrackCount[last_s]) continue;
+				
+				uint64_t seed_lo = batchTrackLo[last_s][tid];
+				uint64_t seed_hi = batchTrackHi[last_s][tid];
+				
+				uint64_t keyBits[4];
+				keyBits[0] = scConfig->lockVals[0];
+				keyBits[1] = scConfig->lockVals[1];
+				keyBits[2] = scConfig->lockVals[2];
+				keyBits[3] = scConfig->lockVals[3];
+				
+				uint64_t sl = seed_lo;
+				for (int fb = 0; fb < 64 && fb < n; fb++) {
+					if (sl & 1ULL) {
+						int pos = scConfig->freeBitPositions[fb];
+						keyBits[pos >> 6] |= (1ULL << (pos & 63));
+					}
+					sl >>= 1;
+				}
+				if (n > 64) {
+					uint64_t sh = seed_hi;
+					for (int fb = 64; fb < n && fb < 128; fb++) {
+						if (sh & 1ULL) {
+							int pos = scConfig->freeBitPositions[fb];
+							keyBits[pos >> 6] |= (1ULL << (pos & 63));
+						}
+						sh >>= 1;
+					}
+				}
+				
+				Int privkey;
+				privkey.SetInt32(0);
+				privkey.bits64[0] = keyBits[0];
+				privkey.bits64[1] = keyBits[1];
+				privkey.bits64[2] = keyBits[2];
+				privkey.bits64[3] = keyBits[3];
+				checkAddr(*(address_t*)(it.hash), it.hash, privkey, 0, 0, true);
+			}
+		}
+	}
+	
+	// Cleanup
+	free(batchSeedsLo);
+	free(batchSeedsHi);
+	free(batchTrackLo[0]);
+	free(batchTrackHi[0]);
+	free(batchTrackLo[1]);
+	free(batchTrackHi[1]);
+	
+	ttot = Timer::get_tick() - t0 + t_Paused;
+	double avg_speed = (ttot > 0.0) ? (double)totalKeysProcessed / (ttot * 1000000.0) : 0.0;
+	printf("\n[SEP3] ============================================\n");
+	printf("[SEP3] Radius search COMPLETE\n");
+	printf("[SEP3] Total keys processed: %llu (%.2f BKeys)\n", 
+		(unsigned long long)totalKeysProcessed, (double)totalKeysProcessed / 1e9);
+	printf("[SEP3] Average speed: %.1f MK/s\n", avg_speed);
+	printf("[SEP3] Total time: %.1f seconds\n", ttot);
+	printf("[SEP3] Found: %d\n", nbFoundKey);
+	printf("[SEP3] ============================================\n");
+	fflush(stdout);
+	
+	char* ctimeBuff;
+	time_t now = time(NULL);
+	ctimeBuff = ctime(&now);
+	printf("Current task END time: %s", ctimeBuff);
+	
+	ph->isRunning = false;
+	endOfSearch = true;
+}
 
 // Custom stats display for StringCrack mode
 void VanitySearch::PrintStatsStringCrack(

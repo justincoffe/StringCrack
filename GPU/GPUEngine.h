@@ -102,6 +102,10 @@ typedef struct {
     uint64_t targetSeedHi;
     int sepMin;
     int sepMax;
+    
+    // SEP3: Radius mode — CPU Gosper + GPU batch hybrid
+    bool useRadius;
+    int radius;                     // Max Hamming distance from center
 } StringCrackConfig;
 
 // Second level lookup
@@ -136,6 +140,11 @@ public:
   // Asynchronous double-buffered StringCrack
   void LaunchOpenClawAsync(uint64_t batchOffsetLo, uint64_t batchOffsetHi);
   uint32_t SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressFound);
+
+  // SEP3: Radius mode — CPU Gosper + GPU batch
+  bool SetupRadiusBuffers();
+  void LaunchRadiusBatchAsync(uint64_t* h_seedsLo, uint64_t* h_seedsHi, int count);
+  uint32_t SyncRadiusBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;
@@ -184,6 +193,15 @@ private:
   cudaStream_t streams[2];
   uint32_t* d_output[2];
   uint32_t* h_outputPinned[2];
+
+  // SEP3: Radius mode GPU buffers (double-buffered seed arrays)
+  uint64_t* d_radiusSeedsLo[2];
+  uint64_t* d_radiusSeedsHi[2];
+  uint64_t* h_radiusSeedsLo[2];    // Pinned host staging buffers
+  uint64_t* h_radiusSeedsHi[2];
+  int* d_radiusCount[2];            // Per-stream seed count on device
+  bool radiusBuffersReady;
+
 public:
   int currentStep;
 };

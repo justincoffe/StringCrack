@@ -384,6 +384,16 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     }
     currentStep = 0;
 
+    // SEP3: Initialize radius buffer pointers
+    radiusBuffersReady = false;
+    for (int i = 0; i < 2; i++) {
+        d_radiusSeedsLo[i] = nullptr;
+        d_radiusSeedsHi[i] = nullptr;
+        h_radiusSeedsLo[i] = nullptr;
+        h_radiusSeedsHi[i] = nullptr;
+        d_radiusCount[i] = nullptr;
+    }
+
 }
 
 GPUEngine::~GPUEngine() {
@@ -393,6 +403,14 @@ GPUEngine::~GPUEngine() {
         cudaStreamDestroy(streams[i]);
         if (d_output[i]) cudaFree(d_output[i]);
         if (h_outputPinned[i]) cudaFreeHost(h_outputPinned[i]);
+    }
+
+    // SEP3: Cleanup radius buffers
+    for (int i = 0; i < 2; i++) {
+        if (d_radiusSeedsLo[i]) cudaFree(d_radiusSeedsLo[i]);
+        if (d_radiusSeedsHi[i]) cudaFree(d_radiusSeedsHi[i]);
+        if (h_radiusSeedsLo[i]) cudaFreeHost(h_radiusSeedsLo[i]);
+        if (h_radiusSeedsHi[i]) cudaFreeHost(h_radiusSeedsHi[i]);
     }
 
     cudaFree(inputKey);
@@ -1207,6 +1225,90 @@ void comp_keys_openclaw(
 }
 
 // =====================================================================================
+// SEP3: Radius Mode GPU kernel — reads pre-computed seeds, 100% utilization
+// No filtering, no stream compaction — every thread does useful EC math
+// =====================================================================================
+
+__global__ __launch_bounds__(256, 2)
+void comp_keys_radius_batch(
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out,
+    const uint64_t* __restrict__ d_seedsLo,
+    const uint64_t* __restrict__ d_seedsHi,
+    const int seedCount)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Boundary check — last batch may be partial
+    if (tid >= seedCount) return;
+    
+    // Read pre-computed seed directly from device memory (zero filtering overhead)
+    uint64_t my_seed_lo = d_seedsLo[tid];
+    uint64_t my_seed_hi = d_seedsHi[tid];
+    
+    // XOR with target center to get the actual seed in seed-space
+    // The CPU has already XORed, so my_seed_lo/hi ARE the final seeds
+    // (CPU generates flip-masks and XORs with center before upload)
+    
+    // Initialize Jacobian Accumulator with the CPU Base Point
+    uint64_t accX[4], accY[4], accZ[4];
+    Load256(accX, d_basePointX);
+    Load256(accY, d_basePointY);
+    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+    
+    // Direct Seed Iteration (8-Bit Windows) — identical math to comp_keys_openclaw
+    int num_windows = (d_numFreeBits + 7) / 8;
+    
+    // Process lower 64 bits (up to 8 windows)
+    uint64_t seed = my_seed_lo;
+    for (int w = 0; w < 8 && w < num_windows; w++) {
+        int byte_val = seed & 0xFF;
+        if (byte_val != 0) {
+            int idx = (w * 256 + byte_val) * 4;
+            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
+            
+            uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
+            uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+            
+            jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+        }
+        seed >>= 8;
+    }
+    
+    // Process upper 64 bits (windows 8 to 15)
+    seed = my_seed_hi;
+    for (int w = 8; w < 16 && w < num_windows; w++) {
+        int byte_val = seed & 0xFF;
+        if (byte_val != 0) {
+            int idx = (w * 256 + byte_val) * 4;
+            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
+            
+            uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
+            uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+            
+            jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+        }
+        seed >>= 8;
+    }
+    
+    // Convert Jacobian to Affine and Hash
+    uint64_t px[4], py[4];
+    jacobian_to_affine(accX, accY, accZ, px, py);
+    
+    uint8_t odd_py = (uint8_t)(py[0] & 1);
+    uint32_t h[5];
+    _GetHash160Comp(px, odd_py, (uint8_t*)h);
+    
+    // Bloom filter + full check (same as comp_keys_openclaw Phase 3)
+    CheckPoint(h, tid, sAddress, lookup32, out);
+}
+
+// =====================================================================================
 // Host-side StringCrack methods
 // =====================================================================================
 
@@ -1566,6 +1668,99 @@ uint32_t GPUEngine::SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressF
     uint32_t nbFound = h_outputPinned[s][0];
     if (nbFound > maxFound) { nbFound = maxFound; }
 
+    addressFound.clear();
+    if (nbFound > 0) {
+        for (uint32_t i = 0; i < nbFound; i++) {
+            uint32_t* itemPtr = h_outputPinned[s] + (i * ITEM_SIZE32 + 1);
+            ITEM it;
+            it.thId = itemPtr[0];
+            int16_t* ptr = (int16_t*)&(itemPtr[1]);
+            it.endo = ptr[0] & 0x7FFF;
+            it.mode = (ptr[0] & 0x8000) != 0;
+            it.incr = ptr[1];
+            it.hash = (uint8_t*)(itemPtr + 2);
+            addressFound.push_back(it);
+        }
+    }
+    return nbFound;
+}
+
+// =====================================================================================
+// SEP3: Radius Mode — Buffer Setup and Launch Methods
+// =====================================================================================
+
+bool GPUEngine::SetupRadiusBuffers() {
+    radiusBuffersReady = false;
+    cudaError_t err;
+    
+    for (int i = 0; i < 2; i++) {
+        d_radiusSeedsLo[i] = nullptr;
+        d_radiusSeedsHi[i] = nullptr;
+        h_radiusSeedsLo[i] = nullptr;
+        h_radiusSeedsHi[i] = nullptr;
+        d_radiusCount[i] = nullptr;
+        
+        // Allocate device buffers for seeds (one uint64_t per thread)
+        size_t seedBytes = (size_t)nbThread * sizeof(uint64_t);
+        
+        err = cudaMalloc((void**)&d_radiusSeedsLo[i], seedBytes);
+        if (err != cudaSuccess) { printf("GPUEngine: Radius alloc SeedsLo[%d]: %s\n", i, cudaGetErrorString(err)); return false; }
+        
+        err = cudaMalloc((void**)&d_radiusSeedsHi[i], seedBytes);
+        if (err != cudaSuccess) { printf("GPUEngine: Radius alloc SeedsHi[%d]: %s\n", i, cudaGetErrorString(err)); return false; }
+        
+        // Allocate pinned host staging buffers (write-combined for optimal H2D transfer)
+        err = cudaHostAlloc((void**)&h_radiusSeedsLo[i], seedBytes, cudaHostAllocWriteCombined);
+        if (err != cudaSuccess) { printf("GPUEngine: Radius alloc pinned Lo[%d]: %s\n", i, cudaGetErrorString(err)); return false; }
+        
+        err = cudaHostAlloc((void**)&h_radiusSeedsHi[i], seedBytes, cudaHostAllocWriteCombined);
+        if (err != cudaSuccess) { printf("GPUEngine: Radius alloc pinned Hi[%d]: %s\n", i, cudaGetErrorString(err)); return false; }
+    }
+    
+    size_t totalMB = (size_t)nbThread * sizeof(uint64_t) * 4 * 2 / (1024 * 1024);
+    printf("[SEP3] Radius buffers allocated: %d threads x 2 streams = %zu MB\n", nbThread, totalMB);
+    fflush(stdout);
+    
+    radiusBuffersReady = true;
+    return true;
+}
+
+void GPUEngine::LaunchRadiusBatchAsync(uint64_t* seedsLo, uint64_t* seedsHi, int count) {
+    int s = currentStep % 2;
+    
+    // Copy pre-computed seeds from caller's arrays to pinned staging buffer
+    memcpy(h_radiusSeedsLo[s], seedsLo, (size_t)count * sizeof(uint64_t));
+    memcpy(h_radiusSeedsHi[s], seedsHi, (size_t)count * sizeof(uint64_t));
+    
+    // Reset the found counter
+    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
+    
+    // Async H2D transfer of seeds
+    cudaMemcpyAsync(d_radiusSeedsLo[s], h_radiusSeedsLo[s], 
+                    (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice, streams[s]);
+    cudaMemcpyAsync(d_radiusSeedsHi[s], h_radiusSeedsHi[s],
+                    (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice, streams[s]);
+    
+    // Launch the lean radius kernel — every thread does useful work
+    int blocks = (count + NB_TRHEAD_PER_GROUP - 1) / NB_TRHEAD_PER_GROUP;
+    comp_keys_radius_batch<<<blocks, NB_TRHEAD_PER_GROUP, 0, streams[s]>>>(
+        inputAddress, inputAddressLookUp, d_output[s],
+        d_radiusSeedsLo[s], d_radiusSeedsHi[s], count);
+    
+    // Queue the result transfer back
+    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
+    
+    currentStep++;
+}
+
+uint32_t GPUEngine::SyncRadiusBatch(int stepToSync, std::vector<ITEM> &addressFound) {
+    int s = stepToSync % 2;
+    
+    cudaStreamSynchronize(streams[s]);
+    
+    uint32_t nbFound = h_outputPinned[s][0];
+    if (nbFound > maxFound) { nbFound = maxFound; }
+    
     addressFound.clear();
     if (nbFound > 0) {
         for (uint32_t i = 0; i < nbFound; i++) {
