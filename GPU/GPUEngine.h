@@ -48,6 +48,9 @@ typedef struct {
   int16_t  endo;
   uint8_t  *hash;
   bool mode;
+  // Add these for Radius Mode:
+  uint64_t mut_lo;
+  uint64_t mut_hi;
 } ITEM;
 
 // =====================================================================================

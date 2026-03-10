@@ -812,7 +812,7 @@ __device__ __forceinline__ void next_combination_128(uint64_t &lo, uint64_t &hi)
     uint64_t c_hi = (lo == 0) ? (hi & (~hi + 1)) : 0;
 
     uint64_t r_lo = lo + c_lo;
-    uint64_t carry = (r_lo < lo) ? 1 : 0;
+    uint64_t carry = (r_lo < lo || (lo == 0 && c_lo == 0 && c_hi != 0)) ? 1 : 0;
     uint64_t r_hi = hi + c_hi + carry;
 
     uint64_t xor_lo = r_lo ^ lo;
@@ -821,18 +821,20 @@ __device__ __forceinline__ void next_combination_128(uint64_t &lo, uint64_t &hi)
     uint64_t shift_hi = xor_hi >> 2;
     uint64_t shift_lo = (xor_lo >> 2) | (xor_hi << 62);
 
-    int shift_amt = (lo == 0) ? __ffsll(c_hi) - 1 : __ffsll(c_lo) - 1;
+    int tz = (lo == 0) ? (__ffsll(c_hi) - 1) : (__ffsll(c_lo) - 1);
 
     uint64_t div_hi = 0, div_lo = 0;
     if (lo == 0) {
-        div_lo = shift_hi >> shift_amt;
+        // FIX: Properly span the 64-bit boundary when shifting down
+        div_lo = (shift_lo >> tz) | (shift_hi << (64 - tz));
+        div_hi = shift_hi >> tz;
     } else {
-        if (shift_amt == 0) {
+        if (tz == 0) {
             div_lo = shift_lo;
             div_hi = shift_hi;
         } else {
-            div_lo = (shift_lo >> shift_amt) | (shift_hi << (64 - shift_amt));
-            div_hi = shift_hi >> shift_amt;
+            div_lo = (shift_lo >> tz) | (shift_hi << (64 - tz));
+            div_hi = shift_hi >> tz;
         }
     }
 
@@ -1689,9 +1691,22 @@ void comp_keys_radius(
         uint32_t h[5];
         _GetHash160Comp(px, odd_py, (uint8_t*)h);
         
-        // Bloom Filter Check
+        // Bloom Filter Check - Custom output for Radius Mode
         if (sAddress[h[0] & 0xFFFF] != 0) {
-            CheckPoint(h, 0, sAddress, lookup32, out);
+            uint32_t idx = atomicAdd(out, 1);
+            if (idx < maxFound) {
+                // Use a custom stride of 6 uint32_t to fit the extra 64-bit masks
+                uint32_t* itemPtr = out + (idx * 6 + 1);
+                itemPtr[0] = tid;
+                
+                // Save the exact mutation masks that triggered the hit
+                uint64_t* maskPtr = (uint64_t*)(itemPtr + 1);
+                maskPtr[0] = mut_lo;
+                maskPtr[1] = mut_hi;
+                
+                // Save the first part of the hash for host-side verification
+                itemPtr[5] = h[0]; 
+            }
         }
 
         // 3. Advance to the exact next combination instantly (O(1))
@@ -1729,10 +1744,16 @@ bool GPUEngine::LaunchRadius(std::vector<ITEM> &addressFound, int steps_per_thre
     if (nbFound > maxFound) nbFound = maxFound;
     
     for (uint32_t i = 0; i < nbFound; i++) {
-        uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE32 + 1);
+        // Match the custom stride of 6
+        uint32_t* itemPtr = outputBufferPinned + (i * 6 + 1);
         ITEM it;
         it.thId = itemPtr[0];
-        it.hash = (uint8_t*)(itemPtr + 2);
+        
+        // Extract the saved masks
+        uint64_t* maskPtr = (uint64_t*)(itemPtr + 1);
+        it.mut_lo = maskPtr[0];
+        it.mut_hi = maskPtr[1];
+        
         addressFound.push_back(it);
     }
     return true;

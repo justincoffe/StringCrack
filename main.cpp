@@ -575,23 +575,30 @@ bool loadBackup(int& idxcount, double& t_Paused, int gpuid) {
 uint64_t nCr(int n, int r) {
 	if (r < 0 || r > n) return 0;
 	if (r > n / 2) r = n - r;
-	uint64_t res = 1;
+	
+	// FIX: Use 128-bit int to prevent overflow during intermediate multiplication
+	unsigned __int128 res = 1; 
 	for (int i = 1; i <= r; i++) {
 		res = res * (n - i + 1) / i;
 	}
-	return res;
+	return (uint64_t)res;
 }
 
 void unrank_combination(int n, int k, uint64_t rank, uint64_t &lo, uint64_t &hi) {
 	lo = 0; hi = 0;
-	for (int i = n - 1; i >= 0 && k > 0; --i) {
-		uint64_t count = nCr(i, k);
-		if (rank >= count) {
-			rank -= count;
-			if (i < 64) lo |= (1ULL << i);
-			else hi |= (1ULL << (i - 64));
+	int current_bit = 0;
+	while (k > 0 && current_bit < n) {
+		// Calculate combinations if we SET this specific bit
+		uint64_t count = nCr(n - current_bit - 1, k - 1); 
+		
+		if (rank < count) {
+			if (current_bit < 64) lo |= (1ULL << current_bit);
+			else hi |= (1ULL << (current_bit - 64));
 			k--;
+		} else {
+			rank -= count;
 		}
+		current_bit++;
 	}
 }
 
