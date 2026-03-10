@@ -133,10 +133,11 @@ void printUsage() {
 	printf(" -poprange min:max: Popcount range. Example: -poprange 30:40\n");
 	printf(" -center STRING: SEP center string (71-bit). Example: -center 10110...\n");
 	printf(" -seprange min:max: SEP mutation range. Example: -seprange 11:23\n");
-	printf("\n === SEP3 Radius Mode (CPU Gosper + GPU Batch) ===\n");
+	printf("\n === SEP4 Radius Mode (GPU-native Gosper — combinatorial unranking) ===\n");
 	printf(" -radius N: Test only seeds within N Hamming-distance from center.\n");
-	printf("            Generates ONLY valid combinations — zero wasted GPU cycles.\n");
-	printf("            Example: -center 10011...10110 -radius 20\n");
+	printf("            GPU computes combinations in registers — zero CPU bottleneck.\n");
+	printf("            Popcount pre-filter via -poprange runs BEFORE EC math.\n");
+	printf("            Example: -center 10011...10110 -radius 20 -poprange 35:39\n");
 	exit(-1);
 
 }
@@ -842,15 +843,15 @@ int main(int argc, char* argv[]) {
 			}
 			delete[] logFact;
 			
-			printf("\n[SEP3] ============================================\n");
-			printf("[SEP3] RADIUS MODE: CPU Gosper + GPU Batch Hybrid\n");
-			printf("[SEP3] Center: %s\n", scConfig.centerString);
-			printf("[SEP3] Free bits: %d, Radius: %d\n", n, r);
-			printf("[SEP3] Total combinations: %.0f (~%.2e)\n", totalCombinations, totalCombinations);
-			printf("[SEP3] Log2(combinations): %.2f\n", log2(totalCombinations));
-			printf("[SEP3] Full space would be: 2^%d = %.2e\n", n, pow(2.0, n));
-			printf("[SEP3] Compression ratio: %.4f%% of full space\n", (totalCombinations / pow(2.0, n)) * 100.0);
-			printf("[SEP3] ============================================\n\n");
+			printf("\n[SEP4] ============================================\n");
+			printf("[SEP4] RADIUS MODE: GPU-native Gosper (combinatorial unranking)\n");
+			printf("[SEP4] Center: %s\n", scConfig.centerString);
+			printf("[SEP4] Free bits: %d, Radius: %d\n", n, r);
+			printf("[SEP4] Total combinations: %.0f (~%.2e)\n", totalCombinations, totalCombinations);
+			printf("[SEP4] Log2(combinations): %.2f\n", log2(totalCombinations));
+			printf("[SEP4] Full space would be: 2^%d = %.2e\n", n, pow(2.0, n));
+			printf("[SEP4] Compression ratio: %.4f%% of full space\n", (totalCombinations / pow(2.0, n)) * 100.0);
+			printf("[SEP4] ============================================\n\n");
 			fflush(stdout);
 			
 			// For radius mode, seedCount is the total combinations (approximate for stop condition)

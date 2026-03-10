@@ -1225,29 +1225,88 @@ void comp_keys_openclaw(
 }
 
 // =====================================================================================
-// SEP3: Radius Mode GPU kernel — reads pre-computed seeds, 100% utilization
-// No filtering, no stream compaction — every thread does useful EC math
+// SEP4: Precomputed C(n,k) table in constant memory for GPU unranking
+// Supports n up to 128, k up to 128. Table is C[129][129].
+// We only need the lower-left triangle but store the full row for simplicity.
+// =====================================================================================
+
+// Device global memory: C(n,k) table for combinatorial unranking
+// Stored as uint64_t — saturates to UINT64_MAX on overflow (safe for comparison)
+// Too large for constant memory (129*129*8 = 130KB > 64KB limit), so we use
+// global memory with __ldg() for read-only texture cache access.
+#define COMB_TABLE_N 129
+#define COMB_TABLE_K 129
+__device__ uint64_t* d_combTable;
+
+// =====================================================================================
+// SEP4: Combinatorial unranking — convert rank to flip-mask in GPU registers
+// Given rank (0-indexed) among all C(n,k) combinations, produces a 128-bit
+// bitmask with exactly k bits set, representing the rank-th combination
+// in colexicographic (reverse lexicographic) order.
+// =====================================================================================
+__device__ __forceinline__ void unrank_combination(
+    uint64_t rank, int n, int k,
+    uint64_t &mask_lo, uint64_t &mask_hi)
+{
+    mask_lo = 0;
+    mask_hi = 0;
+    
+    // Standard combinatorial unranking (colex order):
+    // Greedy from the top: for each bit position i = n-1 down to 0,
+    // if C(i, k) <= rank, include position i in the combination.
+    int remaining = k;
+    for (int i = n - 1; i >= 0 && remaining > 0; i--) {
+        // C(i, remaining) from the precomputed table via read-only cache
+        uint64_t c = __ldg(&d_combTable[i * COMB_TABLE_K + remaining]);
+        if (rank >= c) {
+            rank -= c;
+            // Set bit i in the mask
+            if (i < 64) {
+                mask_lo |= (1ULL << i);
+            } else {
+                mask_hi |= (1ULL << (i - 64));
+            }
+            remaining--;
+        }
+    }
+}
+
+// =====================================================================================
+// SEP4: GPU-native Gosper kernel — combinatorial unranking in registers
+// Each thread independently computes its combination from a global rank.
+// No PCIe seed transfer, no CPU bottleneck. 100% GPU utilization.
 // =====================================================================================
 
 __global__ __launch_bounds__(256, 2)
-void comp_keys_radius_batch(
+void comp_keys_gosper(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
-    const uint64_t* __restrict__ d_seedsLo,
-    const uint64_t* __restrict__ d_seedsHi,
-    const int seedCount)
+    int hamming_h, uint64_t batchOffset, uint64_t totalCombs)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // Boundary check — last batch may be partial
-    if (tid >= seedCount) return;
+    // Compute this thread's global rank in the C(n, hamming_h) enumeration
+    uint64_t myRank = batchOffset + (uint64_t)tid;
     
-    // Read pre-computed seed directly from device memory (zero filtering overhead)
-    uint64_t my_seed_lo = d_seedsLo[tid];
-    uint64_t my_seed_hi = d_seedsHi[tid];
+    // Boundary check — beyond this layer's combinations, thread is idle
+    if (myRank >= totalCombs) return;
     
-    // XOR with target center to get the actual seed in seed-space
-    // The CPU has already XORed, so my_seed_lo/hi ARE the final seeds
-    // (CPU generates flip-masks and XORs with center before upload)
+    // Unrank: convert myRank into a flip-mask with exactly hamming_h bits set
+    uint64_t flip_lo, flip_hi;
+    unrank_combination(myRank, d_numFreeBits, hamming_h, flip_lo, flip_hi);
+    
+    // XOR flip-mask with center target to get actual seed
+    uint64_t seed_lo = flip_lo ^ d_targetSeedLo;
+    uint64_t seed_hi = flip_hi ^ d_targetSeedHi;
+    
+    // Apply seed mask for safety
+    seed_lo &= d_seedMaskLo;
+    seed_hi &= d_seedMaskHi;
+    
+    // --- Popcount pre-filter (BEFORE EC math) ---
+    // If user specified -poprange, check absolute popcount before spending
+    // cycles on expensive EC math. This is a register-only operation.
+    int pc_abs = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
+    if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) return;
     
     // Initialize Jacobian Accumulator with the CPU Base Point
     uint64_t accX[4], accY[4], accZ[4];
@@ -1255,13 +1314,13 @@ void comp_keys_radius_batch(
     Load256(accY, d_basePointY);
     accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
     
-    // Direct Seed Iteration (8-Bit Windows) — identical math to comp_keys_openclaw
+    // Direct Seed Iteration (8-Bit Windows)
     int num_windows = (d_numFreeBits + 7) / 8;
     
     // Process lower 64 bits (up to 8 windows)
-    uint64_t seed = my_seed_lo;
+    uint64_t s = seed_lo;
     for (int w = 0; w < 8 && w < num_windows; w++) {
-        int byte_val = seed & 0xFF;
+        int byte_val = s & 0xFF;
         if (byte_val != 0) {
             int idx = (w * 256 + byte_val) * 4;
             ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
@@ -1274,13 +1333,13 @@ void comp_keys_radius_batch(
             
             jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
         }
-        seed >>= 8;
+        s >>= 8;
     }
     
     // Process upper 64 bits (windows 8 to 15)
-    seed = my_seed_hi;
+    s = seed_hi;
     for (int w = 8; w < 16 && w < num_windows; w++) {
-        int byte_val = seed & 0xFF;
+        int byte_val = s & 0xFF;
         if (byte_val != 0) {
             int idx = (w * 256 + byte_val) * 4;
             ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
@@ -1293,7 +1352,7 @@ void comp_keys_radius_batch(
             
             jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
         }
-        seed >>= 8;
+        s >>= 8;
     }
     
     // Convert Jacobian to Affine and Hash
@@ -1304,8 +1363,9 @@ void comp_keys_radius_batch(
     uint32_t h[5];
     _GetHash160Comp(px, odd_py, (uint8_t*)h);
     
-    // Bloom filter + full check (same as comp_keys_openclaw Phase 3)
-    CheckPoint(h, tid, sAddress, lookup32, out);
+    // CheckPoint writes tid = blockIdx.x * blockDim.x + threadIdx.x
+    // CPU reconstructs: rank = batchOffset + tid → unrank → XOR target → key
+    CheckPoint(h, 0, sAddress, lookup32, out);
 }
 
 // =====================================================================================
@@ -1459,6 +1519,63 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     // Safely execute and catch memory allocation errors
     if (!ComputeWindowTables(secp, (StringCrackConfig*)config)) {
         return false;
+    }
+
+    // SEP4: Compute and upload C(n,k) Pascal's triangle for GPU unranking
+    if (config->useRadius) {
+        int N = COMB_TABLE_N;
+        int K = COMB_TABLE_K;
+        size_t tableBytes = (size_t)N * K * sizeof(uint64_t);
+        uint64_t* h_combTable = (uint64_t*)calloc(N * K, sizeof(uint64_t));
+        
+        // Build Pascal's triangle with saturation at UINT64_MAX
+        for (int i = 0; i < N; i++) {
+            h_combTable[i * K + 0] = 1;  // C(i, 0) = 1
+            for (int j = 1; j <= i && j < K; j++) {
+                uint64_t a = h_combTable[(i - 1) * K + (j - 1)];
+                uint64_t b = h_combTable[(i - 1) * K + j];
+                // Saturating addition: if a + b would overflow, clamp to UINT64_MAX
+                if (a > 0xFFFFFFFFFFFFFFFFULL - b) {
+                    h_combTable[i * K + j] = 0xFFFFFFFFFFFFFFFFULL;
+                } else {
+                    h_combTable[i * K + j] = a + b;
+                }
+            }
+        }
+        
+        // Allocate in global memory (too large for constant memory)
+        // Free old table if it exists
+        uint64_t* old_combTable = nullptr;
+        cudaMemcpyFromSymbol(&old_combTable, d_combTable, sizeof(uint64_t*));
+        if (old_combTable) cudaFree(old_combTable);
+        
+        uint64_t* d_table = nullptr;
+        err = cudaMalloc((void**)&d_table, tableBytes);
+        if (err != cudaSuccess) { 
+            printf("GPUEngine: d_combTable alloc: %s\n", cudaGetErrorString(err)); 
+            free(h_combTable);
+            return false; 
+        }
+        
+        err = cudaMemcpy(d_table, h_combTable, tableBytes, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { 
+            printf("GPUEngine: d_combTable copy: %s\n", cudaGetErrorString(err)); 
+            cudaFree(d_table);
+            free(h_combTable);
+            return false; 
+        }
+        
+        err = cudaMemcpyToSymbol(d_combTable, &d_table, sizeof(uint64_t*));
+        if (err != cudaSuccess) { 
+            printf("GPUEngine: d_combTable symbol: %s\n", cudaGetErrorString(err)); 
+            cudaFree(d_table);
+            free(h_combTable);
+            return false; 
+        }
+        
+        free(h_combTable);
+        printf("[SEP4] C(n,k) table uploaded to GPU global memory (%d x %d = %zu KB)\n", 
+               N, K, tableBytes / 1024);
     }
 
     printf("[StringCrack] GPU configuration uploaded\n"); fflush(stdout);
@@ -1754,6 +1871,52 @@ void GPUEngine::LaunchRadiusBatchAsync(uint64_t* seedsLo, uint64_t* seedsHi, int
 }
 
 uint32_t GPUEngine::SyncRadiusBatch(int stepToSync, std::vector<ITEM> &addressFound) {
+    int s = stepToSync % 2;
+    
+    cudaStreamSynchronize(streams[s]);
+    
+    uint32_t nbFound = h_outputPinned[s][0];
+    if (nbFound > maxFound) { nbFound = maxFound; }
+    
+    addressFound.clear();
+    if (nbFound > 0) {
+        for (uint32_t i = 0; i < nbFound; i++) {
+            uint32_t* itemPtr = h_outputPinned[s] + (i * ITEM_SIZE32 + 1);
+            ITEM it;
+            it.thId = itemPtr[0];
+            int16_t* ptr = (int16_t*)&(itemPtr[1]);
+            it.endo = ptr[0] & 0x7FFF;
+            it.mode = (ptr[0] & 0x8000) != 0;
+            it.incr = ptr[1];
+            it.hash = (uint8_t*)(itemPtr + 2);
+            addressFound.push_back(it);
+        }
+    }
+    return nbFound;
+}
+
+// =====================================================================================
+// SEP4: GPU-native Gosper — Launch and Sync Methods
+// =====================================================================================
+
+void GPUEngine::LaunchGosperAsync(int hamming_h, uint64_t batchOffset, uint64_t totalCombs) {
+    int s = currentStep % 2;
+    
+    // Reset the found counter
+    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
+    
+    // Launch the GPU-native Gosper kernel with exact layer bound
+    comp_keys_gosper<<<nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP, 0, streams[s]>>>(
+        inputAddress, inputAddressLookUp, d_output[s],
+        hamming_h, batchOffset, totalCombs);
+    
+    // Queue the result transfer back
+    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
+    
+    currentStep++;
+}
+
+uint32_t GPUEngine::SyncGosperBatch(int stepToSync, std::vector<ITEM> &addressFound) {
     int s = stepToSync % 2;
     
     cudaStreamSynchronize(streams[s]);

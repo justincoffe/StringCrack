@@ -141,10 +141,14 @@ public:
   void LaunchOpenClawAsync(uint64_t batchOffsetLo, uint64_t batchOffsetHi);
   uint32_t SyncAndGetResult(int stepToSync, std::vector<ITEM> &addressFound);
 
-  // SEP3: Radius mode — CPU Gosper + GPU batch
+  // SEP3: Radius mode — CPU Gosper + GPU batch (legacy)
   bool SetupRadiusBuffers();
   void LaunchRadiusBatchAsync(uint64_t* h_seedsLo, uint64_t* h_seedsHi, int count);
   uint32_t SyncRadiusBatch(int stepToSync, std::vector<ITEM> &addressFound);
+
+  // SEP4: GPU-native Gosper — combinatorial unranking in registers
+  void LaunchGosperAsync(int hamming_h, uint64_t batchOffset, uint64_t totalCombs);
+  uint32_t SyncGosperBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;
