@@ -1308,11 +1308,18 @@ void comp_keys_gosper(
     int pc_abs = __popcll(seed_lo) + __popcll(seed_hi) + d_lockedPopcount;
     if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) return;
     
-    // Initialize Jacobian Accumulator with the CPU Base Point
-    uint64_t accX[4], accY[4], accZ[4];
-    Load256(accX, d_basePointX);
-    Load256(accY, d_basePointY);
-    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+    // Point at Infinity Safety Check
+    // If d_lockedPopcount == 0, the base point is (0,0) which is invalid
+    // in Jacobian (0,0,1). We defer initialization to the first non-zero window.
+    uint64_t accX[4] = {0}, accY[4] = {0}, accZ[4] = {0};
+    bool pointSet = false;
+    
+    if (d_lockedPopcount > 0) {
+        Load256(accX, d_basePointX);
+        Load256(accY, d_basePointY);
+        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+        pointSet = true;
+    }
     
     // Direct Seed Iteration (8-Bit Windows)
     int num_windows = (d_numFreeBits + 7) / 8;
@@ -1331,7 +1338,14 @@ void comp_keys_gosper(
             uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
             uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
             
-            jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+            if (!pointSet) {
+                Load256(accX, curGX);
+                Load256(accY, curGY);
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                pointSet = true;
+            } else {
+                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+            }
         }
         s >>= 8;
     }
@@ -1350,10 +1364,20 @@ void comp_keys_gosper(
             uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
             uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
             
-            jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+            if (!pointSet) {
+                Load256(accX, curGX);
+                Load256(accY, curGY);
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                pointSet = true;
+            } else {
+                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+            }
         }
         s >>= 8;
     }
+    
+    // If no point was ever set (seed was 0 and no locked bits), skip
+    if (!pointSet) return;
     
     // Convert Jacobian to Affine and Hash
     uint64_t px[4], py[4];
