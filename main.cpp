@@ -133,11 +133,14 @@ void printUsage() {
 	printf(" -poprange min:max: Popcount range. Example: -poprange 30:40\n");
 	printf(" -center STRING: SEP center string (71-bit). Example: -center 10110...\n");
 	printf(" -seprange min:max: SEP mutation range. Example: -seprange 11:23\n");
-	printf("\n === SEP4 Radius Mode (GPU-native Gosper — combinatorial unranking) ===\n");
-	printf(" -radius N: Test only seeds within N Hamming-distance from center.\n");
+	printf("\n === SEP6 Radius Mode (GPU-native Gosper — combinatorial unranking) ===\n");
+	printf(" -radius N: Test only seeds up to N Hamming-distance from center.\n");
 	printf("            GPU computes combinations in registers — zero CPU bottleneck.\n");
 	printf("            Popcount pre-filter via -poprange runs BEFORE EC math.\n");
 	printf("            Example: -center 10011...10110 -radius 20 -poprange 35:39\n");
+	printf(" -radiusrange min:max: Test a specific Hamming distance band.\n");
+	printf("            Jumps straight to layer 'min', skipping layers 0..min-1.\n");
+	printf("            Example: -center 10011...10110 -radiusrange 13:21\n");
 	exit(-1);
 
 }
@@ -679,7 +682,24 @@ int main(int argc, char* argv[]) {
 			a++;
 			scConfig.radius = getInt("radius", argv[a]);
 			scConfig.useRadius = true;
-			scConfig.useSEP = true;      // Radius requires a center
+			scConfig.useSEP = true;
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-radiusrange") == 0) {
+			a++;
+			string rrStr = string(argv[a]);
+			size_t colonPos = rrStr.find(':');
+			if (colonPos == string::npos) { fprintf(stderr, "[ERROR] -radiusrange format: min:max\n"); exit(-1); }
+			// sepMin stores the lower Hamming bound; radius stores the upper bound.
+			// The Gosper engine loop will iterate h = sepMin..radius instead of 0..radius.
+			scConfig.sepMin = stoi(rrStr.substr(0, colonPos));
+			scConfig.radius = stoi(rrStr.substr(colonPos + 1));
+			if (scConfig.sepMin < 0 || scConfig.radius < scConfig.sepMin) {
+				fprintf(stderr, "[ERROR] -radiusrange: min must be >= 0 and <= max\n"); exit(-1);
+			}
+			scConfig.useRadius = true;
+			scConfig.useSEP = true;
 			scConfig.enabled = true;
 			a++;
 		}
@@ -829,10 +849,10 @@ int main(int argc, char* argv[]) {
 			seedCountInt.ShiftL(scConfig.numFreeBits);
 		}
 		
-		// SEP3 Radius Mode: Override seedCount with exact combination count
+		// SEP6 Radius Mode: Override seedCount with exact combination count
 		if (scConfig.useRadius) {
 			if (strlen(scConfig.centerString) == 0) {
-				fprintf(stderr, "[ERROR] -radius requires -center. Provide a center binary string.\n");
+				fprintf(stderr, "[ERROR] -radius/-radiusrange requires -center.\n");
 				exit(-1);
 			}
 			if (scConfig.radius > scConfig.numFreeBits) {
@@ -840,33 +860,37 @@ int main(int argc, char* argv[]) {
 				exit(-1);
 			}
 			
-			// Compute exact combination count: sum(C(n, h) for h=0..radius)
-			// Use double for the sum (sufficient for display; actual enumeration is exact)
-			int n = scConfig.numFreeBits;
-			int r = scConfig.radius;
+			// Compute exact combination count: sum(C(n, h) for h=startH..radius)
+			// startH is 0 for -radius, or sepMin for -radiusrange.
+			int n      = scConfig.numFreeBits;
+			int r      = scConfig.radius;
+			int startH = (scConfig.sepMin > 0) ? scConfig.sepMin : 0;
 			double totalCombinations = 0.0;
 			
-			// Use log-space to compute C(n,k) precisely for large n
-			// Precompute log-factorials
 			double* logFact = new double[n + 1];
 			logFact[0] = 0.0;
 			for (int i = 1; i <= n; i++) logFact[i] = logFact[i-1] + log((double)i);
 			
-			for (int h = 0; h <= r; h++) {
+			for (int h = startH; h <= r; h++) {
 				double logC = logFact[n] - logFact[h] - logFact[n - h];
 				totalCombinations += exp(logC);
 			}
 			delete[] logFact;
 			
-			printf("\n[SEP4] ============================================\n");
-			printf("[SEP4] RADIUS MODE: GPU-native Gosper (combinatorial unranking)\n");
-			printf("[SEP4] Center: %s\n", scConfig.centerString);
-			printf("[SEP4] Free bits: %d, Radius: %d\n", n, r);
-			printf("[SEP4] Total combinations: %.0f (~%.2e)\n", totalCombinations, totalCombinations);
-			printf("[SEP4] Log2(combinations): %.2f\n", log2(totalCombinations));
-			printf("[SEP4] Full space would be: 2^%d = %.2e\n", n, pow(2.0, n));
-			printf("[SEP4] Compression ratio: %.4f%% of full space\n", (totalCombinations / pow(2.0, n)) * 100.0);
-			printf("[SEP4] ============================================\n\n");
+			bool isRange = (scConfig.sepMin > 0);
+			printf("\n[SEP6] ============================================\n");
+			printf("[SEP6] RADIUS MODE: GPU-native Gosper (combinatorial unranking)\n");
+			if (isRange)
+				printf("[SEP6] Mode: -radiusrange %d:%d (band search)\n", startH, r);
+			else
+				printf("[SEP6] Mode: -radius %d (full sphere 0..%d)\n", r, r);
+			printf("[SEP6] Center: %s\n", scConfig.centerString);
+			printf("[SEP6] Free bits: %d, Hamming layers: h=%d..%d\n", n, startH, r);
+			printf("[SEP6] Total combinations: %.0f (~%.2e)\n", totalCombinations, totalCombinations);
+			printf("[SEP6] Log2(combinations): %.2f\n", log2(totalCombinations));
+			printf("[SEP6] Full space would be: 2^%d = %.2e\n", n, pow(2.0, n));
+			printf("[SEP6] Compression ratio: %.4f%% of full space\n", (totalCombinations / pow(2.0, n)) * 100.0);
+			printf("[SEP6] ============================================\n\n");
 			fflush(stdout);
 			
 			// For radius mode, seedCount is the total combinations (approximate for stop condition)

@@ -1395,6 +1395,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 	}
 	
 	int n          = scConfig->numFreeBits;
+	int minRadius  = (scConfig->sepMin > 0) ? scConfig->sepMin : 0; // -radiusrange lower bound
 	int maxRadius  = scConfig->radius;
 	uint64_t targetLo = scConfig->targetSeedLo;
 	uint64_t targetHi = scConfig->targetSeedHi;
@@ -1480,7 +1481,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 	// -----------------------------------------------------------------------
 	// Main loop: iterate Hamming layers, walk this GPU's slice
 	// -----------------------------------------------------------------------
-	for (int h = 0; h <= maxRadius && !endOfSearch; h++) {
+	for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
 		
 		uint64_t layerCombs = h_combTable[n * tableK + h];
 		if (layerCombs == 0) continue;
