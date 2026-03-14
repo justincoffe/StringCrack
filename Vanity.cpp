@@ -1548,7 +1548,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 				ITEM it = found[fi];
 				// SEP7: walk_id is in thId, step is packed in incr/endo fields
 				uint32_t walk_id = it.thId;
-				uint32_t step = ((uint32_t)it.incr & 0x7FFF) | (((uint32_t)it.endo & 0x7FFF) << 15);
+				uint32_t step = ((uint32_t)it.endo & 0x7FFF) | (((uint32_t)it.incr & 0x7FFF) << 15);
 				reconstructGosperWalkKey(walk_id, step, streamH[prev_s], 
 					streamRankBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK);
 			}
@@ -1593,7 +1593,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 			ITEM it = found[fi];
 			// SEP7: walk_id is in thId, step is packed in incr/endo fields
 			uint32_t walk_id = it.thId;
-			uint32_t step = ((uint32_t)it.incr & 0x7FFF) | (((uint32_t)it.endo & 0x7FFF) << 15);
+			uint32_t step = ((uint32_t)it.endo & 0x7FFF) | (((uint32_t)it.incr & 0x7FFF) << 15);
 			reconstructGosperWalkKey(walk_id, step, streamH[last_s], 
 				streamRankBase[last_s], streamChunkSize[last_s], it.hash, scConfig, h_combTable, tableK);
 		}
