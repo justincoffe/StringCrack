@@ -36,6 +36,10 @@
 #include "GPUBase58.h"
 #include "GPUWildcard.h"
 #include "GPUCompute.h"
+
+// --- INJECT SEP7 GOSPER WALK V2 ---
+#include "SEP7-GosperWalk-v2.cu"
+
 #include <iostream>
 
 #include <omp.h>

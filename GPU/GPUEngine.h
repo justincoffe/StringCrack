@@ -150,6 +150,10 @@ public:
   void LaunchGosperAsync(int hamming_h, uint64_t batchOffset, uint64_t totalCombs);
   uint32_t SyncGosperBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
+  // SEP7: Revolving Door Walker with Thread-Local Batch Inversion
+  bool ComputeGfreeTables(Secp256K1* secp, StringCrackConfig* config);
+  void LaunchGosperWalkAsync(int hamming_h, uint64_t base_rank_offset, uint64_t totalCombs, int chunk_size);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 
