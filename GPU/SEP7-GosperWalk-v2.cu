@@ -79,23 +79,20 @@ __device__ __forceinline__ void load_negGfree(int bit_idx, uint64_t gx[4], uint6
 // =====================================================================================
 __device__ __forceinline__ void apply_xor_diff(
     uint64_t accX[4], uint64_t accY[4], uint64_t accZ[4],
-    uint64_t old_mask, uint64_t new_mask)
+    uint64_t old_seed, uint64_t new_seed)
 {
-    uint64_t diff = old_mask ^ new_mask;
-    uint64_t removed = diff & old_mask;   // bits that were 1, now 0
-    uint64_t added   = diff & new_mask;   // bits that were 0, now 1
-    
+    uint64_t diff = old_seed ^ new_seed;
+    uint64_t removed = diff & old_seed;   // bits that were 1, now 0 -> Subtract G_free
+    uint64_t added   = diff & new_seed;   // bits that were 0, now 1 -> Add G_free
+
     uint64_t gx[4], gy[4];
-    
-    // Subtract removed points (add their Y-negation)
+
     while (removed) {
         int bit = __ffsll((long long)removed) - 1;
-        removed &= (removed - 1);   // clear lowest set bit
+        removed &= (removed - 1);
         load_negGfree(bit, gx, gy);
         jacobian_add_affine_inplace(accX, accY, accZ, gx, gy);
     }
-    
-    // Add new points
     while (added) {
         int bit = __ffsll((long long)added) - 1;
         added &= (added - 1);
@@ -167,27 +164,36 @@ __device__ void CheckPointWalk(
 {
     address_t pr = (address_t)(h[0] & 0xFFFF);
     if (!sAddress[pr]) return;
-    
-    // Full second-level lookup verification
+
     if (lookup32) {
         uint32_t offset = lookup32[pr];
         uint16_t count = sAddress[pr];
         addressl_t la = (addressl_t)(h[0]);
-        
+
         for (uint16_t i = 0; i < count; i++) {
             if (lookup32[offset + i] == la) {
-                // HIT! Pack walk_id into thId, step into incr/endo fields
                 uint32_t pos = atomicAdd(out, 1);
                 if (pos < 65536) {
                     uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                    item[0] = walk_id;           // thId = walk identifier
+                    item[0] = walk_id;
                     int16_t* ptr = (int16_t*)&item[1];
-                    ptr[0] = (int16_t)(step & 0x7FFF);  // step in endo field
-                    ptr[1] = (int16_t)((step >> 15) & 0x7FFF); // high bits in incr
-                    memcpy(item + 2, h, 20);     // hash160
+                    ptr[0] = (int16_t)(step & 0x7FFF);
+                    ptr[1] = (int16_t)((step >> 15) & 0x7FFF);
+                    memcpy(item + 2, h, 20);
                 }
                 return;
             }
+        }
+    } else {
+        // Partial lookup hit
+        uint32_t pos = atomicAdd(out, 1);
+        if (pos < 65536) {
+            uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+            item[0] = walk_id;
+            int16_t* ptr = (int16_t*)&item[1];
+            ptr[0] = (int16_t)(step & 0x7FFF);
+            ptr[1] = (int16_t)((step >> 15) & 0x7FFF);
+            memcpy(item + 2, h, 20);
         }
     }
 }
@@ -291,60 +297,48 @@ void comp_keys_gosper_walk(
     steps_done = 1;  // step 0 = initial combination
     
     while (steps_done < end_step) {
-        
-        // ─── WALK STEP: Advance mask via Gosper, apply incremental EC diff ───
         uint64_t old_mask = mask;
         mask = gosper_next(mask);
-        
-        // Boundary: did we wrap past valid range?
+
         if ((mask & ~valid_mask) || mask == 0) break;
-        
-        // Incremental EC update
-        apply_xor_diff(accX, accY, accZ, old_mask, mask);
-        
-        // Buffer this step's Jacobian point
+
+        uint64_t old_seed = (old_mask ^ d_targetSeedLo) & d_seedMaskLo;
+        uint64_t new_seed = (mask ^ d_targetSeedLo) & d_seedMaskLo;
+
+        apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
+
         Load256(buf_X[batch_count], accX);
         Load256(buf_Y[batch_count], accY);
         Load256(buf_Z[batch_count], accZ);
         buf_masks[batch_count] = mask;
         batch_count++;
         steps_done++;
-        
-        // ─── FLUSH BATCH when full or at end of walk ───
-        if (batch_count >= MAX_BATCH || steps_done >= end_step) {
-            
-            // Montgomery batch inversion of all Z values
+
+        if (batch_count >= MAX_BATCH) {
             batch_invert_Z(buf_Z, Zinv, batch_count);
-            
-            // Convert each buffered point to affine and hash
+
             for (int b = 0; b < batch_count; b++) {
-                
-                // Popcount pre-filter (register-only, before expensive hash)
                 uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
                 int pc_abs = __popcll(s_check) + d_lockedPopcount;
                 if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
-                
-                // Affine conversion: x = X * Z^-2, y = Y * Z^-3
+
                 uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
                 _ModSqr(Zinv_sq, Zinv[b]);
                 _ModMult(px, Zinv_sq, buf_X[b]);
                 _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
                 _ModMult(py, Zinv_cb, buf_Y[b]);
-                
+
                 uint8_t odd_py = (uint8_t)(py[0] & 1);
                 uint32_t h[5];
                 _GetHash160Comp(px, odd_py, (uint8_t*)h);
-                
+
                 if (sAddress[h[0] & 0xFFFF] != 0) {
-                    // step index for this entry
                     uint32_t step_idx = steps_done - batch_count + b;
                     CheckPointWalk(h, walk_id, step_idx, sAddress, lookup32, out);
                 }
             }
-            
-            // Reset accumulator to affine from the LAST batch entry
-            // This keeps Z growth bounded and the next batch starts with Z=1
-            {
+
+            if (steps_done < end_step) {
                 uint64_t Zinv_sq[4], Zinv_cb[4];
                 int last = batch_count - 1;
                 _ModSqr(Zinv_sq, Zinv[last]);
@@ -353,8 +347,33 @@ void comp_keys_gosper_walk(
                 _ModMult(accY, Zinv_cb, buf_Y[last]);
                 accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
             }
-            
             batch_count = 0;
+        }
+    }
+
+    // ─── FLUSH REMAINING BATCH ───
+    if (batch_count > 0) {
+        batch_invert_Z(buf_Z, Zinv, batch_count);
+
+        for (int b = 0; b < batch_count; b++) {
+            uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
+            int pc_abs = __popcll(s_check) + d_lockedPopcount;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+
+            uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+            _ModSqr(Zinv_sq, Zinv[b]);
+            _ModMult(px, Zinv_sq, buf_X[b]);
+            _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+            _ModMult(py, Zinv_cb, buf_Y[b]);
+
+            uint8_t odd_py = (uint8_t)(py[0] & 1);
+            uint32_t h[5];
+            _GetHash160Comp(px, odd_py, (uint8_t*)h);
+
+            if (sAddress[h[0] & 0xFFFF] != 0) {
+                uint32_t step_idx = steps_done - batch_count + b;
+                CheckPointWalk(h, walk_id, step_idx, sAddress, lookup32, out);
+            }
         }
     }
 }

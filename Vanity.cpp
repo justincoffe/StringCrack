@@ -1527,9 +1527,12 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 
 		// Compute chunk_size for SEP7: steps per walk
 		uint64_t remaining = sliceEnd - offset;
-		uint64_t batchSize = (remaining < (uint64_t)numThreadsGPU)
-		                     ? remaining : (uint64_t)numThreadsGPU;
-		int chunk_size = (batchSize > 0) ? (int)(batchSize / numThreadsGPU) : 0;
+		uint64_t desired_chunk = 1024; // Force the GPU to do real work and amortize setup
+		uint64_t batchSize = (uint64_t)numThreadsGPU * desired_chunk;
+		if (batchSize > remaining) {
+			batchSize = remaining;
+		}
+		int chunk_size = (batchSize + numThreadsGPU - 1) / numThreadsGPU; // ceil division
 		if (chunk_size == 0 && batchSize > 0) chunk_size = 1;
 
 		streamChunkSize[s] = chunk_size;
@@ -1545,8 +1548,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 				ITEM it = found[fi];
 				// SEP7: walk_id is in thId, step is packed in incr/endo fields
 				uint32_t walk_id = it.thId;
-				int16_t* ptr = (int16_t*)&it.thId;
-				uint32_t step = ((uint32_t)ptr[0] & 0x7FFF) | (((uint32_t)ptr[1] & 0x7FFF) << 15);
+				uint32_t step = ((uint32_t)it.incr & 0x7FFF) | (((uint32_t)it.endo & 0x7FFF) << 15);
 				reconstructGosperWalkKey(walk_id, step, streamH[prev_s], 
 					streamRankBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK);
 			}
@@ -1591,8 +1593,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 			ITEM it = found[fi];
 			// SEP7: walk_id is in thId, step is packed in incr/endo fields
 			uint32_t walk_id = it.thId;
-			int16_t* ptr = (int16_t*)&it.thId;
-			uint32_t step = ((uint32_t)ptr[0] & 0x7FFF) | (((uint32_t)ptr[1] & 0x7FFF) << 15);
+			uint32_t step = ((uint32_t)it.incr & 0x7FFF) | (((uint32_t)it.endo & 0x7FFF) << 15);
 			reconstructGosperWalkKey(walk_id, step, streamH[last_s], 
 				streamRankBase[last_s], streamChunkSize[last_s], it.hash, scConfig, h_combTable, tableK);
 		}
