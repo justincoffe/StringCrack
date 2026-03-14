@@ -37,9 +37,6 @@
 #include "GPUWildcard.h"
 #include "GPUCompute.h"
 
-// --- INJECT SEP7 GOSPER WALK V2 ---
-#include "SEP7-GosperWalk-v2.cu"
-
 #include <iostream>
 
 #include <omp.h>
@@ -828,6 +825,9 @@ __device__ __constant__ bool     d_useSEP;
 __device__ __constant__ int      d_sepMin;
 __device__ __constant__ int      d_sepMax;
 
+// --- INJECT SEP7 GOSPER WALK V2 ---
+#include "SEP7-GosperWalk-v2.cu"
+
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
 __device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, uint64_t key[4]) {
@@ -1445,6 +1445,7 @@ void GPUEngine::PrecomputeStringCrackMasks(StringCrackConfig *config) {
     // SEP Logic: Map the center string to targetSeedLo/Hi
     config->targetSeedLo = 0;
     config->targetSeedHi = 0;
+    config->seedMaskLo = (config->numFreeBits <= 64) ? ((1ULL << config->numFreeBits) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
     
     if (config->useSEP) {
         int len = strlen(config->centerString);
@@ -1514,6 +1515,8 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     if (err != cudaSuccess) { printf("GPUEngine: d_targetSeedLo: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_targetSeedHi, &config->targetSeedHi, sizeof(uint64_t));
     if (err != cudaSuccess) { printf("GPUEngine: d_targetSeedHi: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_seedMaskLo, &config->seedMaskLo, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("GPUEngine: d_seedMaskLo: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_useSEP, &config->useSEP, sizeof(bool));
     if (err != cudaSuccess) { printf("GPUEngine: d_useSEP: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_sepMin, &config->sepMin, sizeof(int));
