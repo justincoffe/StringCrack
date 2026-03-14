@@ -825,9 +825,6 @@ __device__ __constant__ bool     d_useSEP;
 __device__ __constant__ int      d_sepMin;
 __device__ __constant__ int      d_sepMax;
 
-// --- INJECT SEP7 GOSPER WALK V2 ---
-#include "SEP7-GosperWalk-v2.cu"
-
 // expand_bits: Map continuous seed into sparse 256-bit key via Bit Injection
 // Now supports 128-bit seed (seed_lo + seed_hi)
 __device__ __forceinline__ void expand_bits(uint64_t seed_lo, uint64_t seed_hi, uint64_t key[4]) {
@@ -1274,6 +1271,9 @@ __device__ __forceinline__ void unrank_combination(
         }
     }
 }
+
+// --- INJECT SEP7 GOSPER WALK V2 ---
+#include "SEP7-GosperWalk-v2.cu"
 
 // =====================================================================================
 // SEP4: GPU-native Gosper kernel — combinatorial unranking in registers
