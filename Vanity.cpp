@@ -1524,7 +1524,6 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 		int s = g.currentStep % 2;
 		streamH[s]        = h;
 		streamRankBase[s] = offset;  // absolute rank of thread 0 in this batch
-		streamChunkSize[s] = chunk_size;
 
 		// Compute chunk_size for SEP7: steps per walk
 		uint64_t remaining = sliceEnd - offset;
@@ -1532,6 +1531,8 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 		                     ? remaining : (uint64_t)numThreadsGPU;
 		int chunk_size = (batchSize > 0) ? (int)(batchSize / numThreadsGPU) : 0;
 		if (chunk_size == 0 && batchSize > 0) chunk_size = 1;
+
+		streamChunkSize[s] = chunk_size;
 
 		// Launch — SEP7 Gosper Walk with batched steps
 		g.LaunchGosperWalkAsync(h, offset, layerCombs, chunk_size);
