@@ -162,7 +162,7 @@ public:
   // SEP7: Revolving Door EC Walker
   bool ComputeDTable(Secp256K1* secp, StringCrackConfig* config);
   void LaunchRevDoorAsync(int hamming_h, uint64_t base_pos,
-                          uint64_t totalCombs, int chunk_size);
+                          uint64_t totalCombs, int chunk_size, int numWalks);
   uint32_t SyncRevDoorBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
   bool Check(Secp256K1 *secp);

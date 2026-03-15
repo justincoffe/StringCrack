@@ -774,12 +774,13 @@ fail:
 // =====================================================================================
 
 void GPUEngine::LaunchRevDoorAsync(int hamming_h, uint64_t base_pos,
-                                    uint64_t totalCombs, int chunk_size) {
+                                    uint64_t totalCombs, int chunk_size, int numWalks) {
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
 
     int threadsPerBlock = 32;
-    int numBlocks = nbThread / threadsPerBlock;
+    // THE FIX: Use numWalks instead of nbThread
+    int numBlocks = (numWalks + threadsPerBlock - 1) / threadsPerBlock;
 
     comp_keys_revdoor<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],

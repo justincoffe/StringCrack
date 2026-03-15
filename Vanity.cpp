@@ -1680,10 +1680,15 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
         }
     }
     
-    // Grid sizing: numWalks = total GPU threads = nbThread
-    int numWalks = numThreadsGPU;
+    // Grid sizing: compute numWalks from GPU SM count
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, ph->gpuId);
+    int smCount = deviceProp.multiProcessorCount;
     
-    // Chunk size: revolving door steps per walk per launch.
+    int warpsPerSM = 14;
+    int numWalks = smCount * warpsPerSM * 32; // Forces exactly 37,632 walks!
+    
+    // Target ~100ms per kernel launch for smooth stats updates
     int targetCandidates = 80000000;
     int chunk_size = targetCandidates / numWalks;
     if (chunk_size < 64) chunk_size = 64;
@@ -1754,7 +1759,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             streamChunkSize[s] = this_chunk;
             
             // LAUNCH: SEP7 Revolving Door Walker
-            g.LaunchRevDoorAsync(h, pos_offset, layerCombs, this_chunk);
+            g.LaunchRevDoorAsync(h, pos_offset, layerCombs, this_chunk, numWalks);
             
             // PROCESS previous batch while GPU works
             if (!firstBatch) {
