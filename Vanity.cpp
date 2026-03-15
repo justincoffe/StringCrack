@@ -1680,18 +1680,10 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
         }
     }
     
-    // ─────────────────────────────────────────────────────────────
-    // SEP7: Compute walk-appropriate grid size (Ported from Gosper)
-    // ─────────────────────────────────────────────────────────────
-    cudaDeviceProp deviceProp;
-    cudaGetDeviceProperties(&deviceProp, ph->gpuId);
-    int smCount = deviceProp.multiProcessorCount;
+    // Grid sizing: numWalks = total GPU threads = nbThread
+    int numWalks = numThreadsGPU;
     
-    // Walk kernel occupancy ceiling from launch_bounds(32, 14)
-    int warpsPerSM = 14;
-    int numWalks = smCount * warpsPerSM * 32;
-    
-    // Target ~100ms per kernel launch for smooth stats updates
+    // Chunk size: revolving door steps per walk per launch.
     int targetCandidates = 80000000;
     int chunk_size = targetCandidates / numWalks;
     if (chunk_size < 64) chunk_size = 64;
