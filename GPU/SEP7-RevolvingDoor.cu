@@ -225,6 +225,72 @@ __device__ void revdoor_unrank(
 }
 
 // =====================================================================================
+// Register-Packed Unranking (bit-packed state for zero array access)
+// =====================================================================================
+__device__ void revdoor_unrank_reg(
+    int N, int K, uint64_t pos,
+    int c[], uint64_t &p0, uint64_t &p1, uint64_t &neg_bits,
+    int *sp, int *out_curr_n, int *out_curr_k)
+{
+    for (int i = 0; i < K; i++) c[i] = i;
+    c[K] = N;
+
+    int n = N, k = K;
+    int is_neg = 0;
+    *sp = -1;
+    p0 = 0; p1 = 0; neg_bits = 0;
+
+    while (k > 0 && k < n) {
+        (*sp)++;
+        if (!is_neg) {
+            uint64_t boundary = rd_comb(n - 1, k);
+            if (pos < boundary) {
+                n--;
+            } else {
+                p1 |= (1ULL << *sp);
+                pos -= boundary;
+                if (k == 1) {
+                    c[0] = n - 1; n--; k = 0; is_neg = 1;
+                } else {
+                    for (int i = 0; i <= k - 3; i++) c[i] = i;
+                    c[k - 2] = n - 2; c[k - 1] = n - 1;
+                    n--; k--; is_neg = 1;
+                }
+            }
+        } else {
+            uint64_t boundary = rd_comb(n - 1, k - 1);
+            if (pos < boundary) {
+                neg_bits |= (1ULL << *sp);
+                for (int i = 0; i <= k - 2; i++) c[i] = i;
+                n--; k--; is_neg = 0;
+            } else {
+                p1 |= (1ULL << *sp);
+                neg_bits |= (1ULL << *sp);
+                pos -= boundary;
+                if (k == 1) {
+                    c[0] = n - 2; n--;
+                } else {
+                    for (int i = 0; i <= k - 2; i++) c[i] = i;
+                    c[k - 1] = n - 2; n--;
+                }
+            }
+        }
+    }
+
+    if (k == n) {
+        for (int i = 0; i < k; i++) c[i] = i;
+    }
+
+    (*sp)++;
+    p0 |= (1ULL << *sp);
+    p1 |= (1ULL << *sp);
+    if (is_neg) neg_bits |= (1ULL << *sp);
+
+    *out_curr_n = n;
+    *out_curr_k = k;
+}
+
+// =====================================================================================
 // revdoor_step: Advance the revolving door by one step.
 //
 // Returns true if a new combination was reached.
@@ -341,6 +407,104 @@ __device__ bool revdoor_step(
 }
 
 // =====================================================================================
+// Register-Packed Step Engine (zero array access)
+// =====================================================================================
+__device__ bool revdoor_step_reg(
+    int c[], uint64_t &p0, uint64_t &p1, uint64_t &neg_bits,
+    int *sp_ptr, int *curr_n_ptr, int *curr_k_ptr,
+    int *removed, int *added)
+{
+    int sp = *sp_ptr;
+    int curr_n = *curr_n_ptr;
+    int curr_k = *curr_k_ptr;
+
+    while (sp >= 0) {
+        if (curr_k == 0 || curr_k == curr_n) {
+            sp--;
+            if (sp >= 0) {
+                curr_n++;
+                int p_parent = ((p0 >> sp) & 1) | (((p1 >> sp) & 1) << 1);
+                int neg_parent = (neg_bits >> sp) & 1;
+                
+                if (p_parent == 0 && neg_parent == 1) curr_k++;
+                else if (p_parent == 2 && neg_parent == 0) curr_k++;
+
+                p_parent++;
+                p0 = (p0 & ~(1ULL << sp)) | ((uint64_t)(p_parent & 1) << sp);
+                p1 = (p1 & ~(1ULL << sp)) | ((uint64_t)((p_parent >> 1) & 1) << sp);
+            }
+            continue;
+        }
+
+        int p = ((p0 >> sp) & 1) | (((p1 >> sp) & 1) << 1);
+        int neg = (neg_bits >> sp) & 1;
+
+        if (p == 0) {
+            int child_sp = sp + 1;
+            if (!neg) {
+                curr_n--;
+            } else {
+                curr_n--; curr_k--;
+            }
+            sp = child_sp;
+        }
+        else if (p == 1) {
+            if (!neg) {
+                if (curr_k == 1) {
+                    *removed = c[0]; c[0] = curr_n - 1; *added = c[0];
+                } else {
+                    *removed = c[curr_k - 2];
+                    c[curr_k - 2] = c[curr_k - 1];
+                    c[curr_k - 1] = curr_n - 1;
+                    *added = curr_n - 1;
+                }
+            } else {
+                if (curr_k == 1) {
+                    *removed = c[0]; c[0] = curr_n - 2; *added = c[0];
+                } else {
+                    *removed = c[curr_k - 1];
+                    *added = curr_k - 2;
+                    c[curr_k - 1] = c[curr_k - 2];
+                    c[curr_k - 2] = curr_k - 2;
+                }
+            }
+            p0 &= ~(1ULL << sp); p1 |= (1ULL << sp);
+            *sp_ptr = sp; *curr_n_ptr = curr_n; *curr_k_ptr = curr_k;
+            return true;
+        }
+        else if (p == 2) {
+            int child_sp = sp + 1;
+            if (!neg) {
+                curr_n--; curr_k--;
+                neg_bits |= (1ULL << child_sp);
+            } else {
+                curr_n--;
+                neg_bits |= (1ULL << child_sp);
+            }
+            sp = child_sp;
+        }
+        else if (p == 3) {
+            sp--;
+            if (sp >= 0) {
+                curr_n++;
+                int p_parent = ((p0 >> sp) & 1) | (((p1 >> sp) & 1) << 1);
+                int neg_parent = (neg_bits >> sp) & 1;
+                
+                if (p_parent == 0 && neg_parent == 1) curr_k++;
+                else if (p_parent == 2 && neg_parent == 0) curr_k++;
+
+                p_parent++;
+                p0 = (p0 & ~(1ULL << sp)) | ((uint64_t)(p_parent & 1) << sp);
+                p1 = (p1 & ~(1ULL << sp)) | ((uint64_t)((p_parent >> 1) & 1) << sp);
+            }
+        }
+    }
+    
+    *sp_ptr = sp; *curr_n_ptr = curr_n; *curr_k_ptr = curr_k;
+    return false;
+}
+
+// =====================================================================================
 // Thread-local Montgomery batch inversion (identical to SEP7-GW-v2)
 // =====================================================================================
 __device__ void rd_batch_invert_Z(
@@ -443,10 +607,10 @@ void comp_keys_revdoor(
     // ═══════ REVOLVING DOOR INITIALIZATION via O(n) unranking ═══════
 
     int c[RD_MAX_K + 1];
-    RDFrame stk[RD_MAX_DEPTH];
-    int sp;
+    uint64_t p0, p1, neg_bits;
+    int curr_n, curr_k, sp;
 
-    revdoor_unrank(n, hamming_h, start_pos, c, stk, &sp);
+    revdoor_unrank_reg(n, hamming_h, start_pos, c, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
 
     // Build bitmask from the unranked combination
     uint64_t mask = combo_to_mask(c, hamming_h);
@@ -520,7 +684,7 @@ void comp_keys_revdoor(
 
         // ─── REVOLVING DOOR STEP: exactly one swap ───
         int removed_idx, added_idx;
-        if (!revdoor_step(c, stk, &sp, hamming_h, &removed_idx, &added_idx)) {
+        if (!revdoor_step_reg(c, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
             break; // exhausted this walk's portion of C(n, h)
         }
 
