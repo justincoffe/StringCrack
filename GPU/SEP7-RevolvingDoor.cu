@@ -57,10 +57,6 @@
 __device__ uint64_t* d_DTableX;   // [n * n * 4]  flattened
 __device__ uint64_t* d_DTableY;   // [n * n * 4]  flattened
 
-// G_free table for initial point construction (extern from GPUEngine.cu)
-extern __device__ uint64_t* d_GfreeX;
-extern __device__ uint64_t* d_GfreeY;
-
 // Device-side C(n,k) table for revolving-door unranking.
 // Layout: row-major, d_rdCombTable[i * d_rdCombK + j] = C(i, j)
 // Dimensions: (n+1) × (K_max+1), uploaded by host.
