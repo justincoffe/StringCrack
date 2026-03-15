@@ -241,6 +241,7 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
 
     NB_TRHEAD_PER_GROUP = 256;                                          //////////////////  GRID SIZE ////////////////
     int nbThreadGroup = deviceProp.multiProcessorCount * smMultiplier;
+    this->smCount = deviceProp.multiProcessorCount;
 
     // --- COMMENT THIS ENTIRE BLOCK OUT ---
     /*

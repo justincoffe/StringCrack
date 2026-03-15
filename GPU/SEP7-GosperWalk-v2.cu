@@ -446,12 +446,14 @@ fail:
 // =====================================================================================
 
 void GPUEngine::LaunchGosperWalkAsync(int hamming_h, uint64_t base_rank_offset,
-                                       uint64_t totalCombs, int chunk_size) {
+                                       uint64_t totalCombs, int chunk_size, int numWalks) {
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
     
+    // SEP7: Grid sized for walks, NOT for stateless kernel
+    // numWalks is computed by the host dispatch loop based on SM count
     int threadsPerBlock = 32;  // 1 warp = 1 block
-    int numBlocks = nbThread / threadsPerBlock;
+    int numBlocks = (numWalks + threadsPerBlock - 1) / threadsPerBlock;
     
     comp_keys_gosper_walk<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],

@@ -153,7 +153,8 @@ public:
 
   // SEP7: Revolving Door Walker with Thread-Local Batch Inversion
   bool ComputeGfreeTables(Secp256K1* secp, StringCrackConfig* config);
-  void LaunchGosperWalkAsync(int hamming_h, uint64_t base_rank_offset, uint64_t totalCombs, int chunk_size);
+  void LaunchGosperWalkAsync(int hamming_h, uint64_t base_rank_offset,
+                             uint64_t totalCombs, int chunk_size, int numWalks);
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;
@@ -171,6 +172,8 @@ private:
   static void ComputeIndex(std::vector<int> &s, int depth, int n);
   static void Browse(FILE *f,int depth, int max, int s);
   bool CheckHash(uint8_t *h, std::vector<ITEM>& found, int tid, int incr, int endo, int *ok);
+
+  int smCount;   // SM count, stored from constructor for SEP7 grid sizing
 
   int nbThread;
   uint64_t *sub;

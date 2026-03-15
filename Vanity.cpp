@@ -1356,264 +1356,248 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 
 
 // =====================================================================================
-// SEP5: FindKeyGPU_Radius — GPU-native Gosper, multi-GPU sliced
-// Each GPU owns an independent rank slice of each Hamming layer.
-// GPU i of N covers ranks [i*sliceSize, (i+1)*sliceSize) per layer.
-// Key reconstruction: rank = sliceStart + batchOffset + tid (globally unique).
 // =====================================================================================
 void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
-	double t0;
-	double ttot;
-	uint64_t totalKeysProcessed = 0;
-	
-	int thId        = ph->threadId;
-	int sliceId     = ph->gpuSliceId;     // This GPU's index (0..N-1)
-	int sliceCount  = ph->gpuSliceCount;  // Total GPUs (N)
+    double t0;
+    double ttot;
+    uint64_t totalKeysProcessed = 0;
+    
+    int thId        = ph->threadId;
+    int sliceId     = ph->gpuSliceId;
+    int sliceCount  = ph->gpuSliceCount;
 
-	GPUEngine g(ph->gpuId, maxFound, ph->smMultiplier);
-	int numThreadsGPU = g.GetNbThread();
-	vector<ITEM> found;
-	
-	fprintf(stdout, "[SEP5] GPU[%d] device: %s\n", sliceId, g.deviceName.c_str());
-	fflush(stdout);
-	
-	counters[thId] = 0;
-	
-	g.SetSearchMode(searchMode);
-	g.SetSearchType(searchType);
-	if (onlyFull) {
-		g.SetAddress(usedAddressL, nbAddress);
-	} else {
-		g.SetAddress(usedAddress);
-	}
-	
-	// Upload StringCrack config + C(n,k) table to GPU
-	if (!g.SetStringCrackConfig(secp, scConfig)) {
-		printf("[SEP5] GPU[%d] Failed to upload config!\n", sliceId);
-		ph->isRunning = false;
-		return;
-	}
-	
-	// --- SEP7: Initialize and Upload G_free Differential Tables ---
-	if (!g.ComputeGfreeTables(secp, scConfig)) {
-		printf("[ERROR] Failed to allocate G_free tables for GPU %d\n", sliceId);
-		ph->isRunning = false;
-		return;
-	}
-	
-	int n          = scConfig->numFreeBits;
-	int minRadius  = (scConfig->sepMin > 0) ? scConfig->sepMin : 0; // -radiusrange lower bound
-	int maxRadius  = scConfig->radius;
-	uint64_t targetLo = scConfig->targetSeedLo;
-	uint64_t targetHi = scConfig->targetSeedHi;
-	
-	if (n > 128) {
-		printf("[SEP5] GPU[%d] ERROR: Radius mode supports up to 128 free bits, got %d\n", sliceId, n);
-		ph->isRunning = false;
-		return;
-	}
-	if (maxRadius > n) maxRadius = n;
-	
-	// -----------------------------------------------------------------------
-	// Build host-side C(n,k) table (Pascal's triangle, saturating uint64_t).
-	// Used for:
-	//   1. Computing slice boundaries (layerCombs, sliceStart, sliceEnd)
-	//   2. Key reconstruction on hit (cpu_unrank_combination)
-	// -----------------------------------------------------------------------
-	const int tableN = 129, tableK = 129;
-	uint64_t* h_combTable = (uint64_t*)calloc((size_t)tableN * tableK, sizeof(uint64_t));
-	for (int i = 0; i < tableN; i++) {
-		h_combTable[i * tableK + 0] = 1;
-		for (int j = 1; j <= i && j < tableK; j++) {
-			uint64_t a = h_combTable[(i-1)*tableK + (j-1)];
-			uint64_t b = h_combTable[(i-1)*tableK + j];
-			h_combTable[i*tableK + j] = (a > 0xFFFFFFFFFFFFFFFFULL - b)
-			                            ? 0xFFFFFFFFFFFFFFFFULL : a + b;
-		}
-	}
+    GPUEngine g(ph->gpuId, maxFound, ph->smMultiplier);
+    int numThreadsGPU = g.GetNbThread();
+    vector<ITEM> found;
+    
+    fprintf(stdout, "[SEP7] GPU[%d] device: %s\n", sliceId, g.deviceName.c_str());
+    fflush(stdout);
+    
+    counters[thId] = 0;
+    
+    g.SetSearchMode(searchMode);
+    g.SetSearchType(searchType);
+    if (onlyFull) {
+        g.SetAddress(usedAddressL, nbAddress);
+    } else {
+        g.SetAddress(usedAddress);
+    }
+    
+    // Upload StringCrack config + C(n,k) table to GPU
+    if (!g.SetStringCrackConfig(secp, scConfig)) {
+        printf("[SEP7] GPU[%d] Failed to upload config!\n", sliceId);
+        ph->isRunning = false;
+        return;
+    }
+    
+    // SEP7: Upload G_free differential tables
+    if (!g.ComputeGfreeTables(secp, scConfig)) {
+        printf("[SEP7] GPU[%d] Failed to compute G_free tables!\n", sliceId);
+        ph->isRunning = false;
+        return;
+    }
+    
+    int n          = scConfig->numFreeBits;
+    int minRadius  = (scConfig->sepMin > 0) ? scConfig->sepMin : 0;
+    int maxRadius  = scConfig->radius;
+    uint64_t targetLo = scConfig->targetSeedLo;
+    uint64_t targetHi = scConfig->targetSeedHi;
+    
+    if (n > 128) {
+        printf("[SEP7] GPU[%d] ERROR: supports up to 128 free bits, got %d\n", sliceId, n);
+        ph->isRunning = false;
+        return;
+    }
+    if (maxRadius > n) maxRadius = n;
+    
+    // ─────────────────────────────────────────────────────────────
+    // SEP7: Compute walk-appropriate grid size
+    //
+    // The walk kernel uses launch_bounds(32, 14) = up to 14 warps/SM.
+    // We query the actual SM count from the device.
+    // numWalks = smCount × warpsPerSM × 32
+    //
+    // This replaces the massive nbThread grid that starved the GPU.
+    // ─────────────────────────────────────────────────────────────
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, ph->gpuId);
+    int smCount = deviceProp.multiProcessorCount;
+    
+    // Walk kernel occupancy ceiling from launch_bounds(32, 14)
+    int warpsPerSM = 14;
+    int numWalks = smCount * warpsPerSM * 32;
+    
+    // Target ~100ms per kernel launch for smooth stats updates
+    // Estimated sustained speed: ~800 MK/s per GPU (conservative)
+    // 100ms × 800M = 80M candidates per launch
+    // chunk_size = 80M / numWalks
+    int targetCandidates = 80000000;
+    int chunk_size_walk = targetCandidates / numWalks;
+    if (chunk_size_walk < 64) chunk_size_walk = 64;
+    if (chunk_size_walk > 65536) chunk_size_walk = 65536;
+    
+    printf("[SEP7] GPU[%d] Walk grid: %d SMs × %d warps × 32 = %d walks, chunk=%d\n",
+           sliceId, smCount, warpsPerSM, numWalks, chunk_size_walk);
+    printf("[SEP7] GPU[%d] Candidates per launch: %llu\n",
+           sliceId, (unsigned long long)numWalks * chunk_size_walk);
+    fflush(stdout);
+    
+    // ─────────────────────────────────────────────────────────────
+    // Build host-side C(n,k) table for key reconstruction on hit
+    // ─────────────────────────────────────────────────────────────
+    const int tableN = 129, tableK = 129;
+    uint64_t* h_combTable = (uint64_t*)calloc((size_t)tableN * tableK, sizeof(uint64_t));
+    for (int i = 0; i < tableN; i++) {
+        h_combTable[i * tableK + 0] = 1;
+        for (int j = 1; j <= i && j < tableK; j++) {
+            uint64_t a = h_combTable[(i-1)*tableK + (j-1)];
+            uint64_t b = h_combTable[(i-1)*tableK + j];
+            h_combTable[i*tableK + j] = (a > 0xFFFFFFFFFFFFFFFFULL - b)
+                                        ? 0xFFFFFFFFFFFFFFFFULL : a + b;
+        }
+    }
 
-	// Seed mask for key reconstruction
-	uint64_t seedMaskLo, seedMaskHi;
-	if      (n <= 0)   { seedMaskLo = 0;                          seedMaskHi = 0; }
-	else if (n <  64)  { seedMaskLo = (1ULL << n) - 1ULL;        seedMaskHi = 0; }
-	else if (n == 64)  { seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;      seedMaskHi = 0; }
-	else if (n <  128) { seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;      seedMaskHi = (1ULL << (n-64)) - 1ULL; }
-	else               { seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;      seedMaskHi = 0xFFFFFFFFFFFFFFFFULL; }
+    ph->hasStarted = true;
+    t0 = Timer::get_tick();
+    bool firstBatch = true;
+    
+    // Double-buffer stream tracking
+    int      streamH[2]         = {0, 0};
+    uint64_t streamRankBase[2]  = {0, 0};
+    int      streamChunkSize[2] = {0, 0};
 
-	// -----------------------------------------------------------------------
-	// Key reconstruction helper — takes global rank, returns private key
-	// -----------------------------------------------------------------------
-	auto reconstructKey = [&](int h_val, uint64_t rank, uint8_t* hash) {
-		uint64_t flip_lo, flip_hi;
-		cpu_unrank_combination(rank, n, h_val, flip_lo, flip_hi, h_combTable, tableK);
-		
-		uint64_t seed_lo = (flip_lo ^ targetLo) & seedMaskLo;
-		uint64_t seed_hi = (flip_hi ^ targetHi) & seedMaskHi;
-		
-		uint64_t keyBits[4] = {
-			scConfig->lockVals[0], scConfig->lockVals[1],
-			scConfig->lockVals[2], scConfig->lockVals[3]
-		};
-		
-		uint64_t sl = seed_lo;
-		for (int fb = 0; fb < 64 && fb < n; fb++) {
-			if (sl & 1ULL) keyBits[scConfig->freeBitPositions[fb] >> 6] |=
-			                 (1ULL << (scConfig->freeBitPositions[fb] & 63));
-			sl >>= 1;
-		}
-		if (n > 64) {
-			uint64_t sh = seed_hi;
-			for (int fb = 64; fb < n && fb < 128; fb++) {
-				if (sh & 1ULL) keyBits[scConfig->freeBitPositions[fb] >> 6] |=
-				                 (1ULL << (scConfig->freeBitPositions[fb] & 63));
-				sh >>= 1;
-			}
-		}
-		
-		Int privkey;
-		privkey.SetInt32(0);
-		privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
-		privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
-		checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
-	};
+    // ─────────────────────────────────────────────────────────────
+    // Main loop: iterate Hamming layers h = minRadius..maxRadius
+    // Each GPU owns a non-overlapping slice of each layer.
+    // ─────────────────────────────────────────────────────────────
+    for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
+        
+        uint64_t layerCombs = h_combTable[n * tableK + h];
+        if (layerCombs == 0) continue;
 
-	ph->hasStarted = true;
-	t0 = Timer::get_tick();
-	bool firstBatch = true;
-	
-	// Track (hamming_h, absolute_rank_base, chunk_size) for each double-buffered stream
-	int      streamH[2]      = {0, 0};
-	uint64_t streamRankBase[2] = {0, 0}; // sliceStart + batchOffset
-	int      streamChunkSize[2] = {0, 0}; // SEP7: steps per walk
+        // Compute this GPU's slice of the layer
+        uint64_t sliceSize  = (layerCombs + (uint64_t)sliceCount - 1) / (uint64_t)sliceCount;
+        uint64_t sliceStart = (uint64_t)sliceId * sliceSize;
+        uint64_t sliceEnd   = sliceStart + sliceSize;
+        if (sliceEnd > layerCombs) sliceEnd = layerCombs;
+        if (sliceStart >= layerCombs) continue;
 
-	// -----------------------------------------------------------------------
-	// Main loop: iterate Hamming layers, walk this GPU's slice
-	// -----------------------------------------------------------------------
-	for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
-		
-		uint64_t layerCombs = h_combTable[n * tableK + h];
-		if (layerCombs == 0) continue;
+        printf("[SEP7] GPU[%d] h=%d: ranks [%llu, %llu) of %llu total\n",
+               sliceId, h,
+               (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
+               (unsigned long long)layerCombs);
+        fflush(stdout);
 
-		// ---- Compute this GPU's slice of the layer ----
-		// sliceSize = ceil(layerCombs / sliceCount)
-		uint64_t sliceSize  = (layerCombs + (uint64_t)sliceCount - 1) / (uint64_t)sliceCount;
-		uint64_t sliceStart = (uint64_t)sliceId * sliceSize;
-		uint64_t sliceEnd   = sliceStart + sliceSize;
-		if (sliceEnd > layerCombs) sliceEnd = layerCombs;
-		if (sliceStart >= layerCombs) continue; // this GPU has nothing to do for this layer
+        uint64_t offset = sliceStart;
+        while (offset < sliceEnd && !endOfSearch) {
+            
+            if (Pause) {
+                Paused = true;
+                t_Paused = Timer::get_tick() - t0 + t_Paused;
+                while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                if (endOfSearch) break;
+                endOfSearch = true;
+                break;
+            }
+            
+            // ─── Compute batch parameters ───
+            uint64_t remaining = sliceEnd - offset;
+            
+            // Each launch covers numWalks × chunk walks
+            // Adjust chunk if near the end of the slice
+            int this_chunk = chunk_size_walk;
+            uint64_t batchCoverage = (uint64_t)numWalks * (uint64_t)this_chunk;
+            
+            if (batchCoverage > remaining) {
+                this_chunk = (int)((remaining + (uint64_t)numWalks - 1) / (uint64_t)numWalks);
+                if (this_chunk < 1) this_chunk = 1;
+                batchCoverage = (uint64_t)numWalks * (uint64_t)this_chunk;
+                if (batchCoverage > remaining) batchCoverage = remaining;
+            }
+            
+            // Save state for double-buffered stream
+            int s = g.currentStep % 2;
+            streamH[s]         = h;
+            streamRankBase[s]  = offset;
+            streamChunkSize[s] = this_chunk;
 
-		printf("[SEP5] GPU[%d] h=%d: ranks [%llu, %llu) of %llu total\n",
-		       sliceId, h,
-		       (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
-		       (unsigned long long)layerCombs);
-		fflush(stdout);
-
-		uint64_t offset = sliceStart; // local batch offset within the layer (absolute rank)
-		while (offset < sliceEnd && !endOfSearch) {
-			
-			if (Pause) {
-				Paused = true;
-				t_Paused = Timer::get_tick() - t0 + t_Paused;
-				while (Pause && !endOfSearch) Timer::SleepMillis(100);
-				if (endOfSearch) break;
-				endOfSearch = true;
-				break;
-			}
-			
-		// Save state for this stream slot
-		int s = g.currentStep % 2;
-		streamH[s]        = h;
-		streamRankBase[s] = offset;  // absolute rank of thread 0 in this batch
-
-		// Compute chunk_size for SEP7: steps per walk
-		uint64_t remaining = sliceEnd - offset;
-		uint64_t desired_chunk = 1024; // Force the GPU to do real work and amortize setup
-		uint64_t batchSize = (uint64_t)numThreadsGPU * desired_chunk;
-		if (batchSize > remaining) {
-			batchSize = remaining;
-		}
-		int chunk_size = (batchSize + numThreadsGPU - 1) / numThreadsGPU; // ceil division
-		if (chunk_size == 0 && batchSize > 0) chunk_size = 1;
-
-		streamChunkSize[s] = chunk_size;
-
-		// Launch — SEP7 Gosper Walk with batched steps
-		g.LaunchGosperWalkAsync(h, offset, layerCombs, chunk_size);
-		
-		// Process previous batch while GPU works
-		if (!firstBatch) {
-			int prev_s = (g.currentStep - 2) % 2;
-			uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
-			for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-				ITEM it = found[fi];
-				// SEP7: walk_id is in thId, step is packed in incr/endo fields
-				uint32_t walk_id = it.thId;
-				uint32_t step = ((uint32_t)it.endo & 0x7FFF) | (((uint32_t)it.incr & 0x7FFF) << 15);
-				reconstructGosperWalkKey(walk_id, step, streamH[prev_s], 
-					streamRankBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK);
-			}
-			found.clear();
-		}
-		firstBatch = false;
-		
-		offset             += batchSize;
-		totalKeysProcessed += batchSize;
-			
-			// Publish this GPU's local count to the global array so getGPUCount() sums correctly
-			counters[thId] = totalKeysProcessed;
-			
-			// Global aggregated stats — only GPU 0 prints to prevent console garbling.
-			// The static throttle variables are safely owned by a single thread (sliceId==0).
-			if (sliceId == 0) {
-				ttot = Timer::get_tick() - t0 + t_Paused;
-				static double   lastStatsTime_r  = 0.0;
-				static uint64_t lastStatsKeys_r  = 0;
-				if (ttot - lastStatsTime_r >= 0.5 || lastStatsTime_r == 0.0) {
-					double   dt         = ttot - lastStatsTime_r;
-					uint64_t globalKeys = getGPUCount(); // sums counters[] of all active GPUs
-					uint64_t dk         = (globalKeys >= lastStatsKeys_r)
-					                      ? globalKeys - lastStatsKeys_r : 0;
-					double spd = (lastStatsTime_r > 0.0 && dt > 0.0)
-					             ? (double)dk / (dt * 1e6) : 0.0;
-					lastStatsTime_r  = ttot;
-					lastStatsKeys_r  = globalKeys;
-					printf("[SEP5] GLOBAL h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
-					       h, spd, (double)globalKeys / 1e9, nbFoundKey);
-					fflush(stdout);
-				}
-			}
-		}
-	}
-	
-	// Drain the final in-flight batch
-	if (!firstBatch) {
-		int last_s = (g.currentStep - 1) % 2;
-		uint32_t nbFound = g.SyncGosperBatch(last_s, found);
-		for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-			ITEM it = found[fi];
-			// SEP7: walk_id is in thId, step is packed in incr/endo fields
-			uint32_t walk_id = it.thId;
-			uint32_t step = ((uint32_t)it.endo & 0x7FFF) | (((uint32_t)it.incr & 0x7FFF) << 15);
-			reconstructGosperWalkKey(walk_id, step, streamH[last_s], 
-				streamRankBase[last_s], streamChunkSize[last_s], it.hash, scConfig, h_combTable, tableK);
-		}
-	}
-	
-	free(h_combTable);
-	
-	ttot = Timer::get_tick() - t0 + t_Paused;
-	double avg_speed = (ttot > 0.0) ? (double)totalKeysProcessed / (ttot * 1e6) : 0.0;
-	printf("\n[SEP5] GPU[%d] slice COMPLETE — %.2f BKeys in %.1fs (%.1f MK/s avg) | Found: %d\n",
-	       sliceId, (double)totalKeysProcessed / 1e9, ttot, avg_speed, nbFoundKey);
-	fflush(stdout);
-	
-	time_t now_t = time(NULL);
-	char* ct = ctime(&now_t);
-	printf("[SEP5] GPU[%d] END time: %s", sliceId, ct);
-	
-	ph->isRunning = false;
-	// Do NOT set endOfSearch = true here — Search() polls isRunning on all GPUs.
-	// Only set it on a hard abort (e.g., error), not on normal completion.
+            // ─── LAUNCH: SEP7 Gosper Walk ───
+            g.LaunchGosperWalkAsync(h, offset, layerCombs, this_chunk, numWalks);
+            
+            // ─── PROCESS previous batch while GPU works ───
+            if (!firstBatch) {
+                int prev_s = (g.currentStep - 2) % 2;
+                uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
+                for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                    ITEM it = found[fi];
+                    uint32_t walk_id = it.thId;
+                    uint32_t step = ((uint32_t)(it.endo & 0x7FFF))
+                                  | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                    reconstructGosperWalkKey(walk_id, step, streamH[prev_s],
+                        streamRankBase[prev_s], streamChunkSize[prev_s],
+                        it.hash, scConfig, h_combTable, tableK);
+                }
+                found.clear();
+            }
+            firstBatch = false;
+            
+            // ─── Advance offset ───
+            offset             += batchCoverage;
+            totalKeysProcessed += batchCoverage;
+            
+            // Publish to global counter array
+            counters[thId] = totalKeysProcessed;
+            
+            // ─── Stats display (GPU 0 only, throttled to ~2Hz) ───
+            if (sliceId == 0) {
+                ttot = Timer::get_tick() - t0 + t_Paused;
+                static double   lastStatsTime  = 0.0;
+                static uint64_t lastStatsKeys  = 0;
+                if (ttot - lastStatsTime >= 0.5 || lastStatsTime == 0.0) {
+                    double   dt         = ttot - lastStatsTime;
+                    uint64_t globalKeys = getGPUCount();
+                    uint64_t dk         = (globalKeys >= lastStatsKeys)
+                                          ? globalKeys - lastStatsKeys : 0;
+                    double spd = (lastStatsTime > 0.0 && dt > 0.0)
+                                 ? (double)dk / (dt * 1e6) : 0.0;
+                    lastStatsTime = ttot;
+                    lastStatsKeys = globalKeys;
+                    printf("[SEP7] GLOBAL h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
+                           h, spd, (double)globalKeys / 1e9, nbFoundKey);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+    
+    // ─── Drain the final in-flight batch ───
+    if (!firstBatch) {
+        int last_s = (g.currentStep - 1) % 2;
+        uint32_t nbFound = g.SyncGosperBatch(last_s, found);
+        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+            ITEM it = found[fi];
+            uint32_t walk_id = it.thId;
+            uint32_t step = ((uint32_t)(it.endo & 0x7FFF))
+                          | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+            reconstructGosperWalkKey(walk_id, step, streamH[last_s],
+                streamRankBase[last_s], streamChunkSize[last_s],
+                it.hash, scConfig, h_combTable, tableK);
+        }
+    }
+    
+    free(h_combTable);
+    
+    ttot = Timer::get_tick() - t0 + t_Paused;
+    double avg_speed = (ttot > 0.0) ? (double)totalKeysProcessed / (ttot * 1e6) : 0.0;
+    printf("\n[SEP7] GPU[%d] COMPLETE — %.2f BKeys in %.1fs (%.1f MK/s avg) | Found: %d\n",
+           sliceId, (double)totalKeysProcessed / 1e9, ttot, avg_speed, nbFoundKey);
+    fflush(stdout);
+    
+    time_t now_t = time(NULL);
+    char* ct = ctime(&now_t);
+    printf("[SEP7] GPU[%d] END time: %s", sliceId, ct);
+    
+    ph->isRunning = false;
 }
 
 // Custom stats display for StringCrack mode
