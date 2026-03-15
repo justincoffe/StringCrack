@@ -36,8 +36,6 @@
 #include "GPUBase58.h"
 #include "GPUWildcard.h"
 #include "GPUCompute.h"
-#include "SEP7-GosperWalk-v2.cu"
-#include "SEP7-RevolvingDoor.cu"
 
 #include <iostream>
 
@@ -1274,6 +1272,10 @@ __device__ __forceinline__ void unrank_combination(
         }
     }
 }
+
+// --- INJECT SEP7 KERNELS (after device definitions) ---
+#include "SEP7-GosperWalk-v2.cu"
+#include "SEP7-RevolvingDoor.cu"
 
 // =====================================================================================
 // SEP4: GPU-native Gosper kernel — combinatorial unranking in registers
