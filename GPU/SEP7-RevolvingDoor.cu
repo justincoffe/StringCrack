@@ -828,15 +828,28 @@ bool GPUEngine::ComputeDTable(Secp256K1* secp, StringCrackConfig* config) {
         Gfree[i] = secp->ComputePublicKey(&key);
     }
 
-    // D[i][j] = G_free[j] + (-G_free[i])
+    // D[i][j] = P_j + P_i with SEP center-aware sign resolution
+    // This ensures the D-table entries correctly compute the EC delta
+    // when transitioning between combinations with the SEP center string
     #pragma omp parallel for schedule(dynamic) if(n > 16)
     for (int i = 0; i < n; i++) {
-        Point negGi = Gfree[i];
-        negGi.y.ModNeg();
-
         for (int j = 0; j < n; j++) {
             if (i == j) continue;
-            Point D = secp->AddDirect(Gfree[j], negGi);
+            
+            // 1. Check if the bits are 1 in the SEP Center String
+            bool T_i = (config->targetSeedLo & (1ULL << i)) != 0;
+            bool T_j = (config->targetSeedLo & (1ULL << j)) != 0;
+            
+            // 2. Resolve Added Bit (j)
+            Point P_j = Gfree[j]; 
+            if (T_j) P_j.y.ModNeg(); // If center is 1, adding to mask REMOVES from seed
+            
+            // 3. Resolve Removed Bit (i)
+            Point P_i = Gfree[i];
+            if (!T_i) P_i.y.ModNeg(); // If center is 0, removing from mask REMOVES from seed
+            
+            // 4. Bake the exact Delta into the D-Table
+            Point D = secp->AddDirect(P_j, P_i); 
             int idx = (i * n + j) * 4;
             memcpy(&h_DX[idx], D.x.bits64, 32);
             memcpy(&h_DY[idx], D.y.bits64, 32);
