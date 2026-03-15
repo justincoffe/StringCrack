@@ -107,6 +107,9 @@ typedef struct {
     // SEP3: Radius mode — CPU Gosper + GPU batch hybrid
     bool useRadius;
     int radius;                     // Max Hamming distance from center
+    
+    // SEP7: Revolving Door EC Walker
+    bool useRevDoor;
 } StringCrackConfig;
 
 // Second level lookup
@@ -155,6 +158,12 @@ public:
   bool ComputeGfreeTables(Secp256K1* secp, StringCrackConfig* config);
   void LaunchGosperWalkAsync(int hamming_h, uint64_t base_rank_offset,
                              uint64_t totalCombs, int chunk_size, int numWalks);
+
+  // SEP7: Revolving Door EC Walker
+  bool ComputeDTable(Secp256K1* secp, StringCrackConfig* config);
+  void LaunchRevDoorAsync(int hamming_h, uint64_t base_pos,
+                          uint64_t totalCombs, int chunk_size);
+  uint32_t SyncRevDoorBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;

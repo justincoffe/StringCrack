@@ -181,6 +181,13 @@ public:
 
 	// SEP3: Radius mode — Gosper generator state
 	void FindKeyGPU_Radius(TH_PARAM* p);
+
+	// SEP7: Revolving Door EC Walker
+	void FindKeyGPU_RevDoor(TH_PARAM* p);
+	void reconstructRevDoorKey(uint32_t walk_id, uint32_t step_idx,
+		int hamming_h, uint64_t base_pos, int chunk_size,
+		uint8_t* hash, StringCrackConfig* config,
+		const uint64_t* h_combTable, int tableK);
 };
 
 #endif // VANITYH

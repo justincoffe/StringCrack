@@ -620,6 +620,7 @@ int main(int argc, char* argv[]) {
 	scConfig.popcountMax = 256;
 	scConfig.useRadius = false;
 	scConfig.radius = 0;
+	scConfig.useRevDoor = false;
 	string lockStr = "";
 	
 	// bitcrack mod
@@ -698,6 +699,13 @@ int main(int argc, char* argv[]) {
 			if (scConfig.sepMin < 0 || scConfig.radius < scConfig.sepMin) {
 				fprintf(stderr, "[ERROR] -radiusrange: min must be >= 0 and <= max\n"); exit(-1);
 			}
+			scConfig.useRadius = true;
+			scConfig.useSEP = true;
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-revdoor") == 0) {
+			scConfig.useRevDoor = true;
 			scConfig.useRadius = true;
 			scConfig.useSEP = true;
 			scConfig.enabled = true;
