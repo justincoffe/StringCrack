@@ -446,6 +446,10 @@ __device__ bool revdoor_step_reg(
             } else {
                 curr_n--; curr_k--;
             }
+            // ─── THE FIX: CLEAR BITS FOR THE NEW CHILD FRAME ───
+            p0 &= ~(1ULL << child_sp); 
+            p1 &= ~(1ULL << child_sp); 
+            neg_bits &= ~(1ULL << child_sp);
             sp = child_sp;
         }
         else if (p == 1) {
@@ -476,11 +480,13 @@ __device__ bool revdoor_step_reg(
             int child_sp = sp + 1;
             if (!neg) {
                 curr_n--; curr_k--;
-                neg_bits |= (1ULL << child_sp);
             } else {
                 curr_n--;
-                neg_bits |= (1ULL << child_sp);
             }
+            // ─── THE FIX: CLEAR PHASE, SET NEG FOR CHILD FRAME ───
+            p0 &= ~(1ULL << child_sp); 
+            p1 &= ~(1ULL << child_sp); 
+            neg_bits |= (1ULL << child_sp);
             sp = child_sp;
         }
         else if (p == 3) {
