@@ -404,13 +404,20 @@ bool GPUEngine::ComputeGfreeTables(Secp256K1* secp, StringCrackConfig* config) {
         key.bits64[pos >> 6] |= (1ULL << (pos & 63));
         Point P = secp->ComputePublicKey(&key);
         
+        // SEP: If the center string has a 1 at this bit, negate the point
+        // because the GPU should subtract it (1⊕1=0 means removing a 1 from seed)
+        if (config->targetSeedLo & (1ULL << i)) {
+            P.y.ModNeg();
+        }
+        
         int idx = i * 4;
         memcpy(&h_GfreeX[idx],    P.x.bits64, 32);
-        memcpy(&h_GfreeY[idx],    P.y.bits64, 32);
+        memcpy(&h_GfreeY[idx],    P.y.bits32, 32);
         
         // Negate Y for subtraction
-        P.y.ModNeg();
-        memcpy(&h_negGfreeY[idx], P.y.bits64, 32);
+        Point P_neg = P;
+        P_neg.y.ModNeg();
+        memcpy(&h_negGfreeY[idx], P_neg.y.bits32, 32);
     }
     
     uint64_t *dd_X, *dd_Y, *dd_nY;

@@ -1505,9 +1505,38 @@ bool GPUEngine::SetStringCrackConfig(Secp256K1* secp, const StringCrackConfig *c
     if (err != cudaSuccess) { printf("GPUEngine: d_popcountMax: %s\n", cudaGetErrorString(err)); return false; }
     
     // Upload precomputed base point to GPU (window tables now use global memory via __ldg)
-    err = cudaMemcpyToSymbol(d_basePointX, config->basePointX, sizeof(uint64_t) * 4);
+    // SEP: Pre-bake the Center string 1-bits into the Base Point so that
+    // a mask of all 0s correctly maps to the Center string
+    uint64_t basePointX[4], basePointY[4];
+    memcpy(basePointX, config->basePointX, 32);
+    memcpy(basePointY, config->basePointY, 32);
+    
+    if (config->useSEP && config->numFreeBits > 0) {
+        // Start with locked-bits base point
+        Point G_base;
+        G_base.x.SetInt32(0); G_base.y.SetInt32(0);
+        memcpy(G_base.x.bits64, config->basePointX, 32);
+        memcpy(G_base.y.bits64, config->basePointY, 32);
+        
+        // Add each free bit that's 1 in the Center string
+        for (int i = 0; i < config->numFreeBits; i++) {
+            if (config->targetSeedLo & (1ULL << i)) {
+                int pos = config->freeBitPositions[i];
+                Int key;
+                key.SetInt32(0);
+                key.bits64[pos >> 6] |= (1ULL << (pos & 63));
+                Point G_i = secp->ComputePublicKey(&key);
+                G_base = secp->AddDirect(G_base, G_i);
+            }
+        }
+        
+        memcpy(basePointX, G_base.x.bits64, 32);
+        memcpy(basePointY, G_base.y.bits64, 32);
+    }
+    
+    err = cudaMemcpyToSymbol(d_basePointX, basePointX, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointX: %s\n", cudaGetErrorString(err)); return false; }
-    err = cudaMemcpyToSymbol(d_basePointY, config->basePointY, sizeof(uint64_t) * 4);
+    err = cudaMemcpyToSymbol(d_basePointY, basePointY, sizeof(uint64_t) * 4);
     if (err != cudaSuccess) { printf("GPUEngine: d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
     err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
     if (err != cudaSuccess) { printf("GPUEngine: d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
