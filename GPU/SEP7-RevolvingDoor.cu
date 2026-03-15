@@ -57,6 +57,10 @@
 __device__ uint64_t* d_DTableX;   // [n * n * 4]  flattened
 __device__ uint64_t* d_DTableY;   // [n * n * 4]  flattened
 
+// G_free table for initial point construction (extern from GPUEngine.cu)
+extern __device__ uint64_t* d_GfreeX;
+extern __device__ uint64_t* d_GfreeY;
+
 // Device-side C(n,k) table for revolving-door unranking.
 // Layout: row-major, d_rdCombTable[i * d_rdCombK + j] = C(i, j)
 // Dimensions: (n+1) × (K_max+1), uploaded by host.
@@ -615,10 +619,13 @@ void comp_keys_revdoor(
     // Build bitmask from the unranked combination
     uint64_t mask = combo_to_mask(c, hamming_h);
 
-    // ═══════ COMPUTE INITIAL EC POINT (window method, same as SEP6/SEP7) ═══════
+    // ═══════ COMPUTE INITIAL EC POINT using G_free table (SEP-compatible) ═══════
 
-    uint64_t seed = (mask ^ d_targetSeedLo) & d_seedMaskLo;
+    // 1. XOR with the center string to get the TRUE physical seed
+    uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t seed_lo = (mask ^ d_targetSeedLo) & seedMaskLo;
 
+    // 2. Build initial EC point from seed_lo using standard G_free table
     uint64_t accX[4], accY[4], accZ[4];
     bool pointSet = false;
 
@@ -629,29 +636,28 @@ void comp_keys_revdoor(
         pointSet = true;
     }
 
-    int num_windows = (n + 7) / 8;
-    uint64_t s = seed;
-    for (int w = 0; w < 8 && w < num_windows; w++) {
-        int byte_val = s & 0xFF;
-        if (byte_val != 0) {
-            int idx = (w * 256 + byte_val) * 4;
-            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
-            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
-            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
-            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
-
-            uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
-            uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+    // Add each free bit that's set in the physical seed using G_free table
+    for (int i = 0; i < n; i++) {
+        if ((seed_lo >> i) & 1ULL) {
+            int idx = i * 4;
+            uint64_t gx[4], gy[4];
+            gx[0] = __ldg(&d_GfreeX[idx]);
+            gx[1] = __ldg(&d_GfreeX[idx + 1]);
+            gx[2] = __ldg(&d_GfreeX[idx + 2]);
+            gx[3] = __ldg(&d_GfreeX[idx + 3]);
+            gy[0] = __ldg(&d_GfreeY[idx]);
+            gy[1] = __ldg(&d_GfreeY[idx + 1]);
+            gy[2] = __ldg(&d_GfreeY[idx + 2]);
+            gy[3] = __ldg(&d_GfreeY[idx + 3]);
 
             if (!pointSet) {
-                Load256(accX, curGX); Load256(accY, curGY);
+                Load256(accX, gx); Load256(accY, gy);
                 accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
                 pointSet = true;
             } else {
-                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+                jacobian_add_affine_inplace(accX, accY, accZ, gx, gy);
             }
         }
-        s >>= 8;
     }
 
     if (!pointSet) return;
