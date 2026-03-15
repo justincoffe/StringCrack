@@ -36,6 +36,7 @@
 #include "GPUBase58.h"
 #include "GPUWildcard.h"
 #include "GPUCompute.h"
+#include "SEP7-RevolvingDoor.cu"
 
 #include <iostream>
 
