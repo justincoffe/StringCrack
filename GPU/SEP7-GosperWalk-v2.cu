@@ -412,12 +412,12 @@ bool GPUEngine::ComputeGfreeTables(Secp256K1* secp, StringCrackConfig* config) {
         
         int idx = i * 4;
         memcpy(&h_GfreeX[idx],    P.x.bits64, 32);
-        memcpy(&h_GfreeY[idx],    P.y.bits32, 32);
+        memcpy(&h_GfreeY[idx],    P.y.bits64, 32);
         
         // Negate Y for subtraction
         Point P_neg = P;
         P_neg.y.ModNeg();
-        memcpy(&h_negGfreeY[idx], P_neg.y.bits32, 32);
+        memcpy(&h_negGfreeY[idx], P_neg.y.bits64, 32);
     }
     
     uint64_t *dd_X, *dd_Y, *dd_nY;
