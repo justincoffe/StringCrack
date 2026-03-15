@@ -604,13 +604,12 @@ void comp_keys_revdoor(
     int n = d_numFreeBits;
     if (n > 64) return;
 
-    // ═══════ REVOLVING DOOR INITIALIZATION via O(n) unranking ═══════
-
+    // ═══════ REVOLVING DOOR INITIALIZATION ═══════
     int c[RD_MAX_K + 1];
-    uint64_t p0, p1, neg_bits;
-    int curr_n, curr_k, sp;
+    RDFrame stk[RD_MAX_DEPTH];
+    int sp;
 
-    revdoor_unrank_reg(n, hamming_h, start_pos, c, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
+    revdoor_unrank(n, hamming_h, start_pos, c, stk, &sp);
 
     // Build bitmask from the unranked combination
     uint64_t mask = combo_to_mask(c, hamming_h);
@@ -686,7 +685,7 @@ void comp_keys_revdoor(
 
         // ─── REVOLVING DOOR STEP: exactly one swap ───
         int removed_idx, added_idx;
-        if (!revdoor_step_reg(c, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
+        if (!revdoor_step(c, stk, &sp, hamming_h, &removed_idx, &added_idx)) {
             break; // exhausted this walk's portion of C(n, h)
         }
 
