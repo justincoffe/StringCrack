@@ -592,7 +592,7 @@ __device__ __forceinline__ uint64_t combo_to_mask(const int c[], int k) {
 // =====================================================================================
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(32, 14)
+__global__ __launch_bounds__(128)
 void comp_keys_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int hamming_h,
@@ -601,7 +601,7 @@ void comp_keys_revdoor(
     int chunk_size)
 {
     int lane_id = threadIdx.x;
-    uint32_t walk_id = blockIdx.x * 32 + lane_id;
+    uint32_t walk_id = blockIdx.x * blockDim.x + lane_id; // <-- Dynamically scale with block size
 
     // This thread's starting position in the revolving-door sequence
     uint64_t start_pos = base_pos + (uint64_t)walk_id * (uint64_t)chunk_size;
@@ -963,7 +963,7 @@ void GPUEngine::LaunchRevDoorAsync(int hamming_h, uint64_t base_pos,
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
 
-    int threadsPerBlock = 32;
+    int threadsPerBlock = 128; // <-- CHANGED from 32 to 128
     // THE FIX: Use numWalks instead of nbThread
     int numBlocks = (numWalks + threadsPerBlock - 1) / threadsPerBlock;
 

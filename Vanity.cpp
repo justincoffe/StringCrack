@@ -1685,8 +1685,10 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     cudaGetDeviceProperties(&deviceProp, ph->gpuId);
     int smCount = deviceProp.multiProcessorCount;
     
-    int warpsPerSM = 14;
-    int numWalks = smCount * warpsPerSM * 32; // Forces exactly 37,632 walks!
+    // We stripped the bounds, so we let the grid be massive to ensure 100% occupancy
+    int threadsPerBlock = 128;
+    int maxBlocksPerSM = 12; // A heavy-math baseline, hardware will auto-scale this
+    int numWalks = smCount * maxBlocksPerSM * threadsPerBlock; 
     
     // Target ~100ms per kernel launch for smooth stats updates
     int targetCandidates = 80000000;
