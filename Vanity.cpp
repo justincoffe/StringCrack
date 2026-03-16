@@ -1479,7 +1479,6 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
     int B = 8; 
     if (n < 16) B = n / 2; 
     int numBlocksDense = smCount * 28; 
-    int chunk_size_walk = 65536;
 
     for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
         for (int k1 = 0; k1 <= B && !endOfSearch; k1++) {
