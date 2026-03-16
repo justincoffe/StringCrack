@@ -156,6 +156,10 @@ public:
   void LaunchGosperWalkAsync(int hamming_h, uint64_t base_rank_offset,
                              uint64_t totalCombs, int chunk_size, int numWalks);
 
+  // SEP7: Coset-Delta Gosper Walk
+  void UploadQiArray(const uint64_t* host_array, int count);
+  void LaunchCosetGosperAsync(int hamming_h, int B_top, int k1, int k2, uint64_t base_rank_offset, uint64_t L_totalCombs, int chunk_size, int numBlocks, int threadsPerBlock);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 

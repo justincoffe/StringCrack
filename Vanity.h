@@ -112,6 +112,14 @@ public:
 		uint64_t base_rank_offset, int chunk_size, uint8_t* hash, 
 		StringCrackConfig* config, const uint64_t* h_combTable, int tableK);
 
+	// SEP7: Key reconstruction for Coset-Delta Gosper Walk hits
+	void reconstructCosetGosperKey(
+		uint32_t global_id, uint32_t step, 
+		int B_top, int k1, int k2, int threadsPerBlock,
+		uint64_t base_rank_offset, int chunk_size,
+		uint8_t* hash, StringCrackConfig* config,
+		const uint64_t* h_combTable, int tableK);
+
 private:
 
 	std::string GetHex(std::vector<unsigned char>& buffer);

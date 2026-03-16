@@ -1950,3 +1950,26 @@ uint32_t GPUEngine::SyncGosperBatch(int stepToSync, std::vector<ITEM> &addressFo
     }
     return nbFound;
 }
+
+// =====================================================================================
+// SEP7: Coset-Delta Gosper Walk - Upload Q_i array and launch kernel
+// =====================================================================================
+
+void GPUEngine::UploadQiArray(const uint64_t* host_array, int count) {
+    cudaMemcpyToSymbol(d_Qi_array, host_array, count * sizeof(uint64_t));
+}
+
+void GPUEngine::LaunchCosetGosperAsync(int hamming_h, int B_top, int k1, int k2,
+                                       uint64_t base_rank_offset, uint64_t L_totalCombs, 
+                                       int chunk_size, int numBlocks, int threadsPerBlock) {
+    int s = currentStep % 2;
+    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
+    
+    comp_keys_coset_gosper<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
+        inputAddress, inputAddressLookUp, d_output[s],
+        hamming_h, B_top, k1, k2, base_rank_offset, L_totalCombs, chunk_size);
+    
+    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize,
+                    cudaMemcpyDeviceToHost, streams[s]);
+    currentStep++;
+}

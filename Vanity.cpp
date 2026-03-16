@@ -1466,105 +1466,136 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
     uint64_t streamRankBase[2]  = {0, 0};
     int      streamChunkSize[2] = {0, 0};
 
+    // Add these next to your existing double-buffer stream trackers
+    int      streamB[2]         = {0, 0};
+    int      streamK1[2]        = {0, 0};
+    int      streamK2[2]        = {0, 0};
+    int      streamTPB[2]       = {0, 0};
+
     // ─────────────────────────────────────────────────────────────
-    // Main loop: iterate Hamming layers h = minRadius..maxRadius
-    // Each GPU owns a non-overlapping slice of each layer.
+    // Coset-Delta Partition Strategy
     // ─────────────────────────────────────────────────────────────
+    int B = 8; 
+    if (n < 16) B = n / 2; // Failsafe for extremely narrow ranges
+
+    int threadsPerBlock = 96; // 3 warps. C(8,4) maxes out at 70 active threads.
+    int numBlocks = smCount * 28; // Saturate the grid (28 blocks/SM)
+    int chunk_size_walk = 65536;
+
     for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
         
-        uint64_t layerCombs = h_combTable[n * tableK + h];
-        if (layerCombs == 0) continue;
+        // Break h into sub-layers (k1 + k2 = h)
+        for (int k1 = 0; k1 <= B && !endOfSearch; k1++) {
+            int k2 = h - k1;
+            int L_bits = n - B;
+            if (k2 < 0 || k2 > L_bits) continue;
 
-        // Compute this GPU's slice of the layer
-        uint64_t sliceSize  = (layerCombs + (uint64_t)sliceCount - 1) / (uint64_t)sliceCount;
-        uint64_t sliceStart = (uint64_t)sliceId * sliceSize;
-        uint64_t sliceEnd   = sliceStart + sliceSize;
-        if (sliceEnd > layerCombs) sliceEnd = layerCombs;
-        if (sliceStart >= layerCombs) continue;
+            uint64_t W = h_combTable[B * tableK + k1];
+            uint64_t L_combs = h_combTable[L_bits * tableK + k2];
+            if (W == 0 || L_combs == 0) continue;
 
-        printf("[SEP7] GPU[%d] h=%d: ranks [%llu, %llu) of %llu total\n",
-               sliceId, h,
-               (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
-               (unsigned long long)layerCombs);
-        fflush(stdout);
-
-        uint64_t offset = sliceStart;
-        while (offset < sliceEnd && !endOfSearch) {
+            // ═══════ BUILD AND UPLOAD Q_i ARRAY ═══════
+            uint64_t qi_array_host[256];
+            memset(qi_array_host, 0, sizeof(qi_array_host));
             
-            if (Pause) {
-                Paused = true;
-                t_Paused = Timer::get_tick() - t0 + t_Paused;
-                while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                if (endOfSearch) break;
-                endOfSearch = true;
-                break;
+            for (uint64_t r = 0; r < W; r++) {
+                uint64_t m_lo = 0, m_hi = 0;
+                cpu_unrank_combination(r, B, k1, m_lo, m_hi, h_combTable, tableK);
+                qi_array_host[r] = m_lo;
             }
             
-            // ─── Compute batch parameters ───
-            uint64_t remaining = sliceEnd - offset;
-            
-            // Each launch covers numWalks × chunk walks
-            // Adjust chunk if near the end of the slice
-            int this_chunk = chunk_size_walk;
-            uint64_t batchCoverage = (uint64_t)numWalks * (uint64_t)this_chunk;
-            
-            if (batchCoverage > remaining) {
-                this_chunk = (int)((remaining + (uint64_t)numWalks - 1) / (uint64_t)numWalks);
-                if (this_chunk < 1) this_chunk = 1;
-                batchCoverage = (uint64_t)numWalks * (uint64_t)this_chunk;
-                if (batchCoverage > remaining) batchCoverage = remaining;
-            }
-            
-            // Save state for double-buffered stream
-            int s = g.currentStep % 2;
-            streamH[s]         = h;
-            streamRankBase[s]  = offset;
-            streamChunkSize[s] = this_chunk;
+            // Upload to GPU constant memory for this specific k1 layer
+            g.UploadQiArray(qi_array_host, (int)W);
+            // ══════════════════════════════════════════
 
-            // ─── LAUNCH: SEP7 Gosper Walk ───
-            g.LaunchGosperWalkAsync(h, offset, layerCombs, this_chunk, numWalks);
-            
-            // ─── PROCESS previous batch while GPU works ───
-            if (!firstBatch) {
-                int prev_s = (g.currentStep - 2) % 2;
-                uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
-                for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                    ITEM it = found[fi];
-                    uint32_t walk_id = it.thId;
-                    uint32_t step = ((uint32_t)(it.endo & 0x7FFF))
-                                  | (((uint32_t)(it.incr & 0x7FFF)) << 15);
-                    reconstructGosperWalkKey(walk_id, step, streamH[prev_s],
-                        streamRankBase[prev_s], streamChunkSize[prev_s],
-                        it.hash, scConfig, h_combTable, tableK);
+            // Compute this GPU's slice of the L_combs space
+            uint64_t sliceSize  = (L_combs + (uint64_t)sliceCount - 1) / (uint64_t)sliceCount;
+            uint64_t sliceStart = (uint64_t)sliceId * sliceSize;
+            uint64_t sliceEnd   = sliceStart + sliceSize;
+            if (sliceEnd > L_combs) sliceEnd = L_combs;
+            if (sliceStart >= L_combs) continue;
+
+            printf("[SEP7] GPU[%d] h=%d (k1=%d, k2=%d): L-ranks [%llu, %llu) W=%llu\n",
+                   sliceId, h, k1, k2,
+                   (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
+                   (unsigned long long)W);
+            fflush(stdout);
+
+            uint64_t offset = sliceStart;
+            while (offset < sliceEnd && !endOfSearch) {
+                
+                if (Pause) {
+                    Paused = true;
+                    t_Paused = Timer::get_tick() - t0 + t_Paused;
+                    while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                    if (endOfSearch) break;
+                    endOfSearch = true;
+                    break;
                 }
-                found.clear();
-            }
-            firstBatch = false;
-            
-            // ─── Advance offset ───
-            offset             += batchCoverage;
-            totalKeysProcessed += batchCoverage;
-            
-            // Publish to global counter array
-            counters[thId] = totalKeysProcessed;
-            
-            // ─── Stats display (GPU 0 only, throttled to ~2Hz) ───
-            if (sliceId == 0) {
-                ttot = Timer::get_tick() - t0 + t_Paused;
-                static double   lastStatsTime  = 0.0;
-                static uint64_t lastStatsKeys  = 0;
-                if (ttot - lastStatsTime >= 0.5 || lastStatsTime == 0.0) {
-                    double   dt         = ttot - lastStatsTime;
-                    uint64_t globalKeys = getGPUCount();
-                    uint64_t dk         = (globalKeys >= lastStatsKeys)
-                                          ? globalKeys - lastStatsKeys : 0;
-                    double spd = (lastStatsTime > 0.0 && dt > 0.0)
-                                 ? (double)dk / (dt * 1e6) : 0.0;
-                    lastStatsTime = ttot;
-                    lastStatsKeys = globalKeys;
-                    printf("[SEP7] GLOBAL h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
-                           h, spd, (double)globalKeys / 1e9, nbFoundKey);
-                    fflush(stdout);
+                
+                uint64_t remaining = sliceEnd - offset;
+                
+                int this_chunk = chunk_size_walk;
+                uint64_t blocks_needed = numBlocks;
+                uint64_t coverage = (uint64_t)blocks_needed * (uint64_t)this_chunk;
+                
+                if (coverage > remaining) {
+                    blocks_needed = (remaining + this_chunk - 1) / this_chunk;
+                    if (blocks_needed == 0) blocks_needed = 1;
+                    coverage = blocks_needed * this_chunk;
+                    if (coverage > remaining) coverage = remaining;
+                }
+                
+                // Track state for reconstruction
+                int s = g.currentStep % 2;
+                streamH[s] = h;
+                // We must store the partition variables to decode hits
+                streamRankBase[s]  = offset;
+                streamChunkSize[s] = this_chunk;
+                streamB[s] = B; streamK1[s] = k1; streamK2[s] = k2; streamTPB[s] = threadsPerBlock; 
+
+                // ─── LAUNCH: Coset-Delta Walk ───
+                g.LaunchCosetGosperAsync(h, B, k1, k2, offset, L_combs, this_chunk, blocks_needed, threadsPerBlock);
+                
+                // ─── PROCESS previous batch (Ensure you pass B, k1, k2 to reconstruct) ───
+                if (!firstBatch) {
+                    int prev_s = (g.currentStep - 2) % 2;
+                    uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
+                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                        ITEM it = found[fi];
+                        uint32_t global_id = it.thId;
+                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                        
+                        reconstructCosetGosperKey(global_id, step, streamB[prev_s], streamK1[prev_s], streamK2[prev_s],
+                            streamTPB[prev_s], streamRankBase[prev_s], streamChunkSize[prev_s],
+                            it.hash, scConfig, h_combTable, tableK);
+                    }
+                    found.clear();
+                }
+                firstBatch = false;
+                
+                offset             += coverage;
+                totalKeysProcessed += coverage * W; // Keys = Blocks * chunk * active threads
+                counters[thId]      = totalKeysProcessed;
+                
+                // ─── Stats display (GPU 0 only, throttled to ~2Hz) ───
+                if (sliceId == 0) {
+                    ttot = Timer::get_tick() - t0 + t_Paused;
+                    static double   lastStatsTime  = 0.0;
+                    static uint64_t lastStatsKeys  = 0;
+                    if (ttot - lastStatsTime >= 0.5 || lastStatsTime == 0.0) {
+                        double   dt         = ttot - lastStatsTime;
+                        uint64_t globalKeys = getGPUCount();
+                        uint64_t dk         = (globalKeys >= lastStatsKeys)
+                                              ? globalKeys - lastStatsKeys : 0;
+                        double spd = (lastStatsTime > 0.0 && dt > 0.0)
+                                     ? (double)dk / (dt * 1e6) : 0.0;
+                        lastStatsTime = ttot;
+                        lastStatsKeys = globalKeys;
+                        printf("[SEP7] GLOBAL h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
+                               h, spd, (double)globalKeys / 1e9, nbFoundKey);
+                        fflush(stdout);
+                    }
                 }
             }
         }
@@ -1576,11 +1607,11 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
         uint32_t nbFound = g.SyncGosperBatch(last_s, found);
         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
             ITEM it = found[fi];
-            uint32_t walk_id = it.thId;
+            uint32_t global_id = it.thId;
             uint32_t step = ((uint32_t)(it.endo & 0x7FFF))
                           | (((uint32_t)(it.incr & 0x7FFF)) << 15);
-            reconstructGosperWalkKey(walk_id, step, streamH[last_s],
-                streamRankBase[last_s], streamChunkSize[last_s],
+            reconstructCosetGosperKey(global_id, step, streamB[last_s], streamK1[last_s], streamK2[last_s],
+                streamTPB[last_s], streamRankBase[last_s], streamChunkSize[last_s],
                 it.hash, scConfig, h_combTable, tableK);
         }
     }
@@ -1915,4 +1946,78 @@ string VanitySearch::GetHex(vector<unsigned char> &buffer) {
 	}
 
 	return ret;
+}
+
+// =====================================================================================
+// Host-side: Key Reconstruction for Coset-Delta Architecture
+// =====================================================================================
+
+void VanitySearch::reconstructCosetGosperKey(
+    uint32_t global_id, uint32_t step, 
+    int B_top, int k1, int k2, int threadsPerBlock,
+    uint64_t base_rank_offset, int chunk_size,
+    uint8_t* hash, StringCrackConfig* config,
+    const uint64_t* h_combTable, int tableK)
+{
+    int n = config->numFreeBits;
+    int L_bits = n - B_top;
+
+    // 1. Decode the global ID into Block (P_base) and Lane (Q_i)
+    uint32_t lane = global_id % threadsPerBlock;
+    uint32_t block_id = global_id / threadsPerBlock;
+
+    // 2. Unrank the Warp Identity (Q_i)
+    uint64_t qi_mask_lo = 0, qi_mask_hi = 0;
+    cpu_unrank_combination(lane, B_top, k1, qi_mask_lo, qi_mask_hi, h_combTable, tableK);
+    
+    // Shift Q_i to the top reserved bits
+    uint64_t qi_mask = qi_mask_lo << L_bits;
+
+    // 3. Unrank the Walk Engine (P_base) initial state
+    uint64_t start_rank = base_rank_offset + (uint64_t)block_id * (uint64_t)chunk_size;
+    uint64_t p_mask_lo = 0, p_mask_hi = 0;
+    cpu_unrank_combination(start_rank, L_bits, k2, p_mask_lo, p_mask_hi, h_combTable, tableK);
+    
+    uint64_t p_mask = p_mask_lo;
+
+    // 4. Advance P_base by 'step' Gosper transitions
+    for (uint32_t s = 0; s < step; s++) {
+        if (p_mask == 0) break; // Failsafe for k2 = 0
+        uint64_t c = p_mask & (0ULL - p_mask);
+        uint64_t r = p_mask + c;
+        int shift = __builtin_ctzll(p_mask) + 2; // __builtin_ctzll is CPU equivalent to __ffsll - 1
+        p_mask = ((r ^ p_mask) >> shift) | r;
+    }
+
+    // 5. Combine Q_i and P_base into the final physical bitmask
+    uint64_t mask = qi_mask | p_mask;
+
+    // 6. XOR with center string to get the physical seed
+    uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t seed_lo = (mask ^ config->targetSeedLo) & seedMaskLo;
+
+    // 7. Expand seed into the full 256-bit private key
+    uint64_t keyBits[4] = {
+        config->lockVals[0], config->lockVals[1],
+        config->lockVals[2], config->lockVals[3]
+    };
+
+    uint64_t sl = seed_lo;
+    for (int fb = 0; fb < n && fb < 64; fb++) {
+        if (sl & 1ULL) {
+            int pos = config->freeBitPositions[fb];
+            keyBits[pos >> 6] |= (1ULL << (pos & 63));
+        }
+        sl >>= 1;
+    }
+
+    // 8. Verify and output
+    Int privkey;
+    privkey.SetInt32(0);
+    privkey.bits64[0] = keyBits[0];
+    privkey.bits64[1] = keyBits[1];
+    privkey.bits64[2] = keyBits[2];
+    privkey.bits64[3] = keyBits[3];
+
+    checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
 }
