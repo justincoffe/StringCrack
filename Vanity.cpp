@@ -1490,6 +1490,9 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
             uint64_t L_combs = h_combTable[L_bits * tableK + k2];
             if (W == 0 || L_combs == 0) continue;
 
+            double layer_start_time = Timer::get_tick();
+            uint64_t layer_start_keys = totalKeysProcessed;
+
             uint64_t qi_array_host[256];
             memset(qi_array_host, 0, sizeof(qi_array_host));
             for (uint64_t r = 0; r < W; r++) {
@@ -1508,7 +1511,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
             printf("[SEP7] GPU[%d] h=%d (k1=%d): L-ranks [%llu, %llu) W=%llu Mode: %s\n",
                    sliceId, h, k1,
                    (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
-                   (unsigned long long)W, (W < 32) ? "SPARSE" : "DENSE");
+                   (unsigned long long)W, (W < 28) ? "SPARSE" : "DENSE");
             fflush(stdout);
 
             uint64_t offset = sliceStart;
@@ -1525,31 +1528,41 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
                 uint64_t remaining = sliceEnd - offset;
                 int this_chunk = chunk_size_walk;
                 
-                bool is_sparse = (W < 32);
+                bool is_sparse = (W < 28); 
                 dim3 grid;
                 int tpb;
                 uint64_t coverage;
 
+                // ─── THE FIX: Standardize Launch Caps for Both Modes ───
                 if (is_sparse) {
-                    tpb = 256; // High occupancy for sparse threads
-                    uint64_t walks_needed = (remaining + this_chunk - 1) / this_chunk;
-                    uint64_t blocks_needed = (walks_needed + tpb - 1) / tpb;
-                    if (blocks_needed == 0) blocks_needed = 1;
-                    grid = dim3((unsigned int)blocks_needed, (unsigned int)W, 1);
+                    tpb = 128; // Max register allocation
+                    uint64_t blocks_needed = numBlocksDense; // <-- Natural cap
                     coverage = (uint64_t)blocks_needed * tpb * this_chunk;
+                    
+                    // Only shrink the grid if we are at the very tail end of the space
+                    if (coverage > remaining) {
+                        blocks_needed = (remaining + (tpb * this_chunk) - 1) / (tpb * this_chunk);
+                        if (blocks_needed == 0) blocks_needed = 1;
+                        coverage = (uint64_t)blocks_needed * tpb * this_chunk;
+                    }
+                    if (coverage > remaining) coverage = remaining;
+                    
+                    grid = dim3((unsigned int)blocks_needed, (unsigned int)W, 1);
                 } else {
-                    tpb = (int)W; // Exact Fit! No wasted threads.
-                    uint64_t blocks_needed = numBlocksDense;
+                    tpb = (int)W; 
+                    uint64_t blocks_needed = numBlocksDense; // <-- Natural cap
                     coverage = (uint64_t)blocks_needed * this_chunk;
+                    
+                    // Only shrink the grid if we are at the very tail end of the space
                     if (coverage > remaining) {
                         blocks_needed = (remaining + this_chunk - 1) / this_chunk;
                         if (blocks_needed == 0) blocks_needed = 1;
-                        coverage = blocks_needed * this_chunk;
+                        coverage = (uint64_t)blocks_needed * this_chunk;
                     }
+                    if (coverage > remaining) coverage = remaining;
+                    
                     grid = dim3((unsigned int)blocks_needed, 1, 1);
                 }
-
-                if (coverage > remaining) coverage = remaining;
 
                 int s = g.currentStep % 2;
                 streamH[s] = h;
@@ -1581,6 +1594,7 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
                 totalKeysProcessed += coverage * W; 
                 counters[thId]      = totalKeysProcessed;
                 
+                // Real-time ticker
                 if (sliceId == 0) {
                     ttot = Timer::get_tick() - t0 + t_Paused;
                     static double   lastStatsTime  = 0.0;
@@ -1597,6 +1611,16 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
                         fflush(stdout);
                     }
                 }
+            }
+            
+            // ─── FINAL LAYER TELEMETRY ───
+            if (!endOfSearch) {
+                double layer_dt = Timer::get_tick() - layer_start_time;
+                uint64_t layer_dk = totalKeysProcessed - layer_start_keys;
+                double layer_spd = (layer_dt > 0.0) ? (double)layer_dk / (layer_dt * 1e6) : 0.0;
+                printf("\n[SEP7] GPU[%d] h=%d (k1=%d) W=%llu [%s] -> LAYER AVG: %.1f MK/s\n\n",
+                       sliceId, h, k1, (unsigned long long)W, (W < 28) ? "SPARSE" : "DENSE", layer_spd);
+                fflush(stdout);
             }
         }
     }
