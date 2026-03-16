@@ -1480,7 +1480,6 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 
     int threadsPerBlock = 96; // 3 warps. C(8,4) maxes out at 70 active threads.
     int numBlocks = smCount * 28; // Saturate the grid (28 blocks/SM)
-    int chunk_size_walk = 65536;
 
     for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
         
