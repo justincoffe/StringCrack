@@ -1480,7 +1480,12 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
     if (n < 16) B = n / 2; 
     int numBlocksDense = smCount * 28; 
 
-    for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
+for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
+        
+        // ─── START H-LAYER TRACKING ───
+        double h_start_time = Timer::get_tick();
+        uint64_t h_start_keys = totalKeysProcessed;
+
         for (int k1 = 0; k1 <= B && !endOfSearch; k1++) {
             int k2 = h - k1;
             int L_bits = n - B;
@@ -1489,9 +1494,6 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
             uint64_t W = h_combTable[B * tableK + k1];
             uint64_t L_combs = h_combTable[L_bits * tableK + k2];
             if (W == 0 || L_combs == 0) continue;
-
-            double layer_start_time = Timer::get_tick();
-            uint64_t layer_start_keys = totalKeysProcessed;
 
             uint64_t qi_array_host[256];
             memset(qi_array_host, 0, sizeof(qi_array_host));
@@ -1507,12 +1509,6 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
             uint64_t sliceEnd   = sliceStart + sliceSize;
             if (sliceEnd > L_combs) sliceEnd = L_combs;
             if (sliceStart >= L_combs) continue;
-
-            printf("[SEP7] GPU[%d] h=%d (k1=%d): L-ranks [%llu, %llu) W=%llu Mode: %s\n",
-                   sliceId, h, k1,
-                   (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
-                   (unsigned long long)W, (W < 28) ? "SPARSE" : "DENSE");
-            fflush(stdout);
 
             uint64_t offset = sliceStart;
             while (offset < sliceEnd && !endOfSearch) {
@@ -1539,7 +1535,6 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
                     uint64_t blocks_needed = numBlocksDense; // <-- Natural cap
                     coverage = (uint64_t)blocks_needed * tpb * this_chunk;
                     
-                    // Only shrink the grid if we are at the very tail end of the space
                     if (coverage > remaining) {
                         blocks_needed = (remaining + (tpb * this_chunk) - 1) / (tpb * this_chunk);
                         if (blocks_needed == 0) blocks_needed = 1;
@@ -1553,7 +1548,6 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
                     uint64_t blocks_needed = numBlocksDense; // <-- Natural cap
                     coverage = (uint64_t)blocks_needed * this_chunk;
                     
-                    // Only shrink the grid if we are at the very tail end of the space
                     if (coverage > remaining) {
                         blocks_needed = (remaining + this_chunk - 1) / this_chunk;
                         if (blocks_needed == 0) blocks_needed = 1;
@@ -1612,18 +1606,18 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
                     }
                 }
             }
-            
-            // ─── FINAL LAYER TELEMETRY ───
-            if (!endOfSearch) {
-                double layer_dt = Timer::get_tick() - layer_start_time;
-                uint64_t layer_dk = totalKeysProcessed - layer_start_keys;
-                double layer_spd = (layer_dt > 0.0) ? (double)layer_dk / (layer_dt * 1e6) : 0.0;
-                printf("\n[SEP7] GPU[%d] h=%d (k1=%d) W=%llu [%s] -> LAYER AVG: %.1f MK/s\n\n",
-                       sliceId, h, k1, (unsigned long long)W, (W < 28) ? "SPARSE" : "DENSE", layer_spd);
-                fflush(stdout);
-            }
+        } // <-- End of k1 sub-layer loop
+
+        // ─── H-LAYER SUMMARY ───
+        if (!endOfSearch && sliceId == 0) {
+            double h_dt = Timer::get_tick() - h_start_time;
+            uint64_t h_dk = totalKeysProcessed - h_start_keys;
+            double h_spd = (h_dt > 0.0) ? (double)h_dk / (h_dt * 1e6) : 0.0;
+            printf("\n[SEP7] === FINISHED Layer h=%d | Layer Avg: %.1f MK/s ===\n\n", h, h_spd);
+            fflush(stdout);
         }
-    }
+
+    } // <-- End of h layer loop
     
     // ─── Drain the final in-flight batch ───
     if (!firstBatch) {
