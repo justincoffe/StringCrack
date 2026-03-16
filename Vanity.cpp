@@ -1486,6 +1486,27 @@ for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
         double h_start_time = Timer::get_tick();
         uint64_t h_start_keys = totalKeysProcessed;
 
+        // ─── CALCULATE EXACT KEYS FOR THIS GPU'S LAYER ───
+        uint64_t expected_layer_keys = 0;
+        for (int temp_k1 = 0; temp_k1 <= B; temp_k1++) {
+            int temp_k2 = h - temp_k1;
+            int temp_L_bits = n - B;
+            if (temp_k2 < 0 || temp_k2 > temp_L_bits) continue;
+            uint64_t temp_W = h_combTable[B * tableK + temp_k1];
+            uint64_t temp_L_combs = h_combTable[temp_L_bits * tableK + temp_k2];
+            if (temp_W == 0 || temp_L_combs == 0) continue;
+            
+            uint64_t temp_sliceSize = (temp_L_combs + sliceCount - 1) / sliceCount;
+            uint64_t temp_sliceStart = sliceId * temp_sliceSize;
+            uint64_t temp_sliceEnd = temp_sliceStart + temp_sliceSize;
+            if (temp_sliceEnd > temp_L_combs) temp_sliceEnd = temp_L_combs;
+            
+            if (temp_sliceStart < temp_L_combs) {
+                expected_layer_keys += (temp_sliceEnd - temp_sliceStart) * temp_W;
+            }
+        }
+        if (expected_layer_keys == 0) expected_layer_keys = 1; // Failsafe against div by zero
+
         for (int k1 = 0; k1 <= B && !endOfSearch; k1++) {
             int k2 = h - k1;
             int L_bits = n - B;
@@ -1606,8 +1627,13 @@ for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
                         double spd = (lastStatsTime > 0.0 && dt > 0.0) ? (double)dk / (dt * 1e6) : 0.0;
                         lastStatsTime = ttot;
                         lastStatsKeys = globalKeys;
-                        printf("[SEP7] GLOBAL h=%d | %.1f MK/s | %.2f BKeys | Found: %d     \r",
-                               h, spd, (double)globalKeys / 1e9, nbFoundKey);
+                        
+                        // Calculate percentage of current layer completed
+                        double layer_perc = ((double)(totalKeysProcessed - h_start_keys) / (double)expected_layer_keys) * 100.0;
+                        if (layer_perc > 100.0) layer_perc = 100.0; // Clamp visually
+                        
+                        printf("[SEP7] GLOBAL h=%d | %.1f MK/s | %.2f BKeys | Found: %d | %.2f%%     \r",
+                               h, spd, (double)globalKeys / 1e9, nbFoundKey, layer_perc);
                         fflush(stdout);
                     }
                 }
