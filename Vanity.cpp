@@ -1510,6 +1510,12 @@ for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
             if (sliceEnd > L_combs) sliceEnd = L_combs;
             if (sliceStart >= L_combs) continue;
 
+            printf("[SEP7] GPU[%d] h=%d (k1=%d): L-ranks [%llu, %llu) W=%llu Mode: %s\n",
+                   sliceId, h, k1,
+                   (unsigned long long)sliceStart, (unsigned long long)sliceEnd,
+                   (unsigned long long)W, (W < 28) ? "SPARSE" : "DENSE");
+            fflush(stdout);
+
             uint64_t offset = sliceStart;
             while (offset < sliceEnd && !endOfSearch) {
                 if (Pause) {
