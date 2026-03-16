@@ -116,7 +116,7 @@ public:
 	void reconstructCosetGosperKey(
 		uint32_t global_id, uint32_t step, 
 		int B_top, int k1, int k2, int threadsPerBlock,
-		uint64_t base_rank_offset, int chunk_size,
+		uint64_t base_rank_offset, int chunk_size, bool is_sparse,
 		uint8_t* hash, StringCrackConfig* config,
 		const uint64_t* h_combTable, int tableK);
 

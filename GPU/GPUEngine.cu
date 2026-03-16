@@ -1961,13 +1961,13 @@ void GPUEngine::UploadQiArray(const uint64_t* host_array, int count) {
 
 void GPUEngine::LaunchCosetGosperAsync(int hamming_h, int B_top, int k1, int k2,
                                        uint64_t base_rank_offset, uint64_t L_totalCombs, 
-                                       int chunk_size, int numBlocks, int threadsPerBlock) {
+                                       int chunk_size, dim3 grid, int threadsPerBlock, bool is_sparse) {
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
     
-    comp_keys_coset_gosper<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
+    comp_keys_coset_gosper<BATCH_N><<<grid, threadsPerBlock, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
-        hamming_h, B_top, k1, k2, base_rank_offset, L_totalCombs, chunk_size);
+        hamming_h, B_top, k1, k2, base_rank_offset, L_totalCombs, chunk_size, is_sparse);
     
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize,
                     cudaMemcpyDeviceToHost, streams[s]);

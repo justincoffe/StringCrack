@@ -536,36 +536,48 @@ void VanitySearch::reconstructGosperWalkKey(
 }
 
 // =====================================================================================
-// COSET-DELTA GOSPER WALK
-// Architecture: 1 Block = 1 Walk Engine. 
-// Threads within a block share P_base but maintain unique Q_i offsets.
+// DUAL-MODE COSET-DELTA GOSPER WALK
+// Dense Mode (W > 32): 1 Block = 1 Walk, zero divergence
+// Sparse Mode (W < 32): 1 Thread = 1 Walk, 100% SM Occupancy
 // =====================================================================================
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(128, 14)
+__global__ __launch_bounds__(256, 4)
 void comp_keys_coset_gosper(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int hamming_h, int B_top, int k1, int k2,
-    uint64_t base_rank_offset,
-    uint64_t L_totalCombs,
-    int chunk_size)
+    uint64_t base_rank_offset, uint64_t L_totalCombs,
+    int chunk_size, bool is_sparse)
 {
     int n = d_numFreeBits;
     if (n > 64) return;
     int L_bits = n - B_top;
 
-    int lane = threadIdx.x;
-    
-    // Read the number of valid Q_i combinations for this block
-    uint64_t W = __ldg(&d_combTable[B_top * COMB_TABLE_K + k1]);
-    if (lane >= W) return; // Idle threads in partial warps
+    uint64_t qi_mask;
+    uint64_t start_rank;
+    uint32_t global_walk_id;
 
-    // ═══════ INSTANT Q_i LOOKUP (Warp Identity) ═══════
-    // O(1) constant memory read. Shift to the top reserved bits.
-    uint64_t qi_mask = d_Qi_array[lane] << L_bits;
+    if (is_sparse) {
+        // SPARSE MODE: 1 Thread = 1 Walk (100% Occupancy)
+        // blockIdx.y holds the Q_i index.
+        int qi_idx = blockIdx.y;
+        qi_mask = d_Qi_array[qi_idx] << L_bits;
 
-    // ═══════ UNRANK P_base (Walk Engine) ═══════
-    uint64_t start_rank = base_rank_offset + (uint64_t)blockIdx.x * chunk_size;
+        uint32_t walk_id = blockIdx.x * blockDim.x + threadIdx.x;
+        start_rank = base_rank_offset + (uint64_t)walk_id * chunk_size;
+        // Encode Q_i in upper 8 bits, Walk ID in lower 24 bits for the CPU
+        global_walk_id = (qi_idx << 24) | (walk_id & 0xFFFFFF);
+    } else {
+        // DENSE MODE: 1 Block = 1 Walk (Zero Divergence Coset-Delta)
+        int lane = threadIdx.x;
+        uint64_t W = __ldg(&d_combTable[B_top * COMB_TABLE_K + k1]);
+        if (lane >= W) return;
+
+        qi_mask = d_Qi_array[lane] << L_bits;
+        start_rank = base_rank_offset + (uint64_t)blockIdx.x * chunk_size;
+        global_walk_id = blockIdx.x * blockDim.x + lane; 
+    }
+
     if (start_rank >= L_totalCombs) return;
 
     uint64_t p_mask_lo, p_mask_hi;
@@ -613,7 +625,7 @@ void comp_keys_coset_gosper(
 
     if (!pointSet) return;
 
-    // ═══════ LOCKSTEP BATCHED WALK LOOP ═══════
+    // ═══════ BATCHED WALK LOOP ═══════
     uint64_t buf_X[MAX_BATCH][4];
     uint64_t buf_Y[MAX_BATCH][4];
     uint64_t buf_Z[MAX_BATCH][4];
@@ -636,8 +648,6 @@ void comp_keys_coset_gosper(
 
         if ((p_mask & ~valid_p_mask) || p_mask == 0) break;
 
-        // Apply XOR diff ONLY to the P_base sequence.
-        // Because Q_i is static, it vanishes during XOR calculation.
         uint64_t old_seed = (old_p ^ d_targetSeedLo) & d_seedMaskLo;
         uint64_t new_seed = (p_mask ^ d_targetSeedLo) & d_seedMaskLo;
         apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
@@ -657,18 +667,14 @@ void comp_keys_coset_gosper(
                 if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
 
                 uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-                _ModSqr(Zinv_sq, Zinv[b]);
-                _ModMult(px, Zinv_sq, buf_X[b]);
-                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
-                _ModMult(py, Zinv_cb, buf_Y[b]);
+                _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]); _ModMult(py, Zinv_cb, buf_Y[b]);
 
                 uint8_t odd_py = (uint8_t)(py[0] & 1);
                 uint32_t h[5];
                 _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
                 if (sAddress[h[0] & 0xFFFF] != 0) {
-                    // Global Walk ID encodes block (P_base) and lane (Q_i) for CPU reconstruct
-                    uint32_t global_walk_id = blockIdx.x * blockDim.x + lane;
                     uint32_t step_idx = steps_done - batch_count + b;
                     CheckPointWalk(h, global_walk_id, step_idx, sAddress, lookup32, out);
                 }
@@ -685,7 +691,6 @@ void comp_keys_coset_gosper(
         }
     }
 
-    // ─── FLUSH REMAINING BATCH ───
     if (batch_count > 0) {
         batch_invert_Z(buf_Z, Zinv, batch_count);
         for (int b = 0; b < batch_count; b++) {
@@ -702,7 +707,6 @@ void comp_keys_coset_gosper(
             _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
             if (sAddress[h[0] & 0xFFFF] != 0) {
-                uint32_t global_walk_id = blockIdx.x * blockDim.x + lane;
                 uint32_t step_idx = steps_done - batch_count + b;
                 CheckPointWalk(h, global_walk_id, step_idx, sAddress, lookup32, out);
             }
