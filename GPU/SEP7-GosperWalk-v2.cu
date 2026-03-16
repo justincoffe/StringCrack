@@ -542,7 +542,7 @@ void VanitySearch::reconstructGosperWalkKey(
 // =====================================================================================
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(128, 12)
+__global__ __launch_bounds__(128, 14)
 void comp_keys_coset_gosper(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int hamming_h, int B_top, int k1, int k2,
