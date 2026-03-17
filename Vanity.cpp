@@ -1656,15 +1656,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     
     // Compute Q_i offsets for the block threads
     uint64_t* h_Qi_array = (uint64_t*)malloc(4096 * sizeof(uint64_t)); // <-- CHANGED from 256 to 4096
-    for (int k1 = 0; k1 <= B_top; k1++) {
-        uint64_t W = h_combTable[B_top * tableK + k1];
-        for (uint64_t rank = 0; rank < W; rank++) {
-            uint64_t mask_lo, mask_hi;
-            cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
-            h_Qi_array[rank] = mask_lo;
-        }
-        g.UploadQiArray(h_Qi_array, W);
-    }
     
     // Grid sizing: Massively oversubscribe so the hardware scheduler queues blocks
     cudaDeviceProp deviceProp;
@@ -1696,128 +1687,167 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             uint64_t W = h_combTable[B_top * tableK + k1]; // Active threads per block
             if (W == 0) continue;
             
-            uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2]; // Total walks needed
+            uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2]; 
             if (L_totalCombs == 0) continue;
-            
-            // Dynamic chunk size based on W (coset threads per block)
-            int chunk_size = targetCandidates / (numBlocks * W);
-            if (chunk_size < 64) chunk_size = 64;
-            
-            // Upload the specific Q_i combinations for this k1
-            for (uint64_t rank = 0; rank < W; rank++) {
-                uint64_t mask_lo, mask_hi;
-                cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
-                h_Qi_array[rank] = mask_lo;
-            }
-            g.UploadQiArray(h_Qi_array, W);
 
-            uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
-            uint64_t sliceStart = sliceId * sliceSize;
-            uint64_t sliceEnd   = sliceStart + sliceSize;
-            if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
-            
-            uint64_t pos_offset = sliceStart;
-            while (pos_offset < sliceEnd && !endOfSearch) {
-                if (Pause) {
-                    Paused = true;
-                    t_Paused = Timer::get_tick() - t0 + t_Paused;
-                    while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                    if (endOfSearch) break;
-                    endOfSearch = true;
-                    break;
-                }
+            // =========================================================================
+            // ENGINE 1: FALLBACK (W < 16) | 1 Thread = 1 Walk
+            // =========================================================================
+            if (W < 16) {
+                // Massively oversubscribe to hide L1 memory latency
+                int numBlocks = smCount * 1024;
+                int numWalks = numBlocks * 32; // ~2.7 Million walks
+                int chunk_size = targetCandidates / numWalks;
+                if (chunk_size < 64) chunk_size = 64;
                 
-                uint64_t remaining = sliceEnd - pos_offset;
-                int this_chunk = chunk_size;
-                uint64_t batchCoverage = (uint64_t)numBlocks * this_chunk;
+                // IMPORTANT: The fallback walks the FULL space of h
+                uint64_t full_total = h_combTable[n * tableK + h];
                 
-                if (batchCoverage > remaining) {
-                    this_chunk = (remaining + numBlocks - 1) / numBlocks;
-                    if (this_chunk < 1) this_chunk = 1;
-                    batchCoverage = (uint64_t)numBlocks * this_chunk;
-                    if (batchCoverage > remaining) batchCoverage = remaining;
-                }
+                // Only execute this once per 'h' layer, skip the rest of the k1 loops
+                if (k1 > 0) continue; 
                 
-                // Hybrid router: FALLBACK for small W, COSET for large W
-                if (W < 16) {
-                    // FALLBACK: Fast L1 RevDoor for W=1 and W=8
-                    // We must process the entire combinations directly, ignoring Q_i offsets
-                    int numWalks = smCount * 1024 * 32; // 86,016 blocks * 32 threads
-                    int fb_chunk_size = targetCandidates / numWalks;
-                    if (fb_chunk_size < 64) fb_chunk_size = 64;
-                    
-                    // IMPORTANT: The fallback walks the FULL space of h, not just L_bits
-                    uint64_t full_total = h_combTable[n * tableK + h];
-                    // Only execute this once per 'h' layer, skip the rest of the k1 loops
-                    if (k1 > 0) continue; 
-                    
-                    uint64_t sliceSize  = (full_total + sliceCount - 1) / sliceCount;
-                    uint64_t sliceStart = sliceId * sliceSize;
-                    uint64_t sliceEnd   = sliceStart + sliceSize;
-                    if (sliceEnd > full_total) sliceEnd = full_total;
-                    
-                    uint64_t fb_pos_offset = sliceStart;
-                    while (fb_pos_offset < sliceEnd && !endOfSearch) {
-                        uint64_t remaining = sliceEnd - fb_pos_offset;
-                        int this_chunk = fb_chunk_size;
-                        uint64_t batchCoverage = (uint64_t)(smCount * 1024 * 32) * this_chunk;
-                        
-                        if (batchCoverage > remaining) {
-                            this_chunk = (remaining + (smCount * 1024 * 32) - 1) / (smCount * 1024 * 32);
-                            if (this_chunk < 1) this_chunk = 1;
-                            batchCoverage = (uint64_t)(smCount * 1024 * 32) * this_chunk;
-                            if (batchCoverage > remaining) batchCoverage = remaining;
-                        }
-                        
-                        g.LaunchRevDoorFallbackAsync(h, fb_pos_offset, full_total, this_chunk, smCount * 1024);
-                        
-                        // Sync
-                        if (!firstBatch) {
-                            int prev_s = (g.currentStep - 2) % 2;
-                            uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
-                            // CPU reconstruction would go here
-                        }
-                        firstBatch = false;
-                        
-                        fb_pos_offset += batchCoverage;
-                        totalKeysProcessed += batchCoverage;
+                uint64_t sliceSize  = (full_total + sliceCount - 1) / sliceCount;
+                uint64_t sliceStart = sliceId * sliceSize;
+                uint64_t sliceEnd   = sliceStart + sliceSize;
+                if (sliceEnd > full_total) sliceEnd = full_total;
+                
+                uint64_t pos_offset = sliceStart;
+                while (pos_offset < sliceEnd && !endOfSearch) {
+                    if (Pause) {
+                        Paused = true;
+                        t_Paused = Timer::get_tick() - t0 + t_Paused;
+                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                        if (endOfSearch) break;
+                        endOfSearch = true;
+                        break;
                     }
-                    break; // Break the k1 loop, we handled the whole 'h' layer!
-                } else {
-                    // GOD ENGINE: Coset-Delta RevDoor for W >= 16
+
+                    uint64_t remaining = sliceEnd - pos_offset;
+                    int this_chunk = chunk_size;
+                    uint64_t batchCoverage = (uint64_t)numWalks * this_chunk;
+                    
+                    if (batchCoverage > remaining) {
+                        this_chunk = (remaining + numWalks - 1) / numWalks;
+                        if (this_chunk < 1) this_chunk = 1;
+                        batchCoverage = (uint64_t)numWalks * this_chunk;
+                        if (batchCoverage > remaining) batchCoverage = remaining;
+                    }
+                    
+                    g.LaunchRevDoorFallbackAsync(h, pos_offset, full_total, this_chunk, numBlocks);
+                    
+                    // ─── DOUBLE-BUFFER SYNC ───
+                    if (!firstBatch) {
+                        int prev_s = (g.currentStep - 2) % 2;
+                        uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                            // (Hit logic goes here)
+                        }
+                        found.clear();
+                    }
+                    firstBatch = false;
+                    
+                    pos_offset += batchCoverage;
+                    totalKeysProcessed += batchCoverage;
+                    counters[thId] = totalKeysProcessed;
+
+                    // Dedicated Speed Ticker for the Fallback Layer
+                    if (sliceId == 0) {
+                        ttot = Timer::get_tick() - t0 + t_Paused;
+                        static double lastTime = 0.0;
+                        static uint64_t lastKeys = 0;
+                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; lastKeys = totalKeysProcessed;
+                            printf("[SEP7-L1-FALLBACK] h=%d | W_fallback | %.1f MK/s | %.2f BKeys\r", 
+                                   h, spd, (double)totalKeysProcessed / 1e9);
+                            fflush(stdout);
+                        }
+                    }
+                }
+                break; // Break the k1 loop, we handled the whole 'h' layer!
+
+            // =========================================================================
+            // ENGINE 2: GOD ENGINE (W >= 16) | 1 Block = 1 Walk
+            // =========================================================================
+            } else {
+                
+                // Upload the specific Q_i combinations for this k1
+                for (uint64_t rank = 0; rank < W; rank++) {
+                    uint64_t mask_lo, mask_hi;
+                    cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
+                    h_Qi_array[rank] = mask_lo;
+                }
+                g.UploadQiArray(h_Qi_array, W);
+
+                // Hardware-perfect fit: exactly 14 blocks per SM. 
+                int blocksPerSM = 14;
+                int numBlocks = smCount * blocksPerSM; // Exactly 1,176 walks!
+                
+                // Dynamic chunk size based on W (coset threads per block)
+                int chunk_size = targetCandidates / (numBlocks * W);
+                if (chunk_size < 64) chunk_size = 64;
+                
+                uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
+                uint64_t sliceStart = sliceId * sliceSize;
+                uint64_t sliceEnd   = sliceStart + sliceSize;
+                if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+                
+                uint64_t pos_offset = sliceStart;
+                while (pos_offset < sliceEnd && !endOfSearch) {
+                    if (Pause) {
+                        Paused = true;
+                        t_Paused = Timer::get_tick() - t0 + t_Paused;
+                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                        if (endOfSearch) break;
+                        endOfSearch = true;
+                        break;
+                    }
+
+                    uint64_t remaining = sliceEnd - pos_offset;
+                    int this_chunk = chunk_size;
+                    
+                    // For God engine, 1 walk = 1 block.
+                    uint64_t batchCoverage = (uint64_t)numBlocks * this_chunk;
+                    
+                    if (batchCoverage > remaining) {
+                        this_chunk = (remaining + numBlocks - 1) / numBlocks;
+                        if (this_chunk < 1) this_chunk = 1;
+                        batchCoverage = (uint64_t)numBlocks * this_chunk;
+                        if (batchCoverage > remaining) batchCoverage = remaining;
+                    }
+                    
                     int s = g.currentStep % 2;
                     streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
                     streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
-                
+                    
                     g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
-                
-                if (!firstBatch) {
-                    int prev_s = (g.currentStep - 2) % 2;
-                    uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
-                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                        // NOTE: You will need to write a reconstructCosetRevDoorKey function
-                        // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
-                        // For now, it will output the raw hits.
+                    
+                    if (!firstBatch) {
+                        int prev_s = (g.currentStep - 2) % 2;
+                        uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                            // (Hit logic goes here)
+                        }
+                        found.clear();
                     }
-                    found.clear();
-                }
-                firstBatch = false;
-                
-                pos_offset += batchCoverage;
-                totalKeysProcessed += batchCoverage * W; // Multiply by W because W threads run per walk
-                counters[thId] = totalKeysProcessed;
-                } // End else (Coset path)
-                
-                if (sliceId == 0) {
-                    ttot = Timer::get_tick() - t0 + t_Paused;
-                    static double lastTime = 0.0;
-                    static uint64_t lastKeys = 0;
-                    if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                        double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                        lastTime = ttot; lastKeys = totalKeysProcessed;
-                        printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
-                               h, k1, k2, W, spd, (double)totalKeysProcessed / 1e9);
-                        fflush(stdout);
+                    firstBatch = false;
+                    
+                    pos_offset += batchCoverage;
+                    // Multiply by W because W active threads run per walk block
+                    totalKeysProcessed += batchCoverage * W; 
+                    counters[thId] = totalKeysProcessed;
+                    
+                    if (sliceId == 0) {
+                        ttot = Timer::get_tick() - t0 + t_Paused;
+                        static double lastTime = 0.0;
+                        static uint64_t lastKeys = 0;
+                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; lastKeys = totalKeysProcessed;
+                            printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
+                                   h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            fflush(stdout);
+                        }
                     }
                 }
             }
