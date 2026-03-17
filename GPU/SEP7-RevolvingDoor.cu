@@ -49,6 +49,29 @@ static void cpu_unrank_combination(
     uint64_t &mask_lo, uint64_t &mask_hi,
     const uint64_t* combTable, int tableK);
 
+// CPU-side combinatorial unranking implementation
+static void cpu_unrank_combination(
+    uint64_t rank, int n, int k,
+    uint64_t &mask_lo, uint64_t &mask_hi,
+    const uint64_t* combTable, int tableK)
+{
+    mask_lo = 0;
+    mask_hi = 0;
+    int remaining = k;
+    for (int i = n - 1; i >= 0 && remaining > 0; i--) {
+        uint64_t c = combTable[i * tableK + remaining];
+        if (rank >= c) {
+            rank -= c;
+            if (i < 64) {
+                mask_lo |= (1ULL << i);
+            } else {
+                mask_hi |= (1ULL << (i - 64));
+            }
+            remaining--;
+        }
+    }
+}
+
 // =====================================================================================
 // D-Table: Precomputed EC point differences for single-swap transitions
 //
