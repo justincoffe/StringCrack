@@ -1702,7 +1702,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 uint64_t sliceEnd   = sliceStart + sliceSize;
                 if (sliceEnd > full_total) sliceEnd = full_total;
                 
-                uint64_t batchCoverage = g.nbThread; // Gosper processes exactly nbThread per launch
+                uint64_t batchCoverage = g.GetNbThread(); // Gosper processes exactly nbThread per launch
                 uint64_t pos_offset = sliceStart;
                 
                 while (pos_offset < sliceEnd && !endOfSearch) {
