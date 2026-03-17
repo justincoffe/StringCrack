@@ -1956,3 +1956,22 @@ uint32_t GPUEngine::SyncGosperBatch(int stepToSync, std::vector<ITEM> &addressFo
     }
     return nbFound;
 }
+
+void GPUEngine::LaunchCosetGosperWalkAsync(
+    int L_bits, int k2, int B_top, int k1,
+    uint64_t base_pos, uint64_t L_totalCombs,
+    int chunk_size, int total_walks, int W)
+{
+    int s = currentStep % 2;
+    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
+    
+    int threadsPerBlock = 128;
+    int numBlocks = (total_walks + threadsPerBlock - 1) / threadsPerBlock;
+    
+    comp_keys_coset_gosper_walk<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
+        inputAddress, inputAddressLookUp, d_output[s],
+        L_bits, k2, B_top, k1, base_pos, L_totalCombs, chunk_size, W);
+    
+    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
+    currentStep++;
+}

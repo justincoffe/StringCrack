@@ -1756,9 +1756,14 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         int prev_s = (g.currentStep - 2) % 2;
                         uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                            // NOTE: You will need to write a reconstructCosetRevDoorKey function
-                            // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
-                            // For now, it will output the raw hits.
+                            ITEM it = found[fi];
+                            uint32_t walk_chunk_id = it.thId / 128;
+                            uint32_t qi_idx = it.thId % 128;
+                            uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                            reconstructCosetKey(qi_idx, walk_chunk_id, step, 
+                                streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
+                                streamPosBase[prev_s], streamChunkSize[prev_s],
+                                it.hash, scConfig, h_combTable, tableK);
                         }
                         found.clear();
                     }
@@ -1780,6 +1785,22 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             fflush(stdout);
                         }
                     }
+                }
+                
+                if (!firstBatch) {
+                    int prev_s = (g.currentStep - 1) % 2;
+                    uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                        ITEM it = found[fi];
+                        uint32_t walk_chunk_id = it.thId / 128;
+                        uint32_t qi_idx = it.thId % 128;
+                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                        reconstructCosetKey(qi_idx, walk_chunk_id, step, 
+                            streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
+                            streamPosBase[prev_s], streamChunkSize[prev_s],
+                            it.hash, scConfig, h_combTable, tableK);
+                    }
+                    found.clear();
                 }
                 
             } else if (W >= 32 && W < 128) {
@@ -1857,7 +1878,14 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         int prev_s = (g.currentStep - 2) % 2;
                         uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                            // Process matches from warp-packed kernel
+                            ITEM it = found[fi];
+                            uint32_t walk_chunk_id = it.thId >> 16;
+                            uint32_t qi_idx = it.thId & 0xFFFF;
+                            uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                            reconstructCosetKey(qi_idx, walk_chunk_id, step, 
+                                streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
+                                streamPosBase[prev_s], streamChunkSize[prev_s],
+                                it.hash, scConfig, h_combTable, tableK);
                         }
                         found.clear();
                     }
@@ -1885,6 +1913,16 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 1) % 2;
                     uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
+                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                        ITEM it = found[fi];
+                        uint32_t walk_chunk_id = it.thId >> 16;
+                        uint32_t qi_idx = it.thId & 0xFFFF;
+                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                        reconstructCosetKey(qi_idx, walk_chunk_id, step, 
+                            streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
+                            streamPosBase[prev_s], streamChunkSize[prev_s],
+                            it.hash, scConfig, h_combTable, tableK);
+                    }
                     found.clear();
                 }
             } else {
@@ -1942,14 +1980,30 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         if (batchCoverage > remaining) batchCoverage = remaining;
                     }
 
-                    g.LaunchGosperWalkAsync(h_total, pos_offset, L_totalCombs,
-                                            this_chunk, total_walks);
+                    // 1. SAVE the stream variables for the CPU reconstructor
+                    int s = g.currentStep % 2;
+                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
+                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
 
+                    // 2. Launch the COSET-AWARE Gosper Walk
+                    g.LaunchCosetGosperWalkAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, total_walks, (int)W);
+
+                    // 3. Process previous batch
                     if (!firstBatch) {
                         int prev_s = (g.currentStep - 2) % 2;
-                        uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
+                        uint32_t nbFound = g.SyncGosperBatch(prev_s, found); // Native SyncGosperBatch works perfectly here
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                            // Process matches
+                            ITEM it = found[fi];
+                            // Unpack the ID from the new Kernel
+                            uint32_t walk_chunk_id = it.thId >> 16;
+                            uint32_t qi_idx = it.thId & 0xFFFF;
+                            uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                            
+                            // Reconstruct using CosetKey (because we used the Q_i array)
+                            reconstructCosetKey(qi_idx, walk_chunk_id, step,
+                                streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
+                                streamPosBase[prev_s], streamChunkSize[prev_s],
+                                it.hash, scConfig, h_combTable, tableK);
                         }
                         found.clear();
                     }
@@ -1973,10 +2027,20 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                 }
 
-                // Final sync
+                // Final drain for Engine 3
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 1) % 2;
                     uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
+                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                        ITEM it = found[fi];
+                        uint32_t walk_chunk_id = it.thId >> 16;
+                        uint32_t qi_idx = it.thId & 0xFFFF;
+                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                        reconstructCosetKey(qi_idx, walk_chunk_id, step,
+                            streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
+                            streamPosBase[prev_s], streamChunkSize[prev_s],
+                            it.hash, scConfig, h_combTable, tableK);
+                    }
                     found.clear();
                 }
             }

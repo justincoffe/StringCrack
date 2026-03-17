@@ -177,6 +177,9 @@ public:
       int chunk_size, int numBlocks, int qi_batches);
   uint32_t SyncWarpPackedRevDoorBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
+  // SEP7: Coset-Aware Gosper Walk Kernel
+  void LaunchCosetGosperWalkAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t L_totalCombs, int chunk_size, int total_walks, int W);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 
