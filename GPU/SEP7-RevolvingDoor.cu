@@ -958,32 +958,80 @@ fail:
     return false;
 }
 
-
 // =====================================================================================
-// FALLBACK L1 REVOLVING DOOR (1 Thread = 1 Walk)
-// Used for small W. Bypasses the D-Table entirely to prevent L1 Cache thrashing.
-// Uses exactly 2 EC additions from the 4KB G_free table (100% L1 cache hits).
+// DEVICE HELPER: Process and Hash a Full Batch
 // =====================================================================================
-
-template <int MAX_BATCH>
-__global__ __launch_bounds__(32, 14)
-void comp_keys_revdoor_fallback(
-    address_t* sAddress, uint32_t* lookup32, uint32_t* out,
-    int hamming_h, uint64_t base_pos, uint64_t totalCombs, int chunk_size)
+__device__ __forceinline__ void process_batch(
+    uint64_t buf_X[][4], uint64_t buf_Y[][4], uint64_t buf_Z[][4],
+    uint64_t buf_masks[], uint64_t Zinv[][4],
+    int batch_count, int steps_done, uint32_t walk_id,
+    address_t* sAddress, uint32_t* out) 
 {
-    int lane_id = threadIdx.x;
-    uint32_t walk_id = blockIdx.x * 32 + lane_id;
+    rd_batch_invert_Z(buf_Z, Zinv, batch_count);
+    
+    for (int b = 0; b < batch_count; b++) {
+        uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
+        int pc_abs = __popcll(s_check) + d_lockedPopcount;
+        if (pc_abs < d_popcountMin || d_popcountMax < pc_abs) continue;
 
-    uint64_t start_pos = base_pos + (uint64_t)walk_id * (uint64_t)chunk_size;
-    if (start_pos >= totalCombs) return;
+        uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+        _ModSqr(Zinv_sq, Zinv[b]);
+        _ModMult(px, Zinv_sq, buf_X[b]);
+        _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+        _ModMult(py, Zinv_cb, buf_Y[b]);
+        
+        uint8_t odd_py = (uint8_t)(py[0] & 1);
+        uint32_t h[5];
+        _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
-    int n = d_numFreeBits;
-    uint64_t mask, p0, p1, neg_bits;
+        if (sAddress[h[0] & 0xFFFF] != 0) {
+            uint32_t step_idx = steps_done - batch_count + b;
+            uint32_t pos = atomicAdd(out, 1);
+            if (pos < 65536) {
+                uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                item[0] = walk_id; 
+                int16_t* ptr = (int16_t*)&item[1];
+                ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                memcpy(item + 2, h, 20);
+            }
+        }
+    }
+}
+
+// =====================================================================================
+// WARP-PACKED COSET REVDOOR (32 <= W < 128)
+// =====================================================================================
+template <int MAX_BATCH>
+__global__ __launch_bounds__(128, 4) 
+void comp_keys_warp_packed_revdoor(
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out,
+    int L_bits, int k2, int B_top, int k1,
+    uint64_t base_pos, uint64_t L_totalCombs,
+    int chunk_size, int qi_batches, uint64_t W)
+{
+    int lane = threadIdx.x & 31;
+    int warp_id = threadIdx.x >> 5;
+    
+    uint32_t global_warp_id = (blockIdx.x * 4) + warp_id;
+    uint32_t walk_id = global_warp_id / qi_batches;
+    uint32_t qi_batch_id = global_warp_id % qi_batches;
+
+    int qi_idx = (qi_batch_id * 32) + lane;
+    if (qi_idx >= W) return; 
+
+    uint64_t start_pos = base_pos + (uint64_t)walk_id * chunk_size;
+    if (start_pos >= L_totalCombs) return;
+
+    uint64_t qi_mask = d_Qi_array[qi_idx] << L_bits;
+
+    uint64_t p_mask, p0, p1, neg_bits;
     int curr_n, curr_k, sp;
+    revdoor_unrank_reg(L_bits, k2, start_pos, p_mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
 
-    revdoor_unrank_reg(n, hamming_h, start_pos, mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
+    uint64_t full_mask = qi_mask | p_mask;
 
-    uint64_t seed = (mask ^ d_targetSeedLo) & d_seedMaskLo;
+    uint64_t seed = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
     uint64_t accX[4], accY[4], accZ[4];
     bool pointSet = false;
 
@@ -993,7 +1041,7 @@ void comp_keys_revdoor_fallback(
         pointSet = true;
     }
 
-    int num_windows = (n + 7) / 8;
+    int num_windows = (d_numFreeBits + 7) / 8;
     uint64_t s = seed;
     for (int w = 0; w < 8 && w < num_windows; w++) {
         int byte_val = s & 0xFF;
@@ -1015,7 +1063,6 @@ void comp_keys_revdoor_fallback(
         }
         s >>= 8;
     }
-
     if (!pointSet) return;
 
     uint64_t buf_X[MAX_BATCH][4], buf_Y[MAX_BATCH][4], buf_Z[MAX_BATCH][4];
@@ -1023,123 +1070,49 @@ void comp_keys_revdoor_fallback(
 
     int steps_done = 0;
     int end_step = chunk_size;
-    uint64_t max_steps = totalCombs - start_pos;
+    uint64_t max_steps = L_totalCombs - start_pos;
     if ((uint64_t)end_step > max_steps) end_step = (int)max_steps;
 
     int batch_count = 0;
     Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
-    buf_masks[0] = mask;
+    buf_masks[0] = full_mask;
     batch_count = 1; steps_done = 1;
 
     while (steps_done < end_step) {
         int removed_idx, added_idx;
-        if (!revdoor_step_reg(mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
+        if (!revdoor_step_reg(p_mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
             break; 
         }
-        mask = (mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
+        p_mask = (p_mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
+        full_mask = qi_mask | p_mask;
 
-        // ─── L1 CACHE BYPASS (2 Additions, NO D-Table) ───
-        int rem_offset = removed_idx * 4;
-        ulonglong2 remX_lo = __ldg((ulonglong2*)&d_GfreeX[rem_offset]);
-        ulonglong2 remX_hi = __ldg((ulonglong2*)&d_GfreeX[rem_offset + 2]);
-        ulonglong2 remY_lo = __ldg((ulonglong2*)&d_GfreeY[rem_offset]); // FIX: READ REGULAR POSITIVE Y
-        ulonglong2 remY_hi = __ldg((ulonglong2*)&d_GfreeY[rem_offset + 2]); 
-        uint64_t dX_rem[4] = {remX_lo.x, remX_lo.y, remX_hi.x, remX_hi.y};
-        uint64_t dY_rem[4] = {remY_lo.x, remY_lo.y, remY_hi.x, remY_hi.y};
+        uint64_t dX[4], dY[4];
+        load_Dtable(removed_idx, added_idx, d_numFreeBits, dX, dY);
 
-        // FIX: INLINE SILICON NEGATION (-Y = Prime - Y)
-        uint64_t p0 = 0xFFFFFFFEFFFFFC2FULL;
-        uint64_t p_hi = 0xFFFFFFFFFFFFFFFFULL;
-        uint64_t dY_neg[4];
-        asm("sub.cc.u64 %0, %1, %2;"  : "=l"(dY_neg[0]) : "l"(p0),   "l"(dY_rem[0]));
-        asm("subc.cc.u64 %0, %1, %2;" : "=l"(dY_neg[1]) : "l"(p_hi), "l"(dY_rem[1]));
-        asm("subc.cc.u64 %0, %1, %2;" : "=l"(dY_neg[2]) : "l"(p_hi), "l"(dY_rem[2]));
-        asm("subc.u64 %0, %1, %2;"    : "=l"(dY_neg[3]) : "l"(p_hi), "l"(dY_rem[3]));
-
-        jacobian_add_affine_inplace(accX, accY, accZ, dX_rem, dY_neg); // USE NEGATED Y
-
-        int add_offset = added_idx * 4;
-        ulonglong2 addX_lo = __ldg((ulonglong2*)&d_GfreeX[add_offset]);
-        ulonglong2 addX_hi = __ldg((ulonglong2*)&d_GfreeX[add_offset + 2]);
-        ulonglong2 addY_lo = __ldg((ulonglong2*)&d_GfreeY[add_offset]); 
-        ulonglong2 addY_hi = __ldg((ulonglong2*)&d_GfreeY[add_offset + 2]);
-        uint64_t dX_add[4] = {addX_lo.x, addX_lo.y, addX_hi.x, addX_hi.y};
-        uint64_t dY_add[4] = {addY_lo.x, addY_lo.y, addY_hi.x, addY_hi.y};
-        
-        jacobian_add_affine_inplace(accX, accY, accZ, dX_add, dY_add);
+        jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
 
         Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
-        buf_masks[batch_count] = mask;
+        buf_masks[batch_count] = full_mask;
         batch_count++; steps_done++;
 
         if (batch_count >= MAX_BATCH) {
-            rd_batch_invert_Z(buf_Z, Zinv, batch_count);
-            for (int b = 0; b < batch_count; b++) {
-                uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-                int pc_abs = __popcll(s_check) + d_lockedPopcount;
-                if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+            process_batch(buf_X, buf_Y, buf_Z, buf_masks, Zinv, batch_count, steps_done, walk_id, sAddress, out);
 
-                uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-                _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
-                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]); _ModMult(py, Zinv_cb, buf_Y[b]);
-                uint8_t odd_py = (uint8_t)(py[0] & 1);
-                uint32_t h[5];
-                _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-                if (sAddress[h[0] & 0xFFFF] != 0) {
-                    uint32_t step_idx = steps_done - batch_count + b;
-                    uint32_t pos = atomicAdd(out, 1);
-                    if (pos < 65536) {
-                        uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                        item[0] = walk_id; 
-                        int16_t* ptr = (int16_t*)&item[1];
-                        ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                        ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                        memcpy(item + 2, h, 20);
-                    }
-                }
-            }
             if (steps_done < end_step) {
                 int last = batch_count - 1;
                 uint64_t Zinv_sq[4], Zinv_cb[4];
                 _ModSqr(Zinv_sq, Zinv[last]); _ModMult(accX, Zinv_sq, buf_X[last]);
                 _ModMult(Zinv_cb, Zinv_sq, Zinv[last]); _ModMult(accY, Zinv_cb, buf_Y[last]);
-                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0; 
             }
             batch_count = 0;
         }
     }
 
     if (batch_count > 0) {
-        rd_batch_invert_Z(buf_Z, Zinv, batch_count);
-        for (int b = 0; b < batch_count; b++) {
-            uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-            int pc_abs = __popcll(s_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
-
-            uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-            _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
-            _ModMult(Zinv_cb, Zinv_sq, Zinv[b]); _ModMult(py, Zinv_cb, buf_Y[b]);
-            uint8_t odd_py = (uint8_t)(py[0] & 1);
-            uint32_t h[5];
-            _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-            if (sAddress[h[0] & 0xFFFF] != 0) {
-                uint32_t step_idx = steps_done - batch_count + b;
-                uint32_t pos = atomicAdd(out, 1);
-                if (pos < 65536) {
-                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                    item[0] = walk_id;
-                    int16_t* ptr = (int16_t*)&item[1];
-                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                    memcpy(item + 2, h, 20);
-                }
-            }
-        }
+        process_batch(buf_X, buf_Y, buf_Z, buf_masks, Zinv, batch_count, steps_done, walk_id, sAddress, out);
     }
 }
-
 
 // =====================================================================================
 // DENSE COSET-DELTA REVOLVING DOOR (1 Block = 1 Walk)
@@ -1398,11 +1371,12 @@ void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64
     currentStep++;
 }
 
-void GPUEngine::LaunchRevDoorFallbackAsync(int hamming_h, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks) {
+void GPUEngine::LaunchWarpPackedRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks, int qi_batches, uint64_t W) {
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
-    comp_keys_revdoor_fallback<BATCH_N><<<numBlocks, 32, 0, streams[s]>>>(
-        inputAddress, inputAddressLookUp, d_output[s], hamming_h, base_pos, totalCombs, chunk_size);
+    comp_keys_warp_packed_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
+        inputAddress, inputAddressLookUp, d_output[s],
+        L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size, qi_batches, W);
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;
 }
