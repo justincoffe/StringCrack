@@ -592,7 +592,7 @@ __device__ __forceinline__ uint64_t combo_to_mask(const int c[], int k) {
 // =====================================================================================
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(128, 4)
+__global__ __launch_bounds__(128, 14)
 void comp_keys_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int hamming_h,
