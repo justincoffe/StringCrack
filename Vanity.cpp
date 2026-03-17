@@ -1738,11 +1738,58 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     if (batchCoverage > remaining) batchCoverage = remaining;
                 }
                 
-                int s = g.currentStep % 2;
-                streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
-                streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
+                // Hybrid router: FALLBACK for small W, COSET for large W
+                if (W < 16) {
+                    // FALLBACK: Fast L1 RevDoor for W=1 and W=8
+                    // We must process the entire combinations directly, ignoring Q_i offsets
+                    int numWalks = smCount * 1024 * 32; // 86,016 blocks * 32 threads
+                    int fb_chunk_size = targetCandidates / numWalks;
+                    if (fb_chunk_size < 64) fb_chunk_size = 64;
+                    
+                    // IMPORTANT: The fallback walks the FULL space of h, not just L_bits
+                    uint64_t full_total = h_combTable[n * tableK + h];
+                    // Only execute this once per 'h' layer, skip the rest of the k1 loops
+                    if (k1 > 0) continue; 
+                    
+                    uint64_t sliceSize  = (full_total + sliceCount - 1) / sliceCount;
+                    uint64_t sliceStart = sliceId * sliceSize;
+                    uint64_t sliceEnd   = sliceStart + sliceSize;
+                    if (sliceEnd > full_total) sliceEnd = full_total;
+                    
+                    uint64_t fb_pos_offset = sliceStart;
+                    while (fb_pos_offset < sliceEnd && !endOfSearch) {
+                        uint64_t remaining = sliceEnd - fb_pos_offset;
+                        int this_chunk = fb_chunk_size;
+                        uint64_t batchCoverage = (uint64_t)(smCount * 1024 * 32) * this_chunk;
+                        
+                        if (batchCoverage > remaining) {
+                            this_chunk = (remaining + (smCount * 1024 * 32) - 1) / (smCount * 1024 * 32);
+                            if (this_chunk < 1) this_chunk = 1;
+                            batchCoverage = (uint64_t)(smCount * 1024 * 32) * this_chunk;
+                            if (batchCoverage > remaining) batchCoverage = remaining;
+                        }
+                        
+                        g.LaunchRevDoorFallbackAsync(h, fb_pos_offset, full_total, this_chunk, smCount * 1024);
+                        
+                        // Sync
+                        if (!firstBatch) {
+                            int prev_s = (g.currentStep - 2) % 2;
+                            uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                            // CPU reconstruction would go here
+                        }
+                        firstBatch = false;
+                        
+                        fb_pos_offset += batchCoverage;
+                        totalKeysProcessed += batchCoverage;
+                    }
+                    break; // Break the k1 loop, we handled the whole 'h' layer!
+                } else {
+                    // GOD ENGINE: Coset-Delta RevDoor for W >= 16
+                    int s = g.currentStep % 2;
+                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
+                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
                 
-                g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
+                    g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
                 
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 2) % 2;
@@ -1759,6 +1806,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 pos_offset += batchCoverage;
                 totalKeysProcessed += batchCoverage * W; // Multiply by W because W threads run per walk
                 counters[thId] = totalKeysProcessed;
+                } // End else (Coset path)
                 
                 if (sliceId == 0) {
                     ttot = Timer::get_tick() - t0 + t_Paused;

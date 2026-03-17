@@ -960,6 +960,177 @@ fail:
 
 
 // =====================================================================================
+// FALLBACK L1 REVOLVING DOOR (1 Thread = 1 Walk)
+// Used for small W. Bypasses the D-Table entirely to prevent L1 Cache thrashing.
+// Uses exactly 2 EC additions from the 4KB G_free table (100% L1 cache hits).
+// =====================================================================================
+
+template <int MAX_BATCH>
+__global__ __launch_bounds__(32, 14)
+void comp_keys_revdoor_fallback(
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out,
+    int hamming_h, uint64_t base_pos, uint64_t totalCombs, int chunk_size)
+{
+    int lane_id = threadIdx.x;
+    uint32_t walk_id = blockIdx.x * 32 + lane_id;
+
+    uint64_t start_pos = base_pos + (uint64_t)walk_id * (uint64_t)chunk_size;
+    if (start_pos >= totalCombs) return;
+
+    int n = d_numFreeBits;
+    uint64_t mask, p0, p1, neg_bits;
+    int curr_n, curr_k, sp;
+
+    revdoor_unrank_reg(n, hamming_h, start_pos, mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
+
+    uint64_t seed = (mask ^ d_targetSeedLo) & d_seedMaskLo;
+    uint64_t accX[4], accY[4], accZ[4];
+    bool pointSet = false;
+
+    if (d_lockedPopcount > 0) {
+        Load256(accX, d_basePointX); Load256(accY, d_basePointY);
+        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+        pointSet = true;
+    }
+
+    int num_windows = (n + 7) / 8;
+    uint64_t s = seed;
+    for (int w = 0; w < 8 && w < num_windows; w++) {
+        int byte_val = s & 0xFF;
+        if (byte_val != 0) {
+            int idx = (w * 256 + byte_val) * 4;
+            ulonglong2 vec_GX_lo = __ldg((ulonglong2*)&d_window_GX[idx]);
+            ulonglong2 vec_GX_hi = __ldg((ulonglong2*)&d_window_GX[idx + 2]);
+            ulonglong2 vec_GY_lo = __ldg((ulonglong2*)&d_window_GY[idx]);
+            ulonglong2 vec_GY_hi = __ldg((ulonglong2*)&d_window_GY[idx + 2]);
+            uint64_t curGX[4] = {vec_GX_lo.x, vec_GX_lo.y, vec_GX_hi.x, vec_GX_hi.y};
+            uint64_t curGY[4] = {vec_GY_lo.x, vec_GY_lo.y, vec_GY_hi.x, vec_GY_hi.y};
+            if (!pointSet) {
+                Load256(accX, curGX); Load256(accY, curGY);
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                pointSet = true;
+            } else {
+                jacobian_add_affine_inplace(accX, accY, accZ, curGX, curGY);
+            }
+        }
+        s >>= 8;
+    }
+
+    if (!pointSet) return;
+
+    uint64_t buf_X[MAX_BATCH][4], buf_Y[MAX_BATCH][4], buf_Z[MAX_BATCH][4];
+    uint64_t buf_masks[MAX_BATCH], Zinv[MAX_BATCH][4];
+
+    int steps_done = 0;
+    int end_step = chunk_size;
+    uint64_t max_steps = totalCombs - start_pos;
+    if ((uint64_t)end_step > max_steps) end_step = (int)max_steps;
+
+    int batch_count = 0;
+    Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
+    buf_masks[0] = mask;
+    batch_count = 1; steps_done = 1;
+
+    while (steps_done < end_step) {
+        int removed_idx, added_idx;
+        if (!revdoor_step_reg(mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
+            break; 
+        }
+        mask = (mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
+
+        // ─── L1 CACHE BYPASS (2 Additions, NO D-Table) ───
+        int rem_offset = removed_idx * 4;
+        ulonglong2 remX_lo = __ldg((ulonglong2*)&d_GfreeX[rem_offset]);
+        ulonglong2 remX_hi = __ldg((ulonglong2*)&d_GfreeX[rem_offset + 2]);
+        ulonglong2 remY_lo = __ldg((ulonglong2*)&d_negGfreeY[rem_offset]); // Notice: NEGATIVE Y
+        ulonglong2 remY_hi = __ldg((ulonglong2*)&d_negGfreeY[rem_offset + 2]);
+        uint64_t dX_rem[4] = {remX_lo.x, remX_lo.y, remX_hi.x, remX_hi.y};
+        uint64_t dY_rem[4] = {remY_lo.x, remY_lo.y, remY_hi.x, remY_hi.y};
+        jacobian_add_affine_inplace(accX, accY, accZ, dX_rem, dY_rem);
+
+        int add_offset = added_idx * 4;
+        ulonglong2 addX_lo = __ldg((ulonglong2*)&d_GfreeX[add_offset]);
+        ulonglong2 addX_hi = __ldg((ulonglong2*)&d_GfreeX[add_offset + 2]);
+        ulonglong2 addY_lo = __ldg((ulonglong2*)&d_GfreeY[add_offset]); // POSITIVE Y
+        ulonglong2 addY_hi = __ldg((ulonglong2*)&d_GfreeY[add_offset + 2]);
+        uint64_t dX_add[4] = {addX_lo.x, addX_lo.y, addX_hi.x, addX_hi.y};
+        uint64_t dY_add[4] = {addY_lo.x, addY_lo.y, addY_hi.x, addY_hi.y};
+        jacobian_add_affine_inplace(accX, accY, accZ, dX_add, dY_add);
+
+        Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
+        buf_masks[batch_count] = mask;
+        batch_count++; steps_done++;
+
+        if (batch_count >= MAX_BATCH) {
+            rd_batch_invert_Z(buf_Z, Zinv, batch_count);
+            for (int b = 0; b < batch_count; b++) {
+                uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
+                int pc_abs = __popcll(s_check) + d_lockedPopcount;
+                if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+
+                uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]); _ModMult(py, Zinv_cb, buf_Y[b]);
+                uint8_t odd_py = (uint8_t)(py[0] & 1);
+                uint32_t h[5];
+                _GetHash160Comp(px, odd_py, (uint8_t*)h);
+
+                if (sAddress[h[0] & 0xFFFF] != 0) {
+                    uint32_t step_idx = steps_done - batch_count + b;
+                    uint32_t pos = atomicAdd(out, 1);
+                    if (pos < 65536) {
+                        uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                        item[0] = walk_id; 
+                        int16_t* ptr = (int16_t*)&item[1];
+                        ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                        ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                        memcpy(item + 2, h, 20);
+                    }
+                }
+            }
+            if (steps_done < end_step) {
+                int last = batch_count - 1;
+                uint64_t Zinv_sq[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[last]); _ModMult(accX, Zinv_sq, buf_X[last]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[last]); _ModMult(accY, Zinv_cb, buf_Y[last]);
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+            }
+            batch_count = 0;
+        }
+    }
+
+    if (batch_count > 0) {
+        rd_batch_invert_Z(buf_Z, Zinv, batch_count);
+        for (int b = 0; b < batch_count; b++) {
+            uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
+            int pc_abs = __popcll(s_check) + d_lockedPopcount;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+
+            uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+            _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
+            _ModMult(Zinv_cb, Zinv_sq, Zinv[b]); _ModMult(py, Zinv_cb, buf_Y[b]);
+            uint8_t odd_py = (uint8_t)(py[0] & 1);
+            uint32_t h[5];
+            _GetHash160Comp(px, odd_py, (uint8_t*)h);
+
+            if (sAddress[h[0] & 0xFFFF] != 0) {
+                uint32_t step_idx = steps_done - batch_count + b;
+                uint32_t pos = atomicAdd(out, 1);
+                if (pos < 65536) {
+                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                    item[0] = walk_id;
+                    int16_t* ptr = (int16_t*)&item[1];
+                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                    memcpy(item + 2, h, 20);
+                }
+            }
+        }
+    }
+}
+
+
+// =====================================================================================
 // DENSE COSET-DELTA REVOLVING DOOR (1 Block = 1 Walk)
 // Zero Warp Divergence. 100% Coalesced Memory. Pure Register State.
 // =====================================================================================
@@ -1213,6 +1384,15 @@ void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64
 
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize,
                     cudaMemcpyDeviceToHost, streams[s]);
+    currentStep++;
+}
+
+void GPUEngine::LaunchRevDoorFallbackAsync(int hamming_h, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks) {
+    int s = currentStep % 2;
+    cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
+    comp_keys_revdoor_fallback<BATCH_N><<<numBlocks, 32, 0, streams[s]>>>(
+        inputAddress, inputAddressLookUp, d_output[s], hamming_h, base_pos, totalCombs, chunk_size);
+    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;
 }
 
