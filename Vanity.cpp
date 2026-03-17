@@ -1889,18 +1889,29 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 }
             } else {
                 // =================================================================
-                // ENGINE 3: THIN-LAYER FALLBACK (W < 32)
-                // Uses coset revdoor kernel with reduced utilization.
-                // Correctness guaranteed. Speed is low but these layers
-                // contribute minimal total work.
+                // ENGINE 3: GOSPER WALK FALLBACK (W < 32)
+                // Thin layers where revdoor wastes 96%+ of threads.
+                // Gosper walk runs at ~600 MK/s regardless of W.
                 // =================================================================
 
-                int blocksPerSM_thin = 14;
-                int numBlocks = smCount * blocksPerSM_thin;
-                int total_walks = numBlocks;
+                for (uint64_t rank = 0; rank < W; rank++) {
+                    uint64_t mask_lo, mask_hi;
+                    cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi,
+                                           h_combTable, tableK);
+                    h_Qi_array[rank] = mask_lo;
+                }
+                g.UploadQiArray(h_Qi_array, (int)W);
+
+                // Use regular gosper walk for thin layers
+                // h = total hamming weight = k1 + k2
+                int h_total = k1 + k2;
                 
-                int chunk_sz = (int)(targetCandidates / ((uint64_t)total_walks * (W > 0 ? W : 1)));
-                if (chunk_sz < 64) chunk_sz = 64;
+                int blocksPerSM_gw = 14;
+                int numBlocks = smCount * blocksPerSM_gw;
+                int total_walks = numBlocks * 128;
+
+                int chunk_size = (int)(targetCandidates / ((uint64_t)total_walks));
+                if (chunk_size < 64) chunk_size = 64;
 
                 uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
                 uint64_t sliceStart = sliceId * sliceSize;
@@ -1921,7 +1932,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
 
                     uint64_t remaining = sliceEnd - pos_offset;
-                    int this_chunk = chunk_sz;
+                    int this_chunk = chunk_size;
                     uint64_t batchCoverage = (uint64_t)total_walks * this_chunk;
 
                     if (batchCoverage > remaining) {
@@ -1931,17 +1942,12 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         if (batchCoverage > remaining) batchCoverage = remaining;
                     }
 
-                    int s = g.currentStep % 2;
-                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
-                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
-
-                    g.LaunchRevDoorAsync(L_bits, k2, B_top, k1,
-                                         pos_offset, L_totalCombs,
-                                         this_chunk, numBlocks);
+                    g.LaunchGosperWalkAsync(h_total, pos_offset, L_totalCombs,
+                                            this_chunk, total_walks);
 
                     if (!firstBatch) {
                         int prev_s = (g.currentStep - 2) % 2;
-                        uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                        uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                             // Process matches
                         }
@@ -1960,7 +1966,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
                             double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
                             lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-THIN-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
+                            printf("[SEP7-GW-THIN] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
                                    h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
                             fflush(stdout);
                         }
@@ -1970,7 +1976,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 // Final sync
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 1) % 2;
-                    uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                    uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
                     found.clear();
                 }
             }
