@@ -32,6 +32,7 @@
 // Number of thread per block
 #define ITEM_SIZE 28
 #define ITEM_SIZE32 (ITEM_SIZE/4)
+#define ITEM_SIZE32_WARP 8  // For warp-packed kernel: walk_id(1) + lane(1) + step(1) + hash160(5)
 #define _64K 65536
 
 // Maximum number of locked bit positions for StringCrack Bit Injection
@@ -168,6 +169,13 @@ public:
   // SEP7: Coset Revolving Door
   void UploadQiArray(uint64_t* h_Qi, uint64_t size);
   void LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks);
+
+  // SEP7: Warp-Packed Coset Revolving Door (32 <= W < 128)
+  void LaunchWarpPackedRevDoorAsync(
+      int L_bits, int k2, int B_top, int k1,
+      uint64_t base_pos, uint64_t totalCombs,
+      int chunk_size, int numBlocks, int qi_batches);
+  uint32_t SyncWarpPackedRevDoorBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;

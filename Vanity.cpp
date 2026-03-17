@@ -1709,66 +1709,183 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             }
             g.UploadQiArray(h_Qi_array, W);
 
-            uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
-            uint64_t sliceStart = sliceId * sliceSize;
-            uint64_t sliceEnd   = sliceStart + sliceSize;
-            if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+            // ================================================================
+            // ENGINE SELECTION: Choose kernel based on W (coset size)
+            // ================================================================
             
-            uint64_t pos_offset = sliceStart;
-            while (pos_offset < sliceEnd && !endOfSearch) {
-                if (Pause) {
-                    Paused = true;
-                    t_Paused = Timer::get_tick() - t0 + t_Paused;
-                    while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                    if (endOfSearch) break;
-                    endOfSearch = true;
-                    break;
+            if (W < 32) {
+                // ------------------------------------------------
+                // ENGINE 1: FULL-BLOCK COSET REVDOOR (W < 32)
+                // 1 Block = 1 Walk, W threads per block
+                // ------------------------------------------------
+                
+                uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
+                uint64_t sliceStart = sliceId * sliceSize;
+                uint64_t sliceEnd   = sliceStart + sliceSize;
+                if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+                
+                uint64_t pos_offset = sliceStart;
+                while (pos_offset < sliceEnd && !endOfSearch) {
+                    if (Pause) {
+                        Paused = true;
+                        t_Paused = Timer::get_tick() - t0 + t_Paused;
+                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                        if (endOfSearch) break;
+                        endOfSearch = true;
+                        break;
+                    }
+                    
+                    uint64_t remaining = sliceEnd - pos_offset;
+                    int this_chunk = chunk_size;
+                    uint64_t batchCoverage = (uint64_t)numBlocks * this_chunk;
+                    
+                    if (batchCoverage > remaining) {
+                        this_chunk = (remaining + numBlocks - 1) / numBlocks;
+                        if (this_chunk < 1) this_chunk = 1;
+                        batchCoverage = (uint64_t)numBlocks * this_chunk;
+                        if (batchCoverage > remaining) batchCoverage = remaining;
+                    }
+                    
+                    int s = g.currentStep % 2;
+                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
+                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
+                    
+                    g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
+                    
+                    if (!firstBatch) {
+                        int prev_s = (g.currentStep - 2) % 2;
+                        uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                            // NOTE: You will need to write a reconstructCosetRevDoorKey function
+                            // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
+                            // For now, it will output the raw hits.
+                        }
+                        found.clear();
+                    }
+                    firstBatch = false;
+                    
+                    pos_offset += batchCoverage;
+                    totalKeysProcessed += batchCoverage * W;
+                    counters[thId] = totalKeysProcessed;
+                    
+                    if (sliceId == 0) {
+                        ttot = Timer::get_tick() - t0 + t_Paused;
+                        static double lastTime = 0.0;
+                        static uint64_t lastKeys = 0;
+                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; lastKeys = totalKeysProcessed;
+                            printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
+                                   h, k1, k2, W, spd, (double)totalKeysProcessed / 1e9);
+                            fflush(stdout);
+                        }
+                    }
                 }
                 
-                uint64_t remaining = sliceEnd - pos_offset;
-                int this_chunk = chunk_size;
-                uint64_t batchCoverage = (uint64_t)numBlocks * this_chunk;
-                
-                if (batchCoverage > remaining) {
-                    this_chunk = (remaining + numBlocks - 1) / numBlocks;
-                    if (this_chunk < 1) this_chunk = 1;
-                    batchCoverage = (uint64_t)numBlocks * this_chunk;
-                    if (batchCoverage > remaining) batchCoverage = remaining;
+            } else if (W >= 32 && W < 128) {
+                // =================================================================
+                // ENGINE 2: WARP-PACKED REVDOOR (32 <= W < 128)
+                // 4 walks per block, 1 walk per warp.
+                // Q_i batching: ceil(W/32) batches cover all W offsets.
+                // =================================================================
+
+                int qi_batches = ((int)W + 31) / 32;
+
+                // GPU geometry
+                int blocksPerSM = 4;
+                int maxBlocks = smCount * blocksPerSM;
+                int total_warps = maxBlocks * 4;
+
+                // Each warp is assigned (walk_chunk_id, qi_batch_id).
+                // walk_warps = how many distinct walk chunks we can run simultaneously.
+                int walk_warps = total_warps / qi_batches;
+                if (walk_warps < 1) walk_warps = 1;
+
+                // chunk_size = revolving-door steps each walk-warp processes
+                int chunk_sz = (int)(targetCandidates / ((uint64_t)walk_warps * W));
+                if (chunk_sz < 64) chunk_sz = 64;
+
+                // Actual warps and blocks needed
+                int needed_warps = walk_warps * qi_batches;
+                int numBlocksWP = (needed_warps + 3) / 4;
+                if (numBlocksWP > maxBlocks) numBlocksWP = maxBlocks;
+
+                // Recalculate walk_warps from actual numBlocks
+                total_warps = numBlocksWP * 4;
+                walk_warps = total_warps / qi_batches;
+                if (walk_warps < 1) walk_warps = 1;
+
+                uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
+                uint64_t sliceStart = sliceId * sliceSize;
+                uint64_t sliceEnd   = sliceStart + sliceSize;
+                if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+
+                uint64_t pos_offset = sliceStart;
+
+                while (pos_offset < sliceEnd && !endOfSearch) {
+
+                    if (Pause) {
+                        Paused = true;
+                        t_Paused = Timer::get_tick() - t0 + t_Paused;
+                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                        if (endOfSearch) break;
+                        endOfSearch = true;
+                        break;
+                    }
+
+                    uint64_t remaining = sliceEnd - pos_offset;
+                    int this_chunk = chunk_sz;
+                    uint64_t batchCoverage = (uint64_t)walk_warps * this_chunk;
+
+                    if (batchCoverage > remaining) {
+                        this_chunk = (int)((remaining + walk_warps - 1) / walk_warps);
+                        if (this_chunk < 1) this_chunk = 1;
+                        batchCoverage = (uint64_t)walk_warps * this_chunk;
+                        if (batchCoverage > remaining) batchCoverage = remaining;
+                    }
+
+                    int s = g.currentStep % 2;
+                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
+                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
+
+                    g.LaunchWarpPackedRevDoorAsync(
+                        L_bits, k2, B_top, k1,
+                        pos_offset, L_totalCombs,
+                        this_chunk, numBlocksWP, qi_batches);
+
+                    if (!firstBatch) {
+                        int prev_s = (g.currentStep - 2) % 2;
+                        uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
+                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                            // Process matches from warp-packed kernel
+                        }
+                        found.clear();
+                    }
+                    firstBatch = false;
+
+                    uint64_t keysThisBatch = batchCoverage * W;
+                    totalKeysProcessed += keysThisBatch;
+                    pos_offset += batchCoverage;
+
+                    if (sliceId == 0) {
+                        ttot = Timer::get_tick() - t0 + t_Paused;
+                        static double lastTime = 0.0;
+                        static uint64_t lastKeys = 0;
+                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; lastKeys = totalKeysProcessed;
+                            printf("[SEP7-WARP-RD] h=%d | k1=%d k2=%d | W=%llu | qi_batches=%d | %.1f MK/s | %.2f BKeys\r", 
+                                   h, k1, k2, W, qi_batches, spd, (double)totalKeysProcessed / 1e9);
+                            fflush(stdout);
+                        }
+                    }
                 }
-                
-                int s = g.currentStep % 2;
-                streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
-                streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
-                
-                g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
-                
+
+                // Final sync for last launch
                 if (!firstBatch) {
-                    int prev_s = (g.currentStep - 2) % 2;
-                    uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
-                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                        // NOTE: You will need to write a reconstructCosetRevDoorKey function
-                        // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
-                        // For now, it will output the raw hits.
-                    }
+                    int prev_s = (g.currentStep - 1) % 2;
+                    uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
                     found.clear();
-                }
-                firstBatch = false;
-                
-                pos_offset += batchCoverage;
-                totalKeysProcessed += batchCoverage * W; // Multiply by W because W threads run per walk
-                counters[thId] = totalKeysProcessed;
-                
-                if (sliceId == 0) {
-                    ttot = Timer::get_tick() - t0 + t_Paused;
-                    static double lastTime = 0.0;
-                    static uint64_t lastKeys = 0;
-                    if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                        double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                        lastTime = ttot; lastKeys = totalKeysProcessed;
-                        printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
-                               h, k1, k2, W, spd, (double)totalKeysProcessed / 1e9);
-                        fflush(stdout);
-                    }
                 }
             }
         }
