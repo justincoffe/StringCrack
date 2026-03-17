@@ -1666,18 +1666,16 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
         g.UploadQiArray(h_Qi_array, W);
     }
     
-    // Grid sizing: In Coset mode, numWalks = numBlocks
+    // Grid sizing: Massively oversubscribe so the hardware scheduler queues blocks
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, ph->gpuId);
     int smCount = deviceProp.multiProcessorCount;
-    int blocksPerSM = 14; 
-    int numBlocks = smCount * blocksPerSM;
+    int blocksPerSM = 1024; // <-- CHANGED from 14 to 1024
+    int numBlocks = smCount * blocksPerSM; // Forces 86,016 blocks!
     
     int targetCandidates = 80000000;
-    int chunk_size = targetCandidates / (numBlocks * 128); // 128 threads per block
-    if (chunk_size < 64) chunk_size = 64;
     
-    printf("[SEP7-COSET-RD] GPU[%d] Grid: %d Blocks, Chunk=%d\n", sliceId, numBlocks, chunk_size);
+    printf("[SEP7-COSET-RD] GPU[%d] Grid: %d Blocks (oversubscribed)\n", sliceId, numBlocks);
     fflush(stdout);
     
     ph->hasStarted = true;
@@ -1700,6 +1698,10 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             
             uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2]; // Total walks needed
             if (L_totalCombs == 0) continue;
+            
+            // Dynamic chunk size based on W (coset threads per block)
+            int chunk_size = targetCandidates / (numBlocks * W);
+            if (chunk_size < 64) chunk_size = 64;
             
             // Upload the specific Q_i combinations for this k1
             for (uint64_t rank = 0; rank < W; rank++) {
