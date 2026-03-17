@@ -1776,7 +1776,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
                             lastTime = ttot; lastKeys = totalKeysProcessed;
                             printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
-                                   h, k1, k2, W, spd, (double)totalKeysProcessed / 1e9);
+                                   h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
                             fflush(stdout);
                         }
                     }
@@ -1875,7 +1875,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
                             lastTime = ttot; lastKeys = totalKeysProcessed;
                             printf("[SEP7-WARP-RD] h=%d | k1=%d k2=%d | W=%llu | qi_batches=%d | %.1f MK/s | %.2f BKeys\r", 
-                                   h, k1, k2, W, qi_batches, spd, (double)totalKeysProcessed / 1e9);
+                                   h, k1, k2, (unsigned long long)W, qi_batches, spd, (double)totalKeysProcessed / 1e9);
                             fflush(stdout);
                         }
                     }

@@ -385,6 +385,7 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
         cudaMallocHost(&h_outputPinned[i], outputSize);
     }
     currentStep = 0;
+    qi_batches_last = 0;
 
     // SEP3: Initialize radius buffer pointers
     radiusBuffersReady = false;

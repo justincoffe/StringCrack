@@ -235,6 +235,9 @@ private:
   int* d_radiusCount[2];            // Per-stream seed count on device
   bool radiusBuffersReady;
 
+  // SEP7: Warp-Packed Coset state
+  int qi_batches_last;  // Stored for match reconstruction
+
 public:
   int currentStep;
 };

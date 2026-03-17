@@ -1389,16 +1389,28 @@ uint32_t GPUEngine::SyncWarpPackedRevDoorBatch(int stepToSync, std::vector<ITEM>
 
     addressFound.clear();
     if (nbFound > 0) {
+        int qi_batches = qi_batches_last;
         for (uint32_t i = 0; i < nbFound; i++) {
             uint32_t* itemPtr = h_outputPinned[s] + (i * ITEM_SIZE32_WARP + 1);
+            
+            uint32_t walk_id       = itemPtr[0];
+            uint32_t lane          = itemPtr[1];
+            int16_t* sptr         = (int16_t*)&itemPtr[2];
+            int      step_idx      = (int)(uint16_t)sptr[0] | ((int)(uint16_t)sptr[1] << 15);
+            uint8_t* hash160      = (uint8_t*)&itemPtr[3];
+
+            // Decode walk geometry for key reconstruction
+            uint32_t walk_chunk_id = walk_id / qi_batches;
+            uint32_t qi_batch_id   = walk_id % qi_batches;
+            int      qi_idx        = (int)(qi_batch_id * 32) + (int)lane;
+            // qi_idx -> index into h_Qi_array for the Q_i offset used by this match
+
             ITEM it;
-            it.thId = itemPtr[0];
-            uint32_t lane = itemPtr[1];
-            int16_t* ptr = (int16_t*)&(itemPtr[2]);
-            it.endo = ptr[0] & 0x7FFF;
-            it.mode = (ptr[0] & 0x8000) != 0;
-            it.incr = ptr[1];
-            it.hash = (uint8_t*)(itemPtr + 3);
+            it.thId = walk_id;
+            it.endo = sptr[0] & 0x7FFF;
+            it.mode = (sptr[0] & 0x8000) != 0;
+            it.incr = sptr[1];
+            it.hash = hash160;
             addressFound.push_back(it);
         }
     }
@@ -1441,6 +1453,8 @@ void GPUEngine::LaunchWarpPackedRevDoorAsync(
 {
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
+
+    qi_batches_last = qi_batches;
 
     comp_keys_warp_packed_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
