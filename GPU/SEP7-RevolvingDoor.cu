@@ -1042,19 +1042,30 @@ void comp_keys_revdoor_fallback(
         int rem_offset = removed_idx * 4;
         ulonglong2 remX_lo = __ldg((ulonglong2*)&d_GfreeX[rem_offset]);
         ulonglong2 remX_hi = __ldg((ulonglong2*)&d_GfreeX[rem_offset + 2]);
-        ulonglong2 remY_lo = __ldg((ulonglong2*)&d_negGfreeY[rem_offset]); // Notice: NEGATIVE Y
-        ulonglong2 remY_hi = __ldg((ulonglong2*)&d_negGfreeY[rem_offset + 2]);
+        ulonglong2 remY_lo = __ldg((ulonglong2*)&d_GfreeY[rem_offset]); // FIX: READ REGULAR POSITIVE Y
+        ulonglong2 remY_hi = __ldg((ulonglong2*)&d_GfreeY[rem_offset + 2]); 
         uint64_t dX_rem[4] = {remX_lo.x, remX_lo.y, remX_hi.x, remX_hi.y};
         uint64_t dY_rem[4] = {remY_lo.x, remY_lo.y, remY_hi.x, remY_hi.y};
-        jacobian_add_affine_inplace(accX, accY, accZ, dX_rem, dY_rem);
+
+        // FIX: INLINE SILICON NEGATION (-Y = Prime - Y)
+        uint64_t p0 = 0xFFFFFFFEFFFFFC2FULL;
+        uint64_t p_hi = 0xFFFFFFFFFFFFFFFFULL;
+        uint64_t dY_neg[4];
+        asm("sub.cc.u64 %0, %1, %2;"  : "=l"(dY_neg[0]) : "l"(p0),   "l"(dY_rem[0]));
+        asm("subc.cc.u64 %0, %1, %2;" : "=l"(dY_neg[1]) : "l"(p_hi), "l"(dY_rem[1]));
+        asm("subc.cc.u64 %0, %1, %2;" : "=l"(dY_neg[2]) : "l"(p_hi), "l"(dY_rem[2]));
+        asm("subc.u64 %0, %1, %2;"    : "=l"(dY_neg[3]) : "l"(p_hi), "l"(dY_rem[3]));
+
+        jacobian_add_affine_inplace(accX, accY, accZ, dX_rem, dY_neg); // USE NEGATED Y
 
         int add_offset = added_idx * 4;
         ulonglong2 addX_lo = __ldg((ulonglong2*)&d_GfreeX[add_offset]);
         ulonglong2 addX_hi = __ldg((ulonglong2*)&d_GfreeX[add_offset + 2]);
-        ulonglong2 addY_lo = __ldg((ulonglong2*)&d_GfreeY[add_offset]); // POSITIVE Y
+        ulonglong2 addY_lo = __ldg((ulonglong2*)&d_GfreeY[add_offset]); 
         ulonglong2 addY_hi = __ldg((ulonglong2*)&d_GfreeY[add_offset + 2]);
         uint64_t dX_add[4] = {addX_lo.x, addX_lo.y, addX_hi.x, addX_hi.y};
         uint64_t dY_add[4] = {addY_lo.x, addY_lo.y, addY_hi.x, addY_hi.y};
+        
         jacobian_add_affine_inplace(accX, accY, accZ, dX_add, dY_add);
 
         Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
