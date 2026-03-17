@@ -194,6 +194,12 @@ public:
 		uint64_t base_pos, int chunk_size,
 		uint8_t* hash, StringCrackConfig* config,
 		const uint64_t* h_combTable, int tableK);
+	void reconstructCosetGosperKey(
+		uint32_t qi_idx, uint32_t walk_chunk_id, uint32_t step_idx,
+		int L_bits, int k2, int B_top, int k1,
+		uint64_t base_pos, int chunk_size,
+		uint8_t* hash, StringCrackConfig* config,
+		const uint64_t* h_combTable, int tableK);
 };
 
 #endif // VANITYH

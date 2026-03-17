@@ -2001,8 +2001,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             uint32_t qi_idx = it.thId & 0xFFFF;
                             uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                             
-                            // Reconstruct using CosetKey (because we used the Q_i array)
-                            reconstructCosetKey(qi_idx, walk_chunk_id, step,
+                            // USING THE CORRECT GOSPER RECONSTRUCTOR
+                            reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                                 streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                                 streamPosBase[prev_s], streamChunkSize[prev_s],
                                 it.hash, scConfig, h_combTable, tableK);
@@ -2038,7 +2038,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         uint32_t walk_chunk_id = it.thId >> 16;
                         uint32_t qi_idx = it.thId & 0xFFFF;
                         uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
-                        reconstructCosetKey(qi_idx, walk_chunk_id, step,
+                        reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                             streamPosBase[prev_s], streamChunkSize[prev_s],
                             it.hash, scConfig, h_combTable, tableK);
@@ -2494,6 +2494,63 @@ void VanitySearch::reconstructCosetKey(
     uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
     uint64_t seed_lo = (full_mask ^ config->targetSeedLo) & seedMaskLo;
 
+    uint64_t keyBits[4] = { config->lockVals[0], config->lockVals[1], config->lockVals[2], config->lockVals[3] };
+    for (int fb = 0; fb < n && fb < 64; fb++) {
+        if (seed_lo & 1ULL) {
+            int pos = config->freeBitPositions[fb];
+            keyBits[pos >> 6] |= (1ULL << (pos & 63));
+        }
+        seed_lo >>= 1;
+    }
+
+    Int privkey; privkey.SetInt32(0);
+    privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
+    privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
+    checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
+}
+
+void VanitySearch::reconstructCosetGosperKey(
+    uint32_t qi_idx, uint32_t walk_chunk_id, uint32_t step_idx,
+    int L_bits, int k2, int B_top, int k1,
+    uint64_t base_pos, int chunk_size,
+    uint8_t* hash, StringCrackConfig* config,
+    const uint64_t* h_combTable, int tableK)
+{
+    // 1. Get Q_i mask
+    uint64_t qi_mask_lo, qi_mask_hi;
+    cpu_unrank_combination(qi_idx, B_top, k1, qi_mask_lo, qi_mask_hi, h_combTable, tableK);
+    uint64_t qi_mask = qi_mask_lo << L_bits;
+
+    // 2. Unrank start_pos in L_bits space using standard combinatorial unranking
+    uint64_t start_rank = base_pos + walk_chunk_id * (uint64_t)chunk_size;
+    uint64_t mask = 0;
+    uint64_t rank = start_rank;
+    int remaining = k2;
+    
+    for (int i = L_bits - 1; i >= 0 && remaining > 0; i--) {
+        uint64_t c = h_combTable[i * tableK + remaining];
+        if (rank >= c) {
+            rank -= c;
+            mask |= (1ULL << i);
+            remaining--;
+        }
+    }
+
+    // 3. Advance by step_idx using GOSPER transitions
+    for (uint32_t s = 0; s < step_idx; s++) {
+        uint64_t c = mask & (0ULL - mask);
+        uint64_t r = mask + c;
+        int shift = __builtin_ctzll(mask) + 2;
+        mask = ((r ^ mask) >> shift) | r;
+    }
+
+    // 4. Combine masks and XOR with center
+    uint64_t full_mask = qi_mask | mask;
+    int n = config->numFreeBits;
+    uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t seed_lo = (full_mask ^ config->targetSeedLo) & seedMaskLo;
+
+    // 5. Expand and verify
     uint64_t keyBits[4] = { config->lockVals[0], config->lockVals[1], config->lockVals[2], config->lockVals[3] };
     for (int fb = 0; fb < n && fb < 64; fb++) {
         if (seed_lo & 1ULL) {
