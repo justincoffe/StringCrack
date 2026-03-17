@@ -1970,7 +1970,7 @@ void GPUEngine::LaunchCosetGosperWalkAsync(
     
     comp_keys_coset_gosper_walk<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
-        L_bits, k2, B_top, k1, base_pos, L_totalCombs, chunk_size, W);
+        L_bits, k2, B_top, k1, base_pos, L_totalCombs, chunk_size, W, d_Qi_array);
     
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;
