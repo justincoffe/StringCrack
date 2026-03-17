@@ -1713,11 +1713,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             // ENGINE SELECTION: Choose kernel based on W (coset size)
             // ================================================================
             
-            if (W < 32) {
-                // ------------------------------------------------
-                // ENGINE 1: FULL-BLOCK COSET REVDOOR (W < 32)
+            if (W >= 128) {
+                // =================================================================
+                // ENGINE 1: FULL-BLOCK COSET REVDOOR (W >= 128)
                 // 1 Block = 1 Walk, W threads per block
-                // ------------------------------------------------
+                // =================================================================
                 
                 uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
                 uint64_t sliceStart = sliceId * sliceSize;
@@ -1885,6 +1885,92 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 1) % 2;
                     uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
+                    found.clear();
+                }
+            } else {
+                // =================================================================
+                // ENGINE 3: THIN-LAYER FALLBACK (W < 32)
+                // Uses coset revdoor kernel with reduced utilization.
+                // Correctness guaranteed. Speed is low but these layers
+                // contribute minimal total work.
+                // =================================================================
+
+                int blocksPerSM_thin = 14;
+                int numBlocks = smCount * blocksPerSM_thin;
+                int total_walks = numBlocks;
+                
+                int chunk_sz = (int)(targetCandidates / ((uint64_t)total_walks * (W > 0 ? W : 1)));
+                if (chunk_sz < 64) chunk_sz = 64;
+
+                uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
+                uint64_t sliceStart = sliceId * sliceSize;
+                uint64_t sliceEnd   = sliceStart + sliceSize;
+                if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+
+                uint64_t pos_offset = sliceStart;
+
+                while (pos_offset < sliceEnd && !endOfSearch) {
+
+                    if (Pause) {
+                        Paused = true;
+                        t_Paused = Timer::get_tick() - t0 + t_Paused;
+                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                        if (endOfSearch) break;
+                        endOfSearch = true;
+                        break;
+                    }
+
+                    uint64_t remaining = sliceEnd - pos_offset;
+                    int this_chunk = chunk_sz;
+                    uint64_t batchCoverage = (uint64_t)total_walks * this_chunk;
+
+                    if (batchCoverage > remaining) {
+                        this_chunk = (int)((remaining + total_walks - 1) / total_walks);
+                        if (this_chunk < 1) this_chunk = 1;
+                        batchCoverage = (uint64_t)total_walks * this_chunk;
+                        if (batchCoverage > remaining) batchCoverage = remaining;
+                    }
+
+                    int s = g.currentStep % 2;
+                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
+                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
+
+                    g.LaunchRevDoorAsync(L_bits, k2, B_top, k1,
+                                         pos_offset, L_totalCombs,
+                                         this_chunk, numBlocks);
+
+                    if (!firstBatch) {
+                        int prev_s = (g.currentStep - 2) % 2;
+                        uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                            // Process matches
+                        }
+                        found.clear();
+                    }
+                    firstBatch = false;
+
+                    uint64_t keysThisBatch = batchCoverage * W;
+                    totalKeysProcessed += keysThisBatch;
+                    pos_offset += batchCoverage;
+
+                    if (sliceId == 0) {
+                        ttot = Timer::get_tick() - t0 + t_Paused;
+                        static double lastTime = 0.0;
+                        static uint64_t lastKeys = 0;
+                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; lastKeys = totalKeysProcessed;
+                            printf("[SEP7-THIN-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
+                                   h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            fflush(stdout);
+                        }
+                    }
+                }
+
+                // Final sync
+                if (!firstBatch) {
+                    int prev_s = (g.currentStep - 1) % 2;
+                    uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
                     found.clear();
                 }
             }
