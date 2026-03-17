@@ -1141,13 +1141,14 @@ void comp_keys_coset_revdoor(
 
 // =====================================================================================
 // DEVICE HELPER: Process a batch of buffered Jacobian points
-// Shared by both full-block and warp-packed revolving door kernels
+// item_size_32 controls output record width (7 for coset, 8 for warp-packed)
 // =====================================================================================
 template <int MAX_BATCH>
 __device__ __forceinline__ void rd_process_batch(
     uint64_t buf_X[][4], uint64_t buf_Y[][4], uint64_t buf_Z[][4],
     uint64_t buf_masks[], uint64_t Zinv[][4],
-    int batch_count, int steps_done, uint32_t walk_id, int lane,
+    int batch_count, int steps_done, uint32_t walk_id, int lane_id,
+    int item_size_32,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out)
 {
     rd_batch_invert_Z(buf_Z, Zinv, batch_count);
@@ -1169,13 +1170,21 @@ __device__ __forceinline__ void rd_process_batch(
             uint32_t step_idx = steps_done - batch_count + b;
             uint32_t pos = atomicAdd(out, 1);
             if (pos < 65536) {
-                uint32_t* item = out + 1 + pos * ITEM_SIZE32_WARP;
-                item[0] = walk_id;
-                item[1] = (uint32_t)lane;
-                int16_t* ptr = (int16_t*)&item[2];
-                ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                memcpy(item + 3, h, 20);
+                uint32_t* item = out + 1 + pos * item_size_32;
+                if (item_size_32 == ITEM_SIZE32_WARP) {
+                    item[0] = walk_id;
+                    item[1] = (uint32_t)lane_id;
+                    int16_t* ptr = (int16_t*)&item[2];
+                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                    memcpy(item + 3, h, 20);
+                } else {
+                    item[0] = walk_id;
+                    int16_t* ptr = (int16_t*)&item[1];
+                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                    memcpy(item + 2, h, 20);
+                }
             }
         }
     }
@@ -1306,6 +1315,7 @@ void comp_keys_warp_packed_revdoor(
             rd_process_batch<MAX_BATCH>(
                 buf_X, buf_Y, buf_Z, buf_masks, Zinv,
                 batch_count, steps_done, global_warp_id, lane,
+                ITEM_SIZE32_WARP,
                 sAddress, lookup32, out);
 
             // Renormalize accumulator to affine (Z=1) for next batch
@@ -1327,6 +1337,7 @@ void comp_keys_warp_packed_revdoor(
         rd_process_batch<MAX_BATCH>(
             buf_X, buf_Y, buf_Z, buf_masks, Zinv,
             batch_count, steps_done, global_warp_id, lane,
+            ITEM_SIZE32_WARP,
             sAddress, lookup32, out);
     }
 }
@@ -1456,7 +1467,7 @@ void GPUEngine::LaunchWarpPackedRevDoorAsync(
 
     qi_batches_last = qi_batches;
 
-    comp_keys_warp_packed_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
+    comp_keys_warp_packed_revdoor<6><<<numBlocks, 128, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
         L_bits, k2, B_top, k1,
         base_pos, totalCombs,

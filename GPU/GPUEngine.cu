@@ -295,7 +295,8 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
 
     this->nbThread = nbThreadGroup * NB_TRHEAD_PER_GROUP;//////////////////////////////////////////////////////////////////
     this->maxFound = maxFound;
-    this->outputSize = (maxFound * ITEM_SIZE + 4);
+    int maxItemSize = (ITEM_SIZE32_WARP > ITEM_SIZE32) ? (ITEM_SIZE32_WARP * 4) : ITEM_SIZE;
+    this->outputSize = (maxFound * maxItemSize + 4);
 
     char tmp[512];
     sprintf(tmp,"GPU #%d %s (%dx%d cores) Grid(%dx%d)",
