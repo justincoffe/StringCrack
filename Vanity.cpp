@@ -1639,7 +1639,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     if (maxRadius > n) maxRadius = n;
     
     // ─── COSET-DELTA SETUP ───
-    int B_top = 12; 
+    int B_top = 8;  // <-- CHANGED from 12 to 8 (Max W = 70)
     if (n <= B_top) B_top = n / 2;
     int L_bits = n - B_top;
     
@@ -1655,7 +1655,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     }
     
     // Compute Q_i offsets for the block threads
-    uint64_t* h_Qi_array = (uint64_t*)malloc(256 * sizeof(uint64_t));
+    uint64_t* h_Qi_array = (uint64_t*)malloc(4096 * sizeof(uint64_t)); // <-- CHANGED from 256 to 4096
     for (int k1 = 0; k1 <= B_top; k1++) {
         uint64_t W = h_combTable[B_top * tableK + k1];
         for (uint64_t rank = 0; rank < W; rank++) {
