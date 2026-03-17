@@ -970,7 +970,7 @@ void comp_keys_coset_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int L_bits, int k2, int B_top, int k1,
     uint64_t base_pos, uint64_t L_totalCombs,
-    int chunk_size)
+    int chunk_size, uint64_t* d_Qi_array)
 {
     int lane = threadIdx.x;
     
@@ -1202,7 +1202,7 @@ void comp_keys_warp_packed_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int L_bits, int k2, int B_top, int k1,
     uint64_t base_pos, uint64_t L_totalCombs,
-    int chunk_size, int qi_batches)
+    int chunk_size, int qi_batches, uint64_t* d_Qi_array)
 {
     int lane    = threadIdx.x & 31;
     int warp_id = threadIdx.x >> 5;
@@ -1429,13 +1429,9 @@ uint32_t GPUEngine::SyncWarpPackedRevDoorBatch(int stepToSync, std::vector<ITEM>
 // SEP7: Coset RevDoor Upload & Dispatch
 // =====================================================================================
 
-static uint64_t* d_Qi_array_ptr = nullptr;
-
 void GPUEngine::UploadQiArray(uint64_t* h_Qi, uint64_t size) {
-    if (d_Qi_array_ptr) cudaFree(d_Qi_array_ptr);
-    cudaMalloc(&d_Qi_array_ptr, size * sizeof(uint64_t));
-    cudaMemcpy(d_Qi_array_ptr, h_Qi, size * sizeof(uint64_t), cudaMemcpyHostToDevice);
-    cudaMemcpyToSymbol(d_Qi_array, &d_Qi_array_ptr, sizeof(uint64_t*));
+    int s = currentStep % 2;
+    cudaMemcpyAsync(d_Qi_buffers[s], h_Qi, size * sizeof(uint64_t), cudaMemcpyHostToDevice, streams[s]);
 }
 
 void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks) {
@@ -1446,7 +1442,7 @@ void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64
 
     comp_keys_coset_revdoor<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
-        L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size);
+        L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size, d_Qi_buffers[s]);
 
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize,
                     cudaMemcpyDeviceToHost, streams[s]);
@@ -1467,7 +1463,7 @@ void GPUEngine::LaunchWarpPackedRevDoorAsync(
         inputAddress, inputAddressLookUp, d_output[s],
         L_bits, k2, B_top, k1,
         base_pos, totalCombs,
-        chunk_size, qi_batches);
+        chunk_size, qi_batches, d_Qi_buffers[s]);
 
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize,
                     cudaMemcpyDeviceToHost, streams[s]);

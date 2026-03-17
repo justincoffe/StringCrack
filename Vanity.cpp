@@ -1802,6 +1802,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                     found.clear();
                 }
+                firstBatch = true;
                 
             } else if (W >= 32 && W < 128) {
                 // =================================================================
@@ -1925,6 +1926,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                     found.clear();
                 }
+                firstBatch = true;
             } else {
                 // =================================================================
                 // ENGINE 3: GOSPER WALK FALLBACK (W < 32)
@@ -2043,6 +2045,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                     found.clear();
                 }
+                firstBatch = true;
             }
         }
     }

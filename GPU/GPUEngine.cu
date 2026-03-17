@@ -384,6 +384,7 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
         cudaStreamCreate(&streams[i]);
         cudaMalloc(&d_output[i], outputSize);
         cudaMallocHost(&h_outputPinned[i], outputSize);
+        cudaMalloc(&d_Qi_buffers[i], 4096 * sizeof(uint64_t));
     }
     currentStep = 0;
     qi_batches_last = 0;
@@ -407,6 +408,7 @@ GPUEngine::~GPUEngine() {
         cudaStreamDestroy(streams[i]);
         if (d_output[i]) cudaFree(d_output[i]);
         if (h_outputPinned[i]) cudaFreeHost(h_outputPinned[i]);
+        if (d_Qi_buffers[i]) cudaFree(d_Qi_buffers[i]);
     }
 
     // SEP3: Cleanup radius buffers
@@ -812,9 +814,6 @@ __device__ __constant__ int      d_popcountMax;
 // Global read-only pointers for window tables (use __ldg() in kernel)
 __device__ uint64_t* d_window_GX;
 __device__ uint64_t* d_window_GY;
-
-// Q_i array for Coset RevDoor (top-bit combinations per block)
-__device__ uint64_t* d_Qi_array;
 
 // Keep basepoint in constant memory (small, frequently accessed)
 __device__ __constant__ uint64_t d_basePointX[4];
@@ -1970,7 +1969,7 @@ void GPUEngine::LaunchCosetGosperWalkAsync(
     
     comp_keys_coset_gosper_walk<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
-        L_bits, k2, B_top, k1, base_pos, L_totalCombs, chunk_size, W);
+        L_bits, k2, B_top, k1, base_pos, L_totalCombs, chunk_size, W, d_Qi_buffers[s]);
     
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;

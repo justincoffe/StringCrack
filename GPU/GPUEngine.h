@@ -240,6 +240,7 @@ private:
 
   // SEP7: Warp-Packed Coset state
   int qi_batches_last;  // Stored for match reconstruction
+  uint64_t* d_Qi_buffers[2];
 
 public:
   int currentStep;

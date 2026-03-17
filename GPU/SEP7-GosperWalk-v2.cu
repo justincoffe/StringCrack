@@ -386,7 +386,7 @@ void comp_keys_coset_gosper_walk(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int L_bits, int k2, int B_top, int k1,
     uint64_t base_pos, uint64_t L_totalCombs,
-    int chunk_size, int W)
+    int chunk_size, int W, uint64_t* d_Qi_array)
 {
     uint32_t global_id = blockIdx.x * blockDim.x + threadIdx.x;
     
