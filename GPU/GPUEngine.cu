@@ -811,6 +811,9 @@ __device__ __constant__ int      d_popcountMax;
 __device__ uint64_t* d_window_GX;
 __device__ uint64_t* d_window_GY;
 
+// Q_i array for Coset RevDoor (top-bit combinations per block)
+__device__ uint64_t* d_Qi_array;
+
 // Keep basepoint in constant memory (small, frequently accessed)
 __device__ __constant__ uint64_t d_basePointX[4];
 __device__ __constant__ uint64_t d_basePointY[4];

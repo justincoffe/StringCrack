@@ -165,6 +165,10 @@ public:
                           uint64_t totalCombs, int chunk_size, int numWalks);
   uint32_t SyncRevDoorBatch(int stepToSync, std::vector<ITEM> &addressFound);
 
+  // SEP7: Coset Revolving Door
+  void UploadQiArray(uint64_t* h_Qi, uint64_t size);
+  void LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 

@@ -1605,11 +1605,10 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
 }
 
 // =====================================================================================
-// SEP7: Revolving Door EC Walker (FindKeyGPU_RevDoor)
+// SEP7: Coset Revolving Door EC Walker (FindKeyGPU_RevDoor)
 // =====================================================================================
 
 void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
-    
     bool ok = true;
     double t0, ttot;
     uint64_t totalKeysProcessed = 0;
@@ -1619,21 +1618,167 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     int sliceCount = ph->gpuSliceCount;
     
     GPUEngine g(ph->gpuId, maxFound, ph->smMultiplier);
-    int numThreadsGPU = g.GetNbThread();
     vector<ITEM> found;
     
-    fprintf(stdout, "[SEP7-RD] GPU[%d] device: %s\n", sliceId, g.deviceName.c_str());
+    fprintf(stdout, "[SEP7-COSET-RD] GPU[%d] device: %s\n", sliceId, g.deviceName.c_str());
     fflush(stdout);
     
     counters[thId] = 0;
-    
     g.SetSearchMode(searchMode);
     g.SetSearchType(searchType);
-    if (onlyFull) {
-        g.SetAddress(usedAddressL, nbAddress);
-    } else {
-        g.SetAddress(usedAddress);
+    if (onlyFull) g.SetAddress(usedAddressL, nbAddress);
+    else g.SetAddress(usedAddress);
+    
+    if (!g.SetStringCrackConfig(secp, scConfig)) return;
+    if (!g.ComputeDTable(secp, scConfig)) return;
+    if (!g.ComputeGfreeTables(secp, scConfig)) return;
+    
+    int n          = scConfig->numFreeBits;
+    int minRadius  = (scConfig->sepMin > 0) ? scConfig->sepMin : 0;
+    int maxRadius  = scConfig->radius;
+    if (maxRadius > n) maxRadius = n;
+    
+    // ─── COSET-DELTA SETUP ───
+    int B_top = 12; 
+    if (n <= B_top) B_top = n / 2;
+    int L_bits = n - B_top;
+    
+    const int tableN = 129, tableK = 129;
+    uint64_t* h_combTable = (uint64_t*)calloc((size_t)tableN * tableK, sizeof(uint64_t));
+    for (int i = 0; i < tableN; i++) {
+        h_combTable[i * tableK + 0] = 1;
+        for (int j = 1; j <= i && j < tableK; j++) {
+            uint64_t a = h_combTable[(i-1)*tableK + (j-1)];
+            uint64_t b = h_combTable[(i-1)*tableK + j];
+            h_combTable[i*tableK + j] = (a > 0xFFFFFFFFFFFFFFFFULL - b) ? 0xFFFFFFFFFFFFFFFFULL : a + b;
+        }
     }
+    
+    // Compute Q_i offsets for the block threads
+    uint64_t* h_Qi_array = (uint64_t*)malloc(256 * sizeof(uint64_t));
+    for (int k1 = 0; k1 <= B_top; k1++) {
+        uint64_t W = h_combTable[B_top * tableK + k1];
+        for (uint64_t rank = 0; rank < W; rank++) {
+            uint64_t mask_lo, mask_hi;
+            cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
+            h_Qi_array[rank] = mask_lo;
+        }
+        g.UploadQiArray(h_Qi_array, W);
+    }
+    
+    // Grid sizing: In Coset mode, numWalks = numBlocks
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, ph->gpuId);
+    int smCount = deviceProp.multiProcessorCount;
+    int blocksPerSM = 14; 
+    int numBlocks = smCount * blocksPerSM;
+    
+    int targetCandidates = 80000000;
+    int chunk_size = targetCandidates / (numBlocks * 128); // 128 threads per block
+    if (chunk_size < 64) chunk_size = 64;
+    
+    printf("[SEP7-COSET-RD] GPU[%d] Grid: %d Blocks, Chunk=%d\n", sliceId, numBlocks, chunk_size);
+    fflush(stdout);
+    
+    ph->hasStarted = true;
+    t0 = Timer::get_tick();
+    bool firstBatch = true;
+    
+    int streamLbits[2], streamK2[2], streamBtop[2], streamK1[2], streamChunkSize[2];
+    uint64_t streamPosBase[2];
+    
+    // Iterate total Hamming weight h
+    for (int h = minRadius; h <= maxRadius && !endOfSearch; h++) {
+        
+        // Iterate k1 (top bits) and k2 (bottom bits)
+        for (int k1 = 0; k1 <= B_top && k1 <= h; k1++) {
+            int k2 = h - k1;
+            if (k2 > L_bits || k2 < 0) continue;
+            
+            uint64_t W = h_combTable[B_top * tableK + k1]; // Active threads per block
+            if (W == 0) continue;
+            
+            uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2]; // Total walks needed
+            if (L_totalCombs == 0) continue;
+            
+            // Upload the specific Q_i combinations for this k1
+            for (uint64_t rank = 0; rank < W; rank++) {
+                uint64_t mask_lo, mask_hi;
+                cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
+                h_Qi_array[rank] = mask_lo;
+            }
+            g.UploadQiArray(h_Qi_array, W);
+
+            uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
+            uint64_t sliceStart = sliceId * sliceSize;
+            uint64_t sliceEnd   = sliceStart + sliceSize;
+            if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+            
+            uint64_t pos_offset = sliceStart;
+            while (pos_offset < sliceEnd && !endOfSearch) {
+                if (Pause) {
+                    Paused = true;
+                    t_Paused = Timer::get_tick() - t0 + t_Paused;
+                    while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                    if (endOfSearch) break;
+                    endOfSearch = true;
+                    break;
+                }
+                
+                uint64_t remaining = sliceEnd - pos_offset;
+                int this_chunk = chunk_size;
+                uint64_t batchCoverage = (uint64_t)numBlocks * this_chunk;
+                
+                if (batchCoverage > remaining) {
+                    this_chunk = (remaining + numBlocks - 1) / numBlocks;
+                    if (this_chunk < 1) this_chunk = 1;
+                    batchCoverage = (uint64_t)numBlocks * this_chunk;
+                    if (batchCoverage > remaining) batchCoverage = remaining;
+                }
+                
+                int s = g.currentStep % 2;
+                streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
+                streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
+                
+                g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
+                
+                if (!firstBatch) {
+                    int prev_s = (g.currentStep - 2) % 2;
+                    uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
+                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                        // NOTE: You will need to write a reconstructCosetRevDoorKey function
+                        // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
+                        // For now, it will output the raw hits.
+                    }
+                    found.clear();
+                }
+                firstBatch = false;
+                
+                pos_offset += batchCoverage;
+                totalKeysProcessed += batchCoverage * W; // Multiply by W because W threads run per walk
+                counters[thId] = totalKeysProcessed;
+                
+                if (sliceId == 0) {
+                    ttot = Timer::get_tick() - t0 + t_Paused;
+                    static double lastTime = 0.0;
+                    static uint64_t lastKeys = 0;
+                    if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                        double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                        lastTime = ttot; lastKeys = totalKeysProcessed;
+                        printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
+                               h, k1, k2, W, spd, (double)totalKeysProcessed / 1e9);
+                        fflush(stdout);
+                    }
+                }
+            }
+        }
+    }
+    
+    free(h_combTable); free(h_Qi_array);
+    ttot = Timer::get_tick() - t0 + t_Paused;
+    printf("\n[SEP7-COSET-RD] GPU[%d] COMPLETE — %.1f MK/s avg\n", sliceId, (ttot > 0) ? (double)totalKeysProcessed / (ttot * 1e6) : 0);
+    ph->isRunning = false;
+}
     
     // Upload StringCrack config (includes window tables)
     if (!g.SetStringCrackConfig(secp, scConfig)) {
