@@ -964,7 +964,7 @@ fail:
 __device__ __forceinline__ void process_batch(
     uint64_t buf_X[][4], uint64_t buf_Y[][4], uint64_t buf_Z[][4],
     uint64_t buf_masks[], uint64_t Zinv[][4],
-    int batch_count, int steps_done, uint32_t walk_id,
+    int batch_count, int steps_done, uint32_t packed_id,
     address_t* sAddress, uint32_t* out) 
 {
     rd_batch_invert_Z(buf_Z, Zinv, batch_count);
@@ -972,7 +972,7 @@ __device__ __forceinline__ void process_batch(
     for (int b = 0; b < batch_count; b++) {
         uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
         int pc_abs = __popcll(s_check) + d_lockedPopcount;
-        if (pc_abs < d_popcountMin || d_popcountMax < pc_abs) continue;
+        if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
 
         uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
         _ModSqr(Zinv_sq, Zinv[b]);
@@ -989,7 +989,7 @@ __device__ __forceinline__ void process_batch(
             uint32_t pos = atomicAdd(out, 1);
             if (pos < 65536) {
                 uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                item[0] = walk_id; 
+                item[0] = packed_id; // CONTAINS WALK_ID + LANE
                 int16_t* ptr = (int16_t*)&item[1];
                 ptr[0] = (int16_t)(step_idx & 0x7FFF);
                 ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
@@ -1096,7 +1096,7 @@ void comp_keys_warp_packed_revdoor(
         batch_count++; steps_done++;
 
         if (batch_count >= MAX_BATCH) {
-            process_batch(buf_X, buf_Y, buf_Z, buf_masks, Zinv, batch_count, steps_done, walk_id, sAddress, out);
+            process_batch(buf_X, buf_Y, buf_Z, buf_masks, Zinv, batch_count, steps_done, (global_warp_id << 5) | lane, sAddress, out);
 
             if (steps_done < end_step) {
                 int last = batch_count - 1;
@@ -1110,7 +1110,7 @@ void comp_keys_warp_packed_revdoor(
     }
 
     if (batch_count > 0) {
-        process_batch(buf_X, buf_Y, buf_Z, buf_masks, Zinv, batch_count, steps_done, walk_id, sAddress, out);
+        process_batch(buf_X, buf_Y, buf_Z, buf_masks, Zinv, batch_count, steps_done, (global_warp_id << 5) | lane, sAddress, out);
     }
 }
 

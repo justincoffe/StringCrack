@@ -1604,6 +1604,105 @@ void VanitySearch::FindKeyGPU_Radius(TH_PARAM* ph) {
     ph->isRunning = false;
 }
 
+static void rebuild_and_check_coset(VanitySearch* vs, uint32_t walk_id, uint32_t step_idx, uint32_t qi_idx,
+    int L_bits, int k2, uint64_t base_pos, int chunk_size, uint8_t* hash, 
+    StringCrackConfig* config, const uint64_t* h_combTable, int tableK, const uint64_t* h_Qi_array) 
+{
+    uint64_t start_pos = base_pos + (uint64_t)walk_id * chunk_size;
+    int c[128];
+    for(int i=0; i<k2; i++) c[i] = i;
+    c[k2] = L_bits;
+    
+    struct CPURDFrame { int n, k, phase; bool is_neg; };
+    CPURDFrame stk[128];
+    int sp = -1;
+
+    int ln = L_bits, lk = k2;
+    bool l_neg = false;
+    uint64_t pos = start_pos;
+
+    while (lk > 0 && lk < ln) {
+        sp++;
+        if (!l_neg) {
+            uint64_t boundary = h_combTable[(ln - 1) * tableK + lk];
+            if (pos < boundary) {
+                stk[sp] = {ln, lk, 0, false}; ln--;
+            } else {
+                stk[sp] = {ln, lk, 2, false}; pos -= boundary;
+                if (lk == 1) { c[0] = ln - 1; ln--; lk = 0; l_neg = true; }
+                else { for (int i = 0; i <= lk - 3; i++) c[i] = i; c[lk - 2] = ln - 2; c[lk - 1] = ln - 1; ln--; lk--; l_neg = true; }
+            }
+        } else {
+            uint64_t boundary = h_combTable[(ln - 1) * tableK + (lk - 1)];
+            if (pos < boundary) {
+                stk[sp] = {ln, lk, 0, true};
+                for (int i = 0; i <= lk - 2; i++) c[i] = i;
+                ln--; lk--; l_neg = false;
+            } else {
+                stk[sp] = {ln, lk, 2, true}; pos -= boundary;
+                if (lk == 1) { c[0] = ln - 2; ln--; }
+                else { for (int i = 0; i <= lk - 2; i++) c[i] = i; c[lk - 1] = ln - 2; ln--; }
+            }
+        }
+    }
+    if (lk == ln) { for (int i = 0; i < lk; i++) c[i] = i; }
+    sp++; stk[sp] = {ln, lk, 3, l_neg};
+    
+    uint64_t mask = 0;
+    for (int i = 0; i < k2; i++) mask |= (1ULL << c[i]);
+    
+    for (uint32_t s = 0; s < step_idx; s++) {
+        bool found = false;
+        while (sp >= 0 && !found) {
+            CPURDFrame *f = &stk[sp];
+            if (f->k == 0 || f->k == f->n) { sp--; if (sp >= 0) stk[sp].phase++; continue; }
+            switch (f->phase) {
+            case 0: {
+                int child_sp = sp + 1;
+                stk[child_sp] = (!f->is_neg) ? CPURDFrame{f->n - 1, f->k, 0, false} : CPURDFrame{f->n - 1, f->k - 1, 0, false};
+                sp = child_sp; break;
+            }
+            case 1: {
+                if (!f->is_neg) {
+                    if (f->k == 1) { int old = c[0]; c[0] = f->n - 1; mask = (mask & ~(1ULL << old)) | (1ULL << c[0]); }
+                    else { int old = c[f->k - 2]; c[f->k - 2] = c[f->k - 1]; c[f->k - 1] = f->n - 1; mask = (mask & ~(1ULL << old)) | (1ULL << (f->n - 1)); }
+                } else {
+                    if (f->k == 1) { int old = c[0]; c[0] = f->n - 2; mask = (mask & ~(1ULL << old)) | (1ULL << c[0]); }
+                    else { int old = c[f->k - 1]; int added_val = f->k - 2; c[f->k - 1] = c[f->k - 2]; c[f->k - 2] = added_val; mask = (mask & ~(1ULL << old)) | (1ULL << added_val); }
+                }
+                f->phase = 2; found = true; break;
+            }
+            case 2: {
+                int child_sp = sp + 1;
+                stk[child_sp] = (!f->is_neg) ? CPURDFrame{f->n - 1, f->k - 1, 0, true} : CPURDFrame{f->n - 1, f->k, 0, true};
+                sp = child_sp; break;
+            }
+            case 3: sp--; if (sp >= 0) stk[sp].phase++; break;
+            }
+        }
+    }
+    
+    uint64_t full_mask = (h_Qi_array[qi_idx] << L_bits) | mask;
+    uint64_t seedMaskLo = (config->numFreeBits < 64) ? ((1ULL << config->numFreeBits) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t seed_lo = (full_mask ^ config->targetSeedLo) & seedMaskLo;
+
+    uint64_t keyBits[4] = { config->lockVals[0], config->lockVals[1], config->lockVals[2], config->lockVals[3] };
+    uint64_t sl = seed_lo;
+    for (int fb = 0; fb < config->numFreeBits && fb < 64; fb++) {
+        if (sl & 1ULL) {
+            int pos = config->freeBitPositions[fb];
+            keyBits[pos >> 6] |= (1ULL << (pos & 63));
+        }
+        sl >>= 1;
+    }
+
+    Int privkey; privkey.SetInt32(0);
+    privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
+    privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
+
+    vs->checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
+}
+
 // =====================================================================================
 // SEP7: Coset Revolving Door EC Walker (FindKeyGPU_RevDoor)
 // =====================================================================================
@@ -1690,79 +1789,20 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2]; 
             if (L_totalCombs == 0) continue;
 
-            // =========================================================================
-            // TIER 1: GOSPER FALLBACK (W < 32)
-            // =========================================================================
-            if (W < 32) {
-                uint64_t full_total = h_combTable[n * tableK + h];
-                if (k1 > 0) continue; 
-                
-                uint64_t sliceSize  = (full_total + sliceCount - 1) / sliceCount;
-                uint64_t sliceStart = sliceId * sliceSize;
-                uint64_t sliceEnd   = sliceStart + sliceSize;
-                if (sliceEnd > full_total) sliceEnd = full_total;
-                
-                uint64_t batchCoverage = g.GetNbThread(); // Gosper processes exactly nbThread per launch
-                uint64_t pos_offset = sliceStart;
-                
-                while (pos_offset < sliceEnd && !endOfSearch) {
-                    if (Pause) {
-                        Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused;
-                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                        if (endOfSearch) break; endOfSearch = true; break;
-                    }
-
-                    uint64_t remaining = sliceEnd - pos_offset;
-                    uint64_t current_coverage = batchCoverage;
-                    if (current_coverage > remaining) current_coverage = remaining;
-                    
-                    g.LaunchGosperAsync(h, pos_offset, full_total);
-                    
-                    if (!firstBatch) {
-                        int prev_s = (g.currentStep - 2) % 2;
-                        uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
-                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                            // NOTE: You will need to write a reconstructCosetRevDoorKey function
-                            // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
-                            // For now, it will output the raw hits.
-                        }
-                        found.clear();
-                    }
-                    firstBatch = false;
-                    
-                    pos_offset += current_coverage;
-                    totalKeysProcessed += current_coverage;
-                    counters[thId] = totalKeysProcessed;
-
-                    if (sliceId == 0) {
-                        ttot = Timer::get_tick() - t0 + t_Paused;
-                        static double lastTime = 0.0;
-                        static uint64_t lastKeys = 0;
-                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                            lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-GOSPER-FALLBACK] h=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
-                                   h, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
-                            fflush(stdout);
-                        }
-                    }
-                }
-                break; 
+            // Upload the specific Q_i combinations for this k1
+            for (uint64_t rank = 0; rank < W; rank++) {
+                uint64_t mask_lo, mask_hi;
+                cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
+                h_Qi_array[rank] = mask_lo;
+            }
+            g.UploadQiArray(h_Qi_array, W);
 
             // =========================================================================
-            // TIER 2: WARP-PACKED REVDOOR (32 <= W < 128)
+            // TIER 1: WARP-PACKED REVDOOR (W < 128)
             // =========================================================================
-            } else if (W >= 32 && W < 128) {
-                
-                for (uint64_t rank = 0; rank < W; rank++) {
-                    uint64_t mask_lo, mask_hi;
-                    cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
-                    h_Qi_array[rank] = mask_lo;
-                }
-                g.UploadQiArray(h_Qi_array, W);
-
+            if (W < 128) {
                 int qi_batches = (W + 31) / 32;
-                int blocksPerSM = 4; // Tuning param for Launch bounds (128, 4)
+                int blocksPerSM = 4; // Tuning parameter for (128, 4)
                 int numBlocks = smCount * blocksPerSM;
                 int total_warps = numBlocks * 4;
                 int walk_warps = total_warps / qi_batches; 
@@ -1777,11 +1817,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 
                 uint64_t pos_offset = sliceStart;
                 while (pos_offset < sliceEnd && !endOfSearch) {
-                    if (Pause) {
-                        Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused;
-                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                        if (endOfSearch) break; endOfSearch = true; break;
-                    }
+                    if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
 
                     uint64_t remaining = sliceEnd - pos_offset;
                     int this_chunk = chunk_size;
@@ -1800,9 +1836,14 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         int prev_s = (g.currentStep - 2) % 2;
                         uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                            // NOTE: You will need to write a reconstructCosetRevDoorKey function
-                            // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
-                            // For now, it will output the raw hits.
+                            ITEM& it = found[fi];
+                            uint32_t step_idx = (uint32_t)it.endo | ((uint32_t)it.incr << 15);
+                            uint32_t packed_id = it.thId;
+                            uint32_t global_warp_id = packed_id >> 5;
+                            uint32_t lane = packed_id & 0x1F;
+                            uint32_t walk_id = global_warp_id / qi_batches;
+                            uint32_t qi_idx = (global_warp_id % qi_batches) * 32 + lane;
+                            rebuild_and_check_coset(this, walk_id, step_idx, qi_idx, L_bits, k2, pos_offset, this_chunk, it.hash, scConfig, h_combTable, tableK, h_Qi_array);
                         }
                         found.clear();
                     }
@@ -1814,29 +1855,20 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
 
                     if (sliceId == 0) {
                         ttot = Timer::get_tick() - t0 + t_Paused;
-                        static double lastTime = 0.0;
-                        static uint64_t lastKeys = 0;
+                        static double lastTime = 0.0; static uint64_t lastKeys = 0;
                         if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
                             double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
                             lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-WP-REVDOOR] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
-                                   h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            printf("[SEP7-WP-REVDOOR] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
                             fflush(stdout);
                         }
                     }
                 }
 
             // =========================================================================
-            // TIER 3: GOD ENGINE COSET REVDOOR (W >= 128)
+            // TIER 2: GOD ENGINE COSET REVDOOR (W >= 128)
             // =========================================================================
             } else {
-                for (uint64_t rank = 0; rank < W; rank++) {
-                    uint64_t mask_lo, mask_hi;
-                    cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
-                    h_Qi_array[rank] = mask_lo;
-                }
-                g.UploadQiArray(h_Qi_array, W);
-
                 int blocksPerSM = 14;
                 int numBlocks = smCount * blocksPerSM; 
                 
@@ -1850,11 +1882,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 
                 uint64_t pos_offset = sliceStart;
                 while (pos_offset < sliceEnd && !endOfSearch) {
-                    if (Pause) {
-                        Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused;
-                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                        if (endOfSearch) break; endOfSearch = true; break;
-                    }
+                    if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
 
                     uint64_t remaining = sliceEnd - pos_offset;
                     int this_chunk = chunk_size;
@@ -1867,19 +1895,20 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         if (batchCoverage > remaining) batchCoverage = remaining;
                     }
                     
-                    int s = g.currentStep % 2;
-                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
-                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
-                    
                     g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
                     
                     if (!firstBatch) {
                         int prev_s = (g.currentStep - 2) % 2;
                         uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                            // NOTE: You will need to write a reconstructCosetRevDoorKey function
-                            // on the CPU that handles the Q_i offset + L_bits revdoor unranking!
-                            // For now, it will output the raw hits.
+                            ITEM& it = found[fi];
+                            uint32_t step_idx = (uint32_t)it.endo | ((uint32_t)it.incr << 15);
+                            uint32_t walk_id = it.thId; // In full block, thId is just the walk_id
+                            // For full-block Coset, we don't have qi_idx easily packed, so we must brute force the 128 Q_i offsets to find the match
+                            for (uint32_t qi = 0; qi < W; qi++) {
+                                rebuild_and_check_coset(this, walk_id, step_idx, qi, L_bits, k2, pos_offset, this_chunk, it.hash, scConfig, h_combTable, tableK, h_Qi_array);
+                                if (endOfSearch) break;
+                            }
                         }
                         found.clear();
                     }
@@ -1891,13 +1920,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     
                     if (sliceId == 0) {
                         ttot = Timer::get_tick() - t0 + t_Paused;
-                        static double lastTime = 0.0;
-                        static uint64_t lastKeys = 0;
+                        static double lastTime = 0.0; static uint64_t lastKeys = 0;
                         if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
                             double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
                             lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
-                                   h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
                             fflush(stdout);
                         }
                     }
