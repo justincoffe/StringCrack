@@ -36,7 +36,6 @@
 __device__ uint64_t* d_GfreeX;     // [numFreeBits][4]
 __device__ uint64_t* d_GfreeY;     // [numFreeBits][4]
 __device__ uint64_t* d_negGfreeY;  // [numFreeBits][4] (X is same as GfreeX for negation)
-extern __device__ uint64_t* d_Qi_array;  // Pointer to Q_i array in device memory
 
 // =====================================================================================
 // Gosper bit-hack: next combination with same popcount, lexicographic order
