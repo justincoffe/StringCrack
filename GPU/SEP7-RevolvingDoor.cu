@@ -225,16 +225,19 @@ __device__ void revdoor_unrank(
 }
 
 // =====================================================================================
-// Register-Packed Unranking (bit-packed state for zero array access)
+// Register-Packed Unranking (PURE SILICON - ZERO ARRAY)
 // =====================================================================================
+// Safe bitmask generator to prevent 1ULL << 64 overflow
+__device__ __forceinline__ uint64_t n_bits_mask(int bits) {
+    return (bits >= 64) ? 0xFFFFFFFFFFFFFFFFULL : ((1ULL << bits) - 1);
+}
+
 __device__ void revdoor_unrank_reg(
     int N, int K, uint64_t pos,
-    int c[], uint64_t &p0, uint64_t &p1, uint64_t &neg_bits,
+    uint64_t &mask, uint64_t &p0, uint64_t &p1, uint64_t &neg_bits,
     int *sp, int *out_curr_n, int *out_curr_k)
 {
-    for (int i = 0; i < K; i++) c[i] = i;
-    c[K] = N;
-
+    mask = n_bits_mask(K); // Initial mask: first(GEN(N, K))
     int n = N, k = K;
     int is_neg = 0;
     *sp = -1;
@@ -249,11 +252,16 @@ __device__ void revdoor_unrank_reg(
             } else {
                 p1 |= (1ULL << *sp);
                 pos -= boundary;
+                
+                // Transition to NEG(n-1, k-1) + bit (n-1)
+                mask &= ~n_bits_mask(n);
                 if (k == 1) {
-                    c[0] = n - 1; n--; k = 0; is_neg = 1;
+                    mask |= (1ULL << (n - 1));
+                    n--; k = 0; is_neg = 1;
                 } else {
-                    for (int i = 0; i <= k - 3; i++) c[i] = i;
-                    c[k - 2] = n - 2; c[k - 1] = n - 1;
+                    mask |= n_bits_mask(k - 2);
+                    mask |= (1ULL << (n - 2));
+                    mask |= (1ULL << (n - 1));
                     n--; k--; is_neg = 1;
                 }
             }
@@ -261,24 +269,35 @@ __device__ void revdoor_unrank_reg(
             uint64_t boundary = rd_comb(n - 1, k - 1);
             if (pos < boundary) {
                 neg_bits |= (1ULL << *sp);
-                for (int i = 0; i <= k - 2; i++) c[i] = i;
+                
+                // Descend to GEN(n-1, k-1) + bit (n-1)
+                mask &= ~n_bits_mask(n);
+                mask |= n_bits_mask(k - 1);
+                mask |= (1ULL << (n - 1));
                 n--; k--; is_neg = 0;
             } else {
                 p1 |= (1ULL << *sp);
                 neg_bits |= (1ULL << *sp);
                 pos -= boundary;
+                
+                // Transition to NEG(n-1, k)
+                mask &= ~n_bits_mask(n);
                 if (k == 1) {
-                    c[0] = n - 2; n--;
+                    mask |= (1ULL << (n - 2));
+                    n--;
                 } else {
-                    for (int i = 0; i <= k - 2; i++) c[i] = i;
-                    c[k - 1] = n - 2; n--;
+                    mask |= n_bits_mask(k - 1);
+                    mask |= (1ULL << (n - 2));
+                    n--;
                 }
             }
         }
     }
 
+    // Base cases
+    mask &= ~n_bits_mask(n);
     if (k == n) {
-        for (int i = 0; i < k; i++) c[i] = i;
+        mask |= n_bits_mask(k);
     }
 
     (*sp)++;
@@ -407,10 +426,10 @@ __device__ bool revdoor_step(
 }
 
 // =====================================================================================
-// Register-Packed Step Engine (zero array access)
+// Register-Packed Step Engine (PURE SILICON - ZERO ARRAY)
 // =====================================================================================
 __device__ bool revdoor_step_reg(
-    int c[], uint64_t &p0, uint64_t &p1, uint64_t &neg_bits,
+    uint64_t &mask, uint64_t &p0, uint64_t &p1, uint64_t &neg_bits,
     int *sp_ptr, int *curr_n_ptr, int *curr_k_ptr,
     int *removed, int *added)
 {
@@ -441,52 +460,45 @@ __device__ bool revdoor_step_reg(
 
         if (p == 0) {
             int child_sp = sp + 1;
-            if (!neg) {
-                curr_n--;
-            } else {
-                curr_n--; curr_k--;
-            }
-            // ─── THE FIX: CLEAR BITS FOR THE NEW CHILD FRAME ───
+            if (!neg) curr_n--; else { curr_n--; curr_k--; }
             p0 &= ~(1ULL << child_sp); 
             p1 &= ~(1ULL << child_sp); 
             neg_bits &= ~(1ULL << child_sp);
             sp = child_sp;
         }
         else if (p == 1) {
+            // HARDWARE INTRINSIC EXTRACTION (No c[] array needed!)
+            uint64_t sub_mask = mask & n_bits_mask(curr_n);
+            
             if (!neg) {
                 if (curr_k == 1) {
-                    *removed = c[0]; c[0] = curr_n - 1; *added = c[0];
+                    *removed = __ffsll(sub_mask) - 1; 
+                    *added = curr_n - 1;
                 } else {
-                    *removed = c[curr_k - 2];
-                    c[curr_k - 2] = c[curr_k - 1];
-                    c[curr_k - 1] = curr_n - 1;
+                    int highest = 63 - __clzll(sub_mask);
+                    uint64_t without_highest = sub_mask ^ (1ULL << highest);
+                    *removed = 63 - __clzll(without_highest); // Second highest bit
                     *added = curr_n - 1;
                 }
             } else {
                 if (curr_k == 1) {
-                    *removed = c[0]; c[0] = curr_n - 2; *added = c[0];
+                    *removed = __ffsll(sub_mask) - 1; 
+                    *added = curr_n - 2;
                 } else {
-                    *removed = c[curr_k - 1];
+                    *removed = 63 - __clzll(sub_mask); // Highest bit
                     *added = curr_k - 2;
-                    c[curr_k - 1] = c[curr_k - 2];
-                    c[curr_k - 2] = curr_k - 2;
                 }
             }
+            
             p0 &= ~(1ULL << sp); p1 |= (1ULL << sp);
             *sp_ptr = sp; *curr_n_ptr = curr_n; *curr_k_ptr = curr_k;
             return true;
         }
         else if (p == 2) {
             int child_sp = sp + 1;
-            if (!neg) {
-                curr_n--; curr_k--;
-            } else {
-                curr_n--;
-            }
-            // ─── THE FIX: CLEAR PHASE, SET NEG FOR CHILD FRAME ───
-            p0 &= ~(1ULL << child_sp); 
-            p1 &= ~(1ULL << child_sp); 
-            neg_bits |= (1ULL << child_sp);
+            if (!neg) { curr_n--; curr_k--; neg_bits |= (1ULL << child_sp); }
+            else      { curr_n--;           neg_bits |= (1ULL << child_sp); }
+            p0 &= ~(1ULL << child_sp); p1 &= ~(1ULL << child_sp);
             sp = child_sp;
         }
         else if (p == 3) {
@@ -592,7 +604,7 @@ __device__ __forceinline__ uint64_t combo_to_mask(const int c[], int k) {
 // =====================================================================================
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(128, 14)
+__global__ __launch_bounds__(128)
 void comp_keys_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int hamming_h,
@@ -610,16 +622,12 @@ void comp_keys_revdoor(
     int n = d_numFreeBits;
     if (n > 64) return;
 
-    // ═══════ REVOLVING DOOR INITIALIZATION via O(n) unranking ═══════
-
-    int c[RD_MAX_K + 1];
+    // ═══════ REVOLVING DOOR INITIALIZATION ═══════
+    uint64_t mask;
     uint64_t p0, p1, neg_bits;
     int curr_n, curr_k, sp;
 
-    revdoor_unrank_reg(n, hamming_h, start_pos, c, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
-
-    // Build bitmask from the unranked combination
-    uint64_t mask = combo_to_mask(c, hamming_h);
+    revdoor_unrank_reg(n, hamming_h, start_pos, mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
 
     // ═══════ COMPUTE INITIAL EC POINT using G_free table (SEP-compatible) ═══════
 
@@ -692,7 +700,7 @@ void comp_keys_revdoor(
 
         // ─── REVOLVING DOOR STEP: exactly one swap ───
         int removed_idx, added_idx;
-        if (!revdoor_step_reg(c, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
+        if (!revdoor_step_reg(mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
             break; // exhausted this walk's portion of C(n, h)
         }
 
