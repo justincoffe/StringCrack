@@ -43,6 +43,12 @@
 // Maximum k (Hamming weight). Must be <= n.
 #define RD_MAX_K 48
 
+// Forward declaration for CPU-side combinatorial unranking
+static void cpu_unrank_combination(
+    uint64_t rank, int n, int k,
+    uint64_t &mask_lo, uint64_t &mask_hi,
+    const uint64_t* combTable, int tableK);
+
 // =====================================================================================
 // D-Table: Precomputed EC point differences for single-swap transitions
 //
