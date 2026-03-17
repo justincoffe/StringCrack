@@ -112,12 +112,14 @@ public:
 		uint64_t base_rank_offset, int chunk_size, uint8_t* hash, 
 		StringCrackConfig* config, const uint64_t* h_combTable, int tableK);
 
+	// SEP77: Key reconstruction for Coset RevDoor hits
+	void checkAddr(int prefIdx, uint8_t* hash160, Int& key, int32_t incr, int endomorphism, bool mode);
+
 private:
 
 	std::string GetHex(std::vector<unsigned char>& buffer);
 	std::string GetExpectedTimeBitCrack(double keyRate, double keyCount, BITCRACK_PARAM* bc);
 	bool checkPrivKey(std::string addr, Int& key, int32_t incr, int endomorphism, bool mode);
-	void checkAddr(int prefIdx, uint8_t* hash160, Int& key, int32_t incr, int endomorphism, bool mode);
 	void checkAddrSSE(uint8_t* h1, uint8_t* h2, uint8_t* h3, uint8_t* h4,
 		int32_t incr1, int32_t incr2, int32_t incr3, int32_t incr4,
 		Int& key, int endomorphism, bool mode);
