@@ -1197,7 +1197,7 @@ __device__ __forceinline__ void rd_process_batch(
 // Q_i baked into initial accumulator — zero redundant EC adds in loop.
 // =====================================================================================
 template <int MAX_BATCH>
-__global__ __launch_bounds__(128, 6)
+__global__ __launch_bounds__(128, 4)
 void comp_keys_warp_packed_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int L_bits, int k2, int B_top, int k1,

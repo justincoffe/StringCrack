@@ -203,7 +203,7 @@ __device__ void CheckPointWalk(
 // =====================================================================================
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(32, 13)
+__global__ __launch_bounds__(32, 14)
 void comp_keys_gosper_walk(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int hamming_h,
