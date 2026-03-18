@@ -970,7 +970,7 @@ void comp_keys_coset_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int L_bits, int k2, int B_top, int k1,
     uint64_t base_pos, uint64_t L_totalCombs,
-    int chunk_size, int qi_chunks, uint64_t W)
+    int chunk_size, int qi_chunks, uint64_t W, uint64_t* d_Qi_array)
 {
     int lane = threadIdx.x; // 0..127
     
@@ -1066,35 +1066,11 @@ void comp_keys_coset_revdoor(
         batch_count++; steps_done++;
 
         if (batch_count >= MAX_BATCH) {
-            rd_batch_invert_Z(buf_Z, Zinv, batch_count);
-
-            for (int b = 0; b < batch_count; b++) {
-                uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-                int pc_abs = __popcll(s_check) + d_lockedPopcount;
-                if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
-
-                uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-                _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
-                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]); _ModMult(py, Zinv_cb, buf_Y[b]);
-
-                uint8_t odd_py = (uint8_t)(py[0] & 1);
-                uint32_t h[5];
-                _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-                if (sAddress[h[0] & 0xFFFF] != 0) {
-                    uint32_t step_idx = steps_done - batch_count + b;
-                    uint32_t pos = atomicAdd(out, 1);
-                    if (pos < 65536) {
-                        uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                        uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
-                        item[0] = packed_id;
-                        int16_t* ptr = (int16_t*)&item[1];
-                        ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                        ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                        memcpy(item + 2, h, 20);
-                    }
-                }
-            }
+            uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
+            rd_process_batch<MAX_BATCH, false>(
+                buf_X, buf_Y, buf_Z, buf_masks, Zinv,
+                batch_count, steps_done, packed_id, 0,
+                sAddress, lookup32, out);
 
             if (steps_done < end_step) {
                 int last = batch_count - 1;
@@ -1108,48 +1084,24 @@ void comp_keys_coset_revdoor(
     }
 
     if (batch_count > 0) {
-        rd_batch_invert_Z(buf_Z, Zinv, batch_count);
-        for (int b = 0; b < batch_count; b++) {
-            uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-            int pc_abs = __popcll(s_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
-
-            uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-            _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
-            _ModMult(Zinv_cb, Zinv_sq, Zinv[b]); _ModMult(py, Zinv_cb, buf_Y[b]);
-
-            uint8_t odd_py = (uint8_t)(py[0] & 1);
-            uint32_t h[5];
-            _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-            if (sAddress[h[0] & 0xFFFF] != 0) {
-                uint32_t step_idx = steps_done - batch_count + b;
-                uint32_t pos = atomicAdd(out, 1);
-                if (pos < 65536) {
-                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                    uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
-                    item[0] = packed_id;
-                    int16_t* ptr = (int16_t*)&item[1];
-                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                    memcpy(item + 2, h, 20);
-                }
-            }
-        }
+        uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
+        rd_process_batch<MAX_BATCH, false>(
+            buf_X, buf_Y, buf_Z, buf_masks, Zinv,
+            batch_count, steps_done, packed_id, 0,
+            sAddress, lookup32, out);
     }
 }
 
 
 // =====================================================================================
 // DEVICE HELPER: Process a batch of buffered Jacobian points
-// item_size_32 controls output record width (7 for coset, 8 for warp-packed)
+// Uses template boolean to completely compile out runtime branches!
 // =====================================================================================
-template <int MAX_BATCH>
+template <int MAX_BATCH, bool IS_WARP_PACKED>
 __device__ __forceinline__ void rd_process_batch(
     uint64_t buf_X[][4], uint64_t buf_Y[][4], uint64_t buf_Z[][4],
     uint64_t buf_masks[], uint64_t Zinv[][4],
     int batch_count, int steps_done, uint32_t walk_id, int lane_id,
-    int item_size_32,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out)
 {
     rd_batch_invert_Z(buf_Z, Zinv, batch_count);
@@ -1168,11 +1120,12 @@ __device__ __forceinline__ void rd_process_batch(
         _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
         if (sAddress[h[0] & 0xFFFF] != 0) {
+            // Include your CheckHash here if you have it!
             uint32_t step_idx = steps_done - batch_count + b;
             uint32_t pos = atomicAdd(out, 1);
             if (pos < 65536) {
-                uint32_t* item = out + 1 + pos * item_size_32;
-                if (item_size_32 == ITEM_SIZE32_WARP) {
+                if (IS_WARP_PACKED) {
+                    uint32_t* item = out + 1 + pos * ITEM_SIZE32_WARP;
                     item[0] = walk_id;
                     item[1] = (uint32_t)lane_id;
                     int16_t* ptr = (int16_t*)&item[2];
@@ -1180,6 +1133,7 @@ __device__ __forceinline__ void rd_process_batch(
                     ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
                     memcpy(item + 3, h, 20);
                 } else {
+                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
                     item[0] = walk_id;
                     int16_t* ptr = (int16_t*)&item[1];
                     ptr[0] = (int16_t)(step_idx & 0x7FFF);
@@ -1313,10 +1267,9 @@ void comp_keys_warp_packed_revdoor(
 
         // Flush batch when full
         if (batch_count >= MAX_BATCH) {
-            rd_process_batch<MAX_BATCH>(
+            rd_process_batch<MAX_BATCH, true>(
                 buf_X, buf_Y, buf_Z, buf_masks, Zinv,
                 batch_count, steps_done, global_warp_id, lane,
-                ITEM_SIZE32_WARP,
                 sAddress, lookup32, out);
 
             // Renormalize accumulator to affine (Z=1) for next batch
@@ -1335,10 +1288,9 @@ void comp_keys_warp_packed_revdoor(
 
     // Flush remaining partial batch
     if (batch_count > 0) {
-        rd_process_batch<MAX_BATCH>(
+        rd_process_batch<MAX_BATCH, true>(
             buf_X, buf_Y, buf_Z, buf_masks, Zinv,
             batch_count, steps_done, global_warp_id, lane,
-            ITEM_SIZE32_WARP,
             sAddress, lookup32, out);
     }
 }
@@ -1441,7 +1393,7 @@ void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64
     
     comp_keys_coset_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
-        L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size, qi_chunks, W);
+        L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size, qi_chunks, W, d_Qi_buffers[s]);
         
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;

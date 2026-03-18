@@ -1895,7 +1895,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             // TIER 3: GOSPER WALK FALLBACK (W < 32)
             // =========================================================================
             } else {
-                int blocksPerSM_gw = 14;
+                int blocksPerSM_gw = 4;
                 int numBlocks = smCount * blocksPerSM_gw;
                 
                 int total_threads = numBlocks * 128;
