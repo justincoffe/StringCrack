@@ -958,6 +958,57 @@ fail:
     return false;
 }
 
+// =====================================================================================
+// DEVICE HELPER: Process a batch of buffered Jacobian points
+// Uses template boolean to completely compile out runtime branches!
+// =====================================================================================
+template <int MAX_BATCH, bool IS_WARP_PACKED>
+__device__ __forceinline__ void rd_process_batch(
+    uint64_t buf_X[][4], uint64_t buf_Y[][4], uint64_t buf_Z[][4],
+    uint64_t buf_masks[], uint64_t Zinv[][4],
+    int batch_count, int steps_done, uint32_t walk_id, int lane_id,
+    address_t* sAddress, uint32_t* lookup32, uint32_t* out)
+{
+    rd_batch_invert_Z(buf_Z, Zinv, batch_count);
+    for (int b = 0; b < batch_count; b++) {
+        uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
+        int pc_abs = __popcll(s_check) + d_lockedPopcount;
+        if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+
+        uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+        _ModSqr(Zinv_sq, Zinv[b]);
+        _ModMult(px, Zinv_sq, buf_X[b]);
+        _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+        _ModMult(py, Zinv_cb, buf_Y[b]);
+        uint8_t odd_py = (uint8_t)(py[0] & 1);
+        uint32_t h[5];
+        _GetHash160Comp(px, odd_py, (uint8_t*)h);
+
+        if (sAddress[h[0] & 0xFFFF] != 0) {
+            // Include your CheckHash here if you have it!
+            uint32_t step_idx = steps_done - batch_count + b;
+            uint32_t pos = atomicAdd(out, 1);
+            if (pos < 65536) {
+                if (IS_WARP_PACKED) {
+                    uint32_t* item = out + 1 + pos * ITEM_SIZE32_WARP;
+                    item[0] = walk_id;
+                    item[1] = (uint32_t)lane_id;
+                    int16_t* ptr = (int16_t*)&item[2];
+                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                    memcpy(item + 3, h, 20);
+                } else {
+                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                    item[0] = walk_id;
+                    int16_t* ptr = (int16_t*)&item[1];
+                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                    memcpy(item + 2, h, 20);
+                }
+            }
+        }
+    }
+}
 
 // =====================================================================================
 // GOD ENGINE: GRID-STRIDED COSET REVDOOR (W >= 64)
@@ -1092,58 +1143,6 @@ void comp_keys_coset_revdoor(
     }
 }
 
-
-// =====================================================================================
-// DEVICE HELPER: Process a batch of buffered Jacobian points
-// Uses template boolean to completely compile out runtime branches!
-// =====================================================================================
-template <int MAX_BATCH, bool IS_WARP_PACKED>
-__device__ __forceinline__ void rd_process_batch(
-    uint64_t buf_X[][4], uint64_t buf_Y[][4], uint64_t buf_Z[][4],
-    uint64_t buf_masks[], uint64_t Zinv[][4],
-    int batch_count, int steps_done, uint32_t walk_id, int lane_id,
-    address_t* sAddress, uint32_t* lookup32, uint32_t* out)
-{
-    rd_batch_invert_Z(buf_Z, Zinv, batch_count);
-    for (int b = 0; b < batch_count; b++) {
-        uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-        int pc_abs = __popcll(s_check) + d_lockedPopcount;
-        if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
-
-        uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-        _ModSqr(Zinv_sq, Zinv[b]);
-        _ModMult(px, Zinv_sq, buf_X[b]);
-        _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
-        _ModMult(py, Zinv_cb, buf_Y[b]);
-        uint8_t odd_py = (uint8_t)(py[0] & 1);
-        uint32_t h[5];
-        _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-        if (sAddress[h[0] & 0xFFFF] != 0) {
-            // Include your CheckHash here if you have it!
-            uint32_t step_idx = steps_done - batch_count + b;
-            uint32_t pos = atomicAdd(out, 1);
-            if (pos < 65536) {
-                if (IS_WARP_PACKED) {
-                    uint32_t* item = out + 1 + pos * ITEM_SIZE32_WARP;
-                    item[0] = walk_id;
-                    item[1] = (uint32_t)lane_id;
-                    int16_t* ptr = (int16_t*)&item[2];
-                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                    memcpy(item + 3, h, 20);
-                } else {
-                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                    item[0] = walk_id;
-                    int16_t* ptr = (int16_t*)&item[1];
-                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                    memcpy(item + 2, h, 20);
-                }
-            }
-        }
-    }
-}
 
 // =====================================================================================
 // WARP-PACKED COSET REVDOOR (4 Walks per Block, 1 Walk per Warp)
