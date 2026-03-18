@@ -1413,10 +1413,10 @@ uint32_t GPUEngine::SyncWarpPackedRevDoorBatch(int stepToSync, std::vector<ITEM>
             uint32_t qi_idx        = (qi_batch_id * 32) + lane;
 
             ITEM it;
-            it.thId = (walk_chunk_id << 8) | (qi_idx & 0xFF);
+            it.thId = ((uint64_t)walk_chunk_id << 32) | (uint64_t)qi_idx;
             it.endo = sptr[0] & 0x7FFF;
-            it.mode = (sptr[0] & 0x8000) != 0;
             it.incr = sptr[1];
+            it.mode = (sptr[0] & 0x8000) != 0;
             it.hash = (uint8_t*)&itemPtr[3];
             addressFound.push_back(it);
         }

@@ -44,11 +44,11 @@ typedef uint16_t address_t;
 typedef uint32_t addressl_t;
 
 typedef struct {
-  uint32_t thId;
-  int16_t  incr;
-  int16_t  endo;
-  uint8_t  *hash;
+  uint64_t thId;
+  uint32_t endo;
+  uint32_t incr;
   bool mode;
+  uint8_t* hash;
 } ITEM;
 
 // =====================================================================================
