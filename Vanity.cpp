@@ -2043,8 +2043,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                         
                         reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
-                        
-                        reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                             streamPosBase[prev_s], streamChunkSize[prev_s],
                             it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, true);
