@@ -457,8 +457,10 @@ void comp_keys_coset_gosper_walk(
     buf_masks[0] = full_mask;
     batch_count = 1; steps_done = 1;
 
-    // Universal ID: No packing, no bit-shifts, no overflows.
-    uint32_t packed_walk_id = global_id;
+    // Using your reference sparse architecture packing
+    uint32_t walk_chunk_id = global_id / W;
+    uint32_t qi_idx = global_id % W;
+    uint32_t packed_walk_id = (qi_idx << 24) | (walk_chunk_id & 0xFFFFFF);
     
     while (steps_done < end_step) {
         uint64_t old_mask = mask;
