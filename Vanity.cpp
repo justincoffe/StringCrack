@@ -1696,12 +1696,12 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             int k2 = h - k1;
             if (k2 > L_bits || k2 < 0) continue;
             
-            uint64_t W = h_combTable[B_top * tableK + k1]; // Active threads per block
+            uint64_t W = h_combTable[B_top * tableK + k1]; 
             if (W == 0) continue;
             
-            uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2]; // Total walks needed
+            uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2]; 
             if (L_totalCombs == 0) continue;
-            
+
             // Upload the specific Q_i combinations for this k1
             for (uint64_t rank = 0; rank < W; rank++) {
                 uint64_t mask_lo, mask_hi;
@@ -1710,108 +1710,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             }
             g.UploadQiArray(h_Qi_array, W);
 
-            // ================================================================
-            // ENGINE SELECTION: Choose kernel based on W (coset size)
-            // ================================================================
-            
-            if (W >= 128) {
-                // =================================================================
-                // ENGINE 1: FULL-BLOCK COSET REVDOOR (W >= 128)
-                // 1 Block = 1 Walk, W threads per block
-                // =================================================================
-                
-                uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
-                uint64_t sliceStart = sliceId * sliceSize;
-                uint64_t sliceEnd   = sliceStart + sliceSize;
-                if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
-                
-                uint64_t pos_offset = sliceStart;
-                while (pos_offset < sliceEnd && !endOfSearch) {
-                    if (Pause) {
-                        Paused = true;
-                        t_Paused = Timer::get_tick() - t0 + t_Paused;
-                        while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                        if (endOfSearch) break;
-                        endOfSearch = true;
-                        break;
-                    }
-                    
-                    uint64_t remaining = sliceEnd - pos_offset;
-                    int this_chunk = chunk_size;
-                    uint64_t batchCoverage = (uint64_t)numBlocks * this_chunk;
-                    
-                    if (batchCoverage > remaining) {
-                        this_chunk = (remaining + numBlocks - 1) / numBlocks;
-                        if (this_chunk < 1) this_chunk = 1;
-                        batchCoverage = (uint64_t)numBlocks * this_chunk;
-                        if (batchCoverage > remaining) batchCoverage = remaining;
-                    }
-                    
-                    int s = g.currentStep % 2;
-                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
-                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
-                    
-                    g.LaunchRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks);
-                    
-                    if (!firstBatch) {
-                        int prev_s = (g.currentStep - 2) % 2;
-                        uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
-                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                            ITEM it = found[fi];
-                            uint32_t global_id = (uint32_t)it.thId;
-                            uint32_t walk_chunk_id = global_id / 128;
-                            uint32_t qi_idx = global_id % 128;
-                            uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
-                            reconstructCosetKey(qi_idx, walk_chunk_id, step, 
-                                streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
-                                streamPosBase[prev_s], streamChunkSize[prev_s],
-                                it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
-                        }
-                        found.clear();
-                    }
-                    firstBatch = false;
-                    
-                    pos_offset += batchCoverage;
-                    totalKeysProcessed += batchCoverage * W;
-                    counters[thId] = totalKeysProcessed;
-                    
-                    if (sliceId == 0) {
-                        ttot = Timer::get_tick() - t0 + t_Paused;
-                        static double lastTime = 0.0;
-                        static uint64_t lastKeys = 0;
-                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                            lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-COSET-RD] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
-                                   h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
-                            fflush(stdout);
-                        }
-                    }
-                }
-                
-                if (!firstBatch) {
-                    int prev_s = (g.currentStep - 1) % 2;
-                    uint32_t nbFound = g.SyncRevDoorBatch(prev_s, found);
-                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                        ITEM it = found[fi];
-                        uint32_t global_id = (uint32_t)it.thId;
-                        uint32_t walk_chunk_id = global_id / 128;
-                        uint32_t qi_idx = global_id % 128;
-                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
-                        reconstructCosetKey(qi_idx, walk_chunk_id, step, 
-                            streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
-                            streamPosBase[prev_s], streamChunkSize[prev_s],
-                            it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
-                    }
-                    found.clear();
-                }
-                firstBatch = true;
-                
-            } else if (W >= 64) {
-                // =========================================================================
-                // TIER 2: GOD ENGINE COSET REVDOOR (W >= 64)
-                // =========================================================================
-                int blocksPerSM = 12;
+            // =========================================================================
+            // TIER 1: GOD ENGINE COSET REVDOOR (W >= 64) - GRID STRIDER
+            // =========================================================================
+            if (W >= 64) {
+                int blocksPerSM = 4; // Matches the __launch_bounds__(128, 4) to prevent spills
                 int maxBlocks = smCount * blocksPerSM; 
                 
                 // Grid-Stride Math
@@ -1862,7 +1765,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             uint32_t walk_chunk_id = packed_id >> 12;
                             uint32_t qi_idx = packed_id & 0xFFF;
                             
-                            rebuild_and_check_coset(this, walk_chunk_id, step_idx, qi_idx, streamLbits[prev_s], streamK2[prev_s], streamPosBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK, h_Qi_array);
+                            reconstructCosetKey(qi_idx, walk_chunk_id, step_idx, streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s], streamPosBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                         }
                         found.clear();
                     }
@@ -1893,30 +1796,108 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         uint32_t packed_id = it.thId;
                         uint32_t walk_chunk_id = packed_id >> 12;
                         uint32_t qi_idx = packed_id & 0xFFF;
-                        rebuild_and_check_coset(this, walk_chunk_id, step_idx, qi_idx, streamLbits[prev_s], streamK2[prev_s], streamPosBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK, h_Qi_array);
+                        reconstructCosetKey(qi_idx, walk_chunk_id, step_idx, streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s], streamPosBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                     }
                     found.clear();
                 }
                 firstBatch = true;
-            } else {
-                // =================================================================
-                // ENGINE 3: GOSPER WALK FALLBACK (W < 32)
-                // Thin layers where revdoor wastes 96%+ of threads.
-                // Gosper walk runs at ~600 MK/s regardless of W.
-                // =================================================================
 
-                for (uint64_t rank = 0; rank < W; rank++) {
-                    uint64_t mask_lo, mask_hi;
-                    cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi,
-                                           h_combTable, tableK);
-                    h_Qi_array[rank] = mask_lo;
+            // =========================================================================
+            // TIER 2: WARP-PACKED REVDOOR (32 <= W < 64)
+            // =========================================================================
+            } else if (W >= 32) {
+                int qi_batches = (W + 31) / 32;
+                int blocksPerSM = 4; // Matches the __launch_bounds__(128, 4) to prevent spills
+                int numBlocks = smCount * blocksPerSM;
+                int total_warps = numBlocks * 4;
+                int walk_warps = total_warps / qi_batches; 
+
+                int chunk_size = targetCandidates / (walk_warps * W);
+                if (chunk_size < 64) chunk_size = 64;
+                
+                uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
+                uint64_t sliceStart = sliceId * sliceSize;
+                uint64_t sliceEnd   = sliceStart + sliceSize;
+                if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+                
+                uint64_t pos_offset = sliceStart;
+                while (pos_offset < sliceEnd && !endOfSearch) {
+                    if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
+
+                    uint64_t remaining = sliceEnd - pos_offset;
+                    int this_chunk = chunk_size;
+                    uint64_t batchCoverage = (uint64_t)walk_warps * this_chunk;
+                    
+                    if (batchCoverage > remaining) {
+                        this_chunk = (remaining + walk_warps - 1) / walk_warps;
+                        if (this_chunk < 1) this_chunk = 1;
+                        batchCoverage = (uint64_t)walk_warps * this_chunk;
+                        if (batchCoverage > remaining) batchCoverage = remaining;
+                    }
+                    
+                    int s = g.currentStep % 2;
+                    streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
+                    streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
+                    
+                    g.LaunchWarpPackedRevDoorAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, numBlocks, qi_batches);
+                    
+                    if (!firstBatch) {
+                        int prev_s = (g.currentStep - 2) % 2;
+                        uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
+                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                            ITEM& it = found[fi];
+                            uint32_t step_idx = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                            uint32_t packed_id = it.thId;
+                            uint32_t global_warp_id = packed_id >> 5;
+                            uint32_t lane = packed_id & 0x1F;
+                            uint32_t walk_chunk_id = global_warp_id / qi_batches;
+                            uint32_t qi_idx = (global_warp_id % qi_batches) * 32 + lane;
+                            reconstructCosetKey(qi_idx, walk_chunk_id, step_idx, streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s], streamPosBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
+                        }
+                        found.clear();
+                    }
+                    firstBatch = false;
+                    
+                    pos_offset += batchCoverage;
+                    totalKeysProcessed += batchCoverage * W; 
+                    counters[thId] = totalKeysProcessed;
+
+                    if (sliceId == 0) {
+                        ttot = Timer::get_tick() - t0 + t_Paused;
+                        static double lastTime = 0.0; static uint64_t lastKeys = 0;
+                        if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; lastKeys = totalKeysProcessed;
+                            printf("[SEP7-WP-REVDOOR] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            fflush(stdout);
+                        }
+                    }
                 }
-                g.UploadQiArray(h_Qi_array, (int)W);
+                
+                if (!firstBatch) {
+                    int prev_s = (g.currentStep - 1) % 2;
+                    uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
+                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                        ITEM& it = found[fi];
+                        uint32_t step_idx = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                        uint32_t packed_id = it.thId;
+                        uint32_t global_warp_id = packed_id >> 5;
+                        uint32_t lane = packed_id & 0x1F;
+                        uint32_t walk_chunk_id = global_warp_id / qi_batches;
+                        uint32_t qi_idx = (global_warp_id % qi_batches) * 32 + lane;
+                        reconstructCosetKey(qi_idx, walk_chunk_id, step_idx, streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s], streamPosBase[prev_s], streamChunkSize[prev_s], it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
+                    }
+                    found.clear();
+                }
+                firstBatch = true;
 
+            // =========================================================================
+            // TIER 3: GOSPER WALK FALLBACK (W < 32)
+            // =========================================================================
+            } else {
                 int blocksPerSM_gw = 14;
                 int numBlocks = smCount * blocksPerSM_gw;
                 
-                // FIXED COVERAGE MATH: The GPU groups W threads into 1 walk_chunk.
                 int total_threads = numBlocks * 128;
                 int walk_chunks = total_threads / (int)W;
                 if (walk_chunks < 1) walk_chunks = 1;
@@ -1957,7 +1938,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
                     streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
 
-                    // Launch using the total_threads to fill the grid
                     g.LaunchCosetGosperWalkAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, total_threads, (int)W);
 
                     if (!firstBatch) {
@@ -1967,9 +1947,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             ITEM it = found[fi];
                             uint32_t qi_idx = (uint32_t)it.thId >> 24;
                             uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
-                            
                             uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
-                            
                             reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                                 streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                                 streamPosBase[prev_s], streamChunkSize[prev_s],
@@ -2004,9 +1982,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         ITEM it = found[fi];
                         uint32_t qi_idx = (uint32_t)it.thId >> 24;
                         uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
-                        
                         uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
-                        
                         reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                             streamPosBase[prev_s], streamChunkSize[prev_s],
