@@ -2001,7 +2001,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             // Using your exact reference unpacking and step reconstruction
                             uint32_t qi_idx = (uint32_t)it.thId >> 24;
                             uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
-                            uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                            // The CPU maps ptr[0] (lower half) to incr, and ptr[1] (upper half) to endo.
+                            uint32_t step = ((uint32_t)(it.incr & 0x7FFF)) | (((uint32_t)(it.endo & 0x7FFF)) << 15);
                             
                             // USING THE CORRECT GOSPER RECONSTRUCTOR
                             reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
@@ -2040,7 +2041,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         // Using your exact reference unpacking and step reconstruction
                         uint32_t qi_idx = (uint32_t)it.thId >> 24;
                         uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
-                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                        // The CPU maps ptr[0] (lower half) to incr, and ptr[1] (upper half) to endo.
+                        uint32_t step = ((uint32_t)(it.incr & 0x7FFF)) | (((uint32_t)(it.endo & 0x7FFF)) << 15);
                         
                         reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
