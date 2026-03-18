@@ -960,34 +960,33 @@ fail:
 
 
 // =====================================================================================
-// DENSE COSET-DELTA REVOLVING DOOR (1 Block = 1 Walk)
-// Zero Warp Divergence. 100% Coalesced Memory. Pure Register State.
+// GOD ENGINE: GRID-STRIDED COSET REVDOOR (W >= 64)
+// Scales infinitely. 1 Walk = ceil(W/128) Blocks. Pure L2 Cache Broadcast.
 // =====================================================================================
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(128, 4)
+__global__ __launch_bounds__(128, 4) 
 void comp_keys_coset_revdoor(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int L_bits, int k2, int B_top, int k1,
     uint64_t base_pos, uint64_t L_totalCombs,
-    int chunk_size, uint64_t* d_Qi_array)
+    int chunk_size, int qi_chunks, uint64_t W)
 {
-    int lane = threadIdx.x;
+    int lane = threadIdx.x; // 0..127
     
-    // W = Number of active threads in this block (the Coset size)
-    uint64_t W = rd_comb(B_top, k1);
-    if (lane >= W) return;
+    // Grid-Stride logic: Map blocks to Walk IDs and Q_i chunks
+    uint32_t walk_id = blockIdx.x / qi_chunks;
+    uint32_t qi_batch_id = blockIdx.x % qi_chunks;
 
-    // Each thread gets its unique Q_i top-bit mask
-    uint64_t qi_mask = d_Qi_array[lane] << L_bits;
-    uint32_t global_walk_id = blockIdx.x * blockDim.x + lane;
+    int qi_idx = (qi_batch_id * 128) + lane;
+    if (qi_idx >= W) return; // Kills out-of-bounds threads gracefully
 
-    // All threads in the block share the exact same revolving-door start position
-    uint64_t start_pos = base_pos + (uint64_t)blockIdx.x * chunk_size;
+    uint64_t start_pos = base_pos + (uint64_t)walk_id * chunk_size;
     if (start_pos >= L_totalCombs) return;
 
-    // ═══════ SHARED UNRANKING ═══════
-    // All threads in the warp calculate the exact same starting state
+    // Grab specific offset from the massive array
+    uint64_t qi_mask = d_Qi_array[qi_idx] << L_bits;
+
     uint64_t p_mask, p0, p1, neg_bits;
     int curr_n, curr_k, sp;
     revdoor_unrank_reg(L_bits, k2, start_pos, p_mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k);
@@ -1087,7 +1086,8 @@ void comp_keys_coset_revdoor(
                     uint32_t pos = atomicAdd(out, 1);
                     if (pos < 65536) {
                         uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                        item[0] = global_walk_id; // Using Coset global walk ID
+                        uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
+                        item[0] = packed_id;
                         int16_t* ptr = (int16_t*)&item[1];
                         ptr[0] = (int16_t)(step_idx & 0x7FFF);
                         ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
@@ -1127,7 +1127,8 @@ void comp_keys_coset_revdoor(
                 uint32_t pos = atomicAdd(out, 1);
                 if (pos < 65536) {
                     uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                    item[0] = global_walk_id;
+                    uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
+                    item[0] = packed_id;
                     int16_t* ptr = (int16_t*)&item[1];
                     ptr[0] = (int16_t)(step_idx & 0x7FFF);
                     ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
@@ -1434,18 +1435,15 @@ void GPUEngine::UploadQiArray(uint64_t* h_Qi, uint64_t size) {
     cudaMemcpyAsync(d_Qi_buffers[s], h_Qi, size * sizeof(uint64_t), cudaMemcpyHostToDevice, streams[s]);
 }
 
-void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks) {
+void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks, int qi_chunks, uint64_t W) {
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
-
-    int threadsPerBlock = 128; // 1 Block = 1 Walk (max 128 Coset size)
-
-    comp_keys_coset_revdoor<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
+    
+    comp_keys_coset_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
-        L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size, d_Qi_buffers[s]);
-
-    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize,
-                    cudaMemcpyDeviceToHost, streams[s]);
+        L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size, qi_chunks, W);
+        
+    cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;
 }
 
