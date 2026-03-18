@@ -1999,13 +1999,15 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             // Unpack the ID from the new Kernel
                             uint32_t walk_chunk_id = it.thId >> 5;
                             uint32_t qi_idx = it.thId & 0x1F;
-                            uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                            
+                            // FIXED: Gosper returns the full 32-bit step natively in endo
+                            uint32_t step = it.endo; 
                             
                             // USING THE CORRECT GOSPER RECONSTRUCTOR
                             reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                                 streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                                 streamPosBase[prev_s], streamChunkSize[prev_s],
-                                it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
+                                it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, true);
                         }
                         found.clear();
                     }
@@ -2037,11 +2039,14 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         ITEM it = found[fi];
                         uint32_t walk_chunk_id = it.thId >> 5;
                         uint32_t qi_idx = it.thId & 0x1F;
-                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                        
+                        // FIXED: Gosper returns the full 32-bit step natively in endo
+                        uint32_t step = it.endo; 
+                        
                         reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                             streamPosBase[prev_s], streamChunkSize[prev_s],
-                            it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
+                            it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, true);
                     }
                     found.clear();
                 }
@@ -2507,7 +2512,7 @@ void VanitySearch::reconstructCosetKey(
     Int privkey; privkey.SetInt32(0);
     privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
     privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
-    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, isCompressed);
+    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, true);
 }
 
 void VanitySearch::reconstructCosetGosperKey(
@@ -2565,5 +2570,5 @@ void VanitySearch::reconstructCosetGosperKey(
     Int privkey; privkey.SetInt32(0);
     privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
     privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
-    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, isCompressed);
+    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, true);
 }
