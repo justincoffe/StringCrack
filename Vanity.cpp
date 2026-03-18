@@ -1995,16 +1995,15 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     // 3. Process previous batch
                     if (!firstBatch) {
                         int prev_s = (g.currentStep - 2) % 2;
-                        uint32_t nbFound = g.SyncGosperBatch(prev_s, found); // Native SyncGosperBatch works perfectly here
+                        uint32_t nbFound = g.SyncGosperBatch(prev_s, found); 
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                             ITEM it = found[fi];
-                            // Using your exact reference unpacking and step reconstruction
                             uint32_t qi_idx = (uint32_t)it.thId >> 24;
                             uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
-                            // The CPU maps ptr[0] (lower half) to incr, and ptr[1] (upper half) to endo.
-                            uint32_t step = ((uint32_t)(it.incr & 0x7FFF)) | (((uint32_t)(it.endo & 0x7FFF)) << 15);
                             
-                            // USING THE CORRECT GOSPER RECONSTRUCTOR
+                            // FIXED: endo is lower 15 bits, incr is upper 15 bits
+                            uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
+                            
                             reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                                 streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                                 streamPosBase[prev_s], streamChunkSize[prev_s],
@@ -2038,11 +2037,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
                     for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                         ITEM it = found[fi];
-                        // Using your exact reference unpacking and step reconstruction
                         uint32_t qi_idx = (uint32_t)it.thId >> 24;
                         uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
-                        // The CPU maps ptr[0] (lower half) to incr, and ptr[1] (upper half) to endo.
-                        uint32_t step = ((uint32_t)(it.incr & 0x7FFF)) | (((uint32_t)(it.endo & 0x7FFF)) << 15);
+                        
+                        // FIXED: endo is lower 15 bits, incr is upper 15 bits
+                        uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                         
                         reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
