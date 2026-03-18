@@ -1998,9 +1998,12 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         uint32_t nbFound = g.SyncGosperBatch(prev_s, found); // Native SyncGosperBatch works perfectly here
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                             ITEM it = found[fi];
+                            // Mathematically recompute the exact W used for this specific async stream
+                            int prev_W = h_combTable[streamBtop[prev_s] * tableK + streamK1[prev_s]];
+                            
                             uint32_t global_id = (uint32_t)it.thId;
-                            uint32_t walk_chunk_id = global_id / W;
-                            uint32_t qi_idx = global_id % W;
+                            uint32_t walk_chunk_id = global_id / prev_W;
+                            uint32_t qi_idx = global_id % prev_W;
                             
                             // FIXED: Gosper returns the full 32-bit step natively in endo
                             uint32_t step = it.endo + it.incr; 
@@ -2039,9 +2042,12 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
                     for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                         ITEM it = found[fi];
+                        // Mathematically recompute the exact W used for this specific async stream
+                        int prev_W = h_combTable[streamBtop[prev_s] * tableK + streamK1[prev_s]];
+                        
                         uint32_t global_id = (uint32_t)it.thId;
-                        uint32_t walk_chunk_id = global_id / W;
-                        uint32_t qi_idx = global_id % W;
+                        uint32_t walk_chunk_id = global_id / prev_W;
+                        uint32_t qi_idx = global_id % prev_W;
                         
                         // FIXED: Gosper returns the full 32-bit step natively in endo
                         uint32_t step = it.endo + it.incr; 
