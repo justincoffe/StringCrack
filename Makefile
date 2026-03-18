@@ -50,7 +50,7 @@ endif
 $(OBJDIR)/%.o : %.cpp
 	$(CXX) $(CXXFLAGS) -o $@ -c $<
 
-all: VanitySearch
+all: stringcrack
 
 stringcrack: $(OBJET)
 	@echo "Linking V3 Goldilocks VanitySearch..."
