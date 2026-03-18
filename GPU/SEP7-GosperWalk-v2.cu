@@ -458,7 +458,7 @@ void comp_keys_coset_gosper_walk(
     batch_count = 1; steps_done = 1;
 
     // Pack the ID once for checkpointing
-    uint32_t packed_walk_id = (walk_chunk_id << 16) | (qi_idx & 0xFFFF);
+    uint32_t packed_walk_id = (walk_chunk_id << 5) | (qi_idx & 0x1F);
     
     while (steps_done < end_step) {
         uint64_t old_mask = mask;

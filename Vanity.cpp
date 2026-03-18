@@ -1763,7 +1763,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             reconstructCosetKey(qi_idx, walk_chunk_id, step, 
                                 streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                                 streamPosBase[prev_s], streamChunkSize[prev_s],
-                                it.hash, scConfig, h_combTable, tableK);
+                                it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                         }
                         found.clear();
                     }
@@ -1798,7 +1798,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         reconstructCosetKey(qi_idx, walk_chunk_id, step, 
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                             streamPosBase[prev_s], streamChunkSize[prev_s],
-                            it.hash, scConfig, h_combTable, tableK);
+                            it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                     }
                     found.clear();
                 }
@@ -1880,13 +1880,13 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                             ITEM it = found[fi];
-                            uint32_t walk_chunk_id = it.thId >> 16;
-                            uint32_t qi_idx = it.thId & 0xFFFF;
+                            uint32_t walk_chunk_id = it.thId >> 8;
+                            uint32_t qi_idx = it.thId & 0xFF;
                             uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                             reconstructCosetKey(qi_idx, walk_chunk_id, step, 
                                 streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                                 streamPosBase[prev_s], streamChunkSize[prev_s],
-                                it.hash, scConfig, h_combTable, tableK);
+                                it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                         }
                         found.clear();
                     }
@@ -1916,13 +1916,13 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint32_t nbFound = g.SyncWarpPackedRevDoorBatch(prev_s, found);
                     for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                         ITEM it = found[fi];
-                        uint32_t walk_chunk_id = it.thId >> 16;
-                        uint32_t qi_idx = it.thId & 0xFFFF;
+                        uint32_t walk_chunk_id = it.thId >> 8;
+                        uint32_t qi_idx = it.thId & 0xFF;
                         uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                         reconstructCosetKey(qi_idx, walk_chunk_id, step, 
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                             streamPosBase[prev_s], streamChunkSize[prev_s],
-                            it.hash, scConfig, h_combTable, tableK);
+                            it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                     }
                     found.clear();
                 }
@@ -1997,15 +1997,15 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                             ITEM it = found[fi];
                             // Unpack the ID from the new Kernel
-                            uint32_t walk_chunk_id = it.thId >> 16;
-                            uint32_t qi_idx = it.thId & 0xFFFF;
+                            uint32_t walk_chunk_id = it.thId >> 5;
+                            uint32_t qi_idx = it.thId & 0x1F;
                             uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                             
                             // USING THE CORRECT GOSPER RECONSTRUCTOR
                             reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                                 streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                                 streamPosBase[prev_s], streamChunkSize[prev_s],
-                                it.hash, scConfig, h_combTable, tableK);
+                                it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                         }
                         found.clear();
                     }
@@ -2035,13 +2035,13 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
                     for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                         ITEM it = found[fi];
-                        uint32_t walk_chunk_id = it.thId >> 16;
-                        uint32_t qi_idx = it.thId & 0xFFFF;
+                        uint32_t walk_chunk_id = it.thId >> 5;
+                        uint32_t qi_idx = it.thId & 0x1F;
                         uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                         reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
                             streamLbits[prev_s], streamK2[prev_s], streamBtop[prev_s], streamK1[prev_s],
                             streamPosBase[prev_s], streamChunkSize[prev_s],
-                            it.hash, scConfig, h_combTable, tableK);
+                            it.hash, scConfig, h_combTable, tableK, it.endo, it.incr, it.mode);
                     }
                     found.clear();
                 }
@@ -2378,7 +2378,8 @@ void VanitySearch::reconstructCosetKey(
     int L_bits, int k2, int B_top, int k1,
     uint64_t base_pos, int chunk_size,
     uint8_t* hash, StringCrackConfig* config,
-    const uint64_t* h_combTable, int tableK)
+    const uint64_t* h_combTable, int tableK,
+    int endo, int incr, bool isCompressed)
 {
     uint64_t qi_mask_lo, qi_mask_hi;
     cpu_unrank_combination(qi_idx, B_top, k1, qi_mask_lo, qi_mask_hi, h_combTable, tableK);
@@ -2506,7 +2507,7 @@ void VanitySearch::reconstructCosetKey(
     Int privkey; privkey.SetInt32(0);
     privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
     privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
-    checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
+    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, isCompressed);
 }
 
 void VanitySearch::reconstructCosetGosperKey(
@@ -2514,7 +2515,8 @@ void VanitySearch::reconstructCosetGosperKey(
     int L_bits, int k2, int B_top, int k1,
     uint64_t base_pos, int chunk_size,
     uint8_t* hash, StringCrackConfig* config,
-    const uint64_t* h_combTable, int tableK)
+    const uint64_t* h_combTable, int tableK,
+    int endo, int incr, bool isCompressed)
 {
     // 1. Get Q_i mask
     uint64_t qi_mask_lo, qi_mask_hi;
@@ -2563,5 +2565,5 @@ void VanitySearch::reconstructCosetGosperKey(
     Int privkey; privkey.SetInt32(0);
     privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
     privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
-    checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
+    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, isCompressed);
 }
