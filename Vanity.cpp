@@ -1944,15 +1944,15 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 }
                 g.UploadQiArray(h_Qi_array, (int)W);
 
-                // Use regular gosper walk for thin layers
-                // h = total hamming weight = k1 + k2
-                int h_total = k1 + k2;
-                
                 int blocksPerSM_gw = 14;
                 int numBlocks = smCount * blocksPerSM_gw;
-                int total_walks = numBlocks * 128;
+                
+                // FIXED COVERAGE MATH: The GPU groups W threads into 1 walk_chunk.
+                int total_threads = numBlocks * 128;
+                int walk_chunks = total_threads / (int)W;
+                if (walk_chunks < 1) walk_chunks = 1;
 
-                int chunk_size = (int)(targetCandidates / ((uint64_t)total_walks));
+                int chunk_size = (int)(targetCandidates / ((uint64_t)walk_chunks * W));
                 if (chunk_size < 64) chunk_size = 64;
 
                 uint64_t sliceSize  = (L_totalCombs + sliceCount - 1) / sliceCount;
@@ -1975,24 +1975,22 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
 
                     uint64_t remaining = sliceEnd - pos_offset;
                     int this_chunk = chunk_size;
-                    uint64_t batchCoverage = (uint64_t)total_walks * this_chunk;
+                    uint64_t batchCoverage = (uint64_t)walk_chunks * this_chunk;
 
                     if (batchCoverage > remaining) {
-                        this_chunk = (int)((remaining + total_walks - 1) / total_walks);
+                        this_chunk = (int)((remaining + walk_chunks - 1) / walk_chunks);
                         if (this_chunk < 1) this_chunk = 1;
-                        batchCoverage = (uint64_t)total_walks * this_chunk;
+                        batchCoverage = (uint64_t)walk_chunks * this_chunk;
                         if (batchCoverage > remaining) batchCoverage = remaining;
                     }
 
-                    // 1. SAVE the stream variables for the CPU reconstructor
                     int s = g.currentStep % 2;
                     streamLbits[s] = L_bits; streamK2[s] = k2; streamBtop[s] = B_top; streamK1[s] = k1;
                     streamPosBase[s] = pos_offset; streamChunkSize[s] = this_chunk;
 
-                    // 2. Launch the COSET-AWARE Gosper Walk
-                    g.LaunchCosetGosperWalkAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, total_walks, (int)W);
+                    // Launch using the total_threads to fill the grid
+                    g.LaunchCosetGosperWalkAsync(L_bits, k2, B_top, k1, pos_offset, L_totalCombs, this_chunk, total_threads, (int)W);
 
-                    // 3. Process previous batch
                     if (!firstBatch) {
                         int prev_s = (g.currentStep - 2) % 2;
                         uint32_t nbFound = g.SyncGosperBatch(prev_s, found); 
@@ -2001,7 +1999,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             uint32_t qi_idx = (uint32_t)it.thId >> 24;
                             uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
                             
-                            // FIXED: endo is lower 15 bits, incr is upper 15 bits
                             uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                             
                             reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
@@ -2031,7 +2028,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                 }
 
-                // Final drain for Engine 3
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 1) % 2;
                     uint32_t nbFound = g.SyncGosperBatch(prev_s, found);
@@ -2040,7 +2036,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         uint32_t qi_idx = (uint32_t)it.thId >> 24;
                         uint32_t walk_chunk_id = (uint32_t)it.thId & 0xFFFFFF;
                         
-                        // FIXED: endo is lower 15 bits, incr is upper 15 bits
                         uint32_t step = ((uint32_t)(it.endo & 0x7FFF)) | (((uint32_t)(it.incr & 0x7FFF)) << 15);
                         
                         reconstructCosetGosperKey(qi_idx, walk_chunk_id, step,
@@ -2512,7 +2507,10 @@ void VanitySearch::reconstructCosetKey(
     Int privkey; privkey.SetInt32(0);
     privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
     privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
-    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, true);
+    
+    // FIXED: Do not pass 'endo' and 'incr' because they contain the packed step_idx.
+    // The privkey is already exact.
+    checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
 }
 
 void VanitySearch::reconstructCosetGosperKey(
@@ -2570,5 +2568,8 @@ void VanitySearch::reconstructCosetGosperKey(
     Int privkey; privkey.SetInt32(0);
     privkey.bits64[0] = keyBits[0]; privkey.bits64[1] = keyBits[1];
     privkey.bits64[2] = keyBits[2]; privkey.bits64[3] = keyBits[3];
-    checkAddr(*(address_t*)(hash), hash, privkey, endo, incr, true);
+    
+    // FIXED: Do not pass 'endo' and 'incr' because they contain the packed step_idx.
+    // The privkey is already exact.
+    checkAddr(*(address_t*)(hash), hash, privkey, 0, 0, true);
 }
