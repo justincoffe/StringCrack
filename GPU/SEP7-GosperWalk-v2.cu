@@ -381,7 +381,7 @@ void comp_keys_gosper_walk(
 
 
 template <int MAX_BATCH>
-__global__ __launch_bounds__(128, 14)
+__global__ __launch_bounds__(128, 8)
 void comp_keys_coset_gosper_walk(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     int L_bits, int k2, int B_top, int k1,
