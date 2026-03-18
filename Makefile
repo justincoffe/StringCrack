@@ -52,9 +52,9 @@ $(OBJDIR)/%.o : %.cpp
 
 all: VanitySearch
 
-VanitySearch: $(OBJET)
+stringcrack: $(OBJET)
 	@echo "Linking V3 Goldilocks VanitySearch..."
-	$(CXX) $(OBJET) $(LFLAGS) -o vanitysearch
+	$(CXX) $(OBJET) $(LFLAGS) -o stringcrack
 
 $(OBJET): | $(OBJDIR) $(OBJDIR)/GPU $(OBJDIR)/hash
 
@@ -72,4 +72,4 @@ clean:
 	@rm -f obj/*.o
 	@rm -f obj/GPU/*.o
 	@rm -f obj/hash/*.o
-	@rm -f vanitysearch
+	@rm -f stringcrack
