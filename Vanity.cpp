@@ -1822,13 +1822,20 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                     // 5. Verify & Print!
                                     Point P_check = secp->ComputePublicKey(&k);
                                     uint8_t hash_check[20];
-                                    secp->GetHash160(SEARCH_COMPRESSED, true, P_check.x.bits64, P_check.y.bits64, hash_check);
+                                    
+                                    // Use the correct native signature (passing the Point object)
+                                    secp->GetHash160(SEARCH_COMPRESSED, true, P_check, hash_check);
                                     
                                     printf("\n\n=======================================================\n");
                                     printf("[!!!] MITM MATRIX COLLISION VERIFIED!\n");
                                     printf("Private Key : %s\n", k.GetBase16().c_str());
                                     printf("WIF         : %s\n", secp->GetPrivAddress(SEARCH_COMPRESSED, k).c_str());
-                                    printf("Public Hash : %s\n", toHex(hash_check, 20).c_str());
+                                    
+                                    // Native hex printing without relying on external toHex()
+                                    printf("Public Hash : ");
+                                    for(int x = 0; x < 20; x++) printf("%02x", hash_check[x]);
+                                    printf("\n");
+                                    
                                     printf("=======================================================\n");
                                     
                                     endOfSearch = true; 

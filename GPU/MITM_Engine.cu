@@ -316,7 +316,7 @@ void comp_mitm_intersect(
         buf_baby_idx[batch_count] = b_idx;
         batch_count++;
 
-        // Process Batch when full
+        // Process Batch when full OR at the tail end of the loop
         if (batch_count >= BATCH_SIZE || (b_idx + blockDim.x) >= baby_size) {
             native_batch_invert<BATCH_SIZE>(Zinv, buf_Z, batch_count);
 
