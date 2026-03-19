@@ -1718,6 +1718,12 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 int L_baby = L_bits / 2;
                 int L_giant = L_bits - L_baby;
 
+                // State tracking for async reconstruction (Moved to top scope)
+                uint32_t active_qi[2] = {0};
+                uint64_t active_offset[2] = {0};
+                int active_kb[2] = {0};
+                int active_kg[2] = {0};
+
                 // Iterate through all valid k_baby and k_giant splits that sum to k2
                 for (int k_b = 0; k_b <= k2 && k_b <= L_baby; k_b++) {
                     int k_g = k2 - k_b;
@@ -1735,9 +1741,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint64_t sliceStart = sliceId * sliceSize;
                     uint64_t sliceEnd = sliceStart + sliceSize;
                     if (sliceEnd > W) sliceEnd = W;
-
-                    uint32_t active_qi[2] = {0};
-                    uint64_t active_offset[2] = {0};
 
                     for (uint64_t rank = sliceStart; rank < sliceEnd && !endOfSearch; rank++) {
                         if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
@@ -1785,6 +1788,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             int s = g.currentStep % 2;
                             active_qi[s] = qi_idx;
                             active_offset[s] = offset;
+                            active_kb[s] = k_b;
+                            active_kg[s] = k_g;
                             
                             g.LaunchMITMChunkAsync(qi_idx, baby_size, giant_size, offset, blocks, s);
 
@@ -1794,23 +1799,22 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                 uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
                                 uint32_t sync_qi = active_qi[prev_s];
                                 uint64_t sync_offset = active_offset[prev_s];
+                                int sync_kb = active_kb[prev_s];
+                                int sync_kg = active_kg[prev_s];
                                 
                                 for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                                     ITEM& it = found[fi];
                                     
-                                    // CheckPoint natively writes blockIdx.x * 128 + threadIdx.x to thId
-                                    // We reverse the math to get the exact giant point!
                                     uint32_t giant_idx = (it.thId / 128) + sync_offset;
                                     uint32_t baby_idx = it.incr;
-                                    uint32_t actual_qi = sync_qi;
                                     
                                     uint64_t baby_lo, baby_hi, giant_lo, giant_hi;
-                                    cpu_unrank_combination(baby_idx, L_baby, k_b, baby_lo, baby_hi, h_combTable, tableK);
-                                    cpu_unrank_combination(giant_idx, L_giant, k_g, giant_lo, giant_hi, h_combTable, tableK);
+                                    cpu_unrank_combination(baby_idx, L_baby, sync_kb, baby_lo, baby_hi, h_combTable, tableK);
+                                    cpu_unrank_combination(giant_idx, L_giant, sync_kg, giant_lo, giant_hi, h_combTable, tableK);
                                     uint64_t lower_mask = baby_lo | (giant_lo << L_baby);
                                     
                                     uint64_t qi_lo, qi_hi;
-                                    cpu_unrank_combination(actual_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
+                                    cpu_unrank_combination(sync_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
                                     uint64_t full_mask = (qi_lo << L_bits) | lower_mask;
                                     
                                     uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
@@ -1875,21 +1879,22 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
                     uint32_t sync_qi = active_qi[prev_s];
                     uint64_t sync_offset = active_offset[prev_s];
+                    int sync_kb = active_kb[prev_s];
+                    int sync_kg = active_kg[prev_s];
                     
                     for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                         ITEM& it = found[fi];
                         
                         uint32_t giant_idx = (it.thId / 128) + sync_offset;
                         uint32_t baby_idx = it.incr;
-                        uint32_t actual_qi = sync_qi;
                         
                         uint64_t baby_lo, baby_hi, giant_lo, giant_hi;
-                        cpu_unrank_combination(baby_idx, L_baby, k_b, baby_lo, baby_hi, h_combTable, tableK);
-                        cpu_unrank_combination(giant_idx, L_giant, k_g, giant_lo, giant_hi, h_combTable, tableK);
+                        cpu_unrank_combination(baby_idx, L_baby, sync_kb, baby_lo, baby_hi, h_combTable, tableK);
+                        cpu_unrank_combination(giant_idx, L_giant, sync_kg, giant_lo, giant_hi, h_combTable, tableK);
                         uint64_t lower_mask = baby_lo | (giant_lo << L_baby);
                         
                         uint64_t qi_lo, qi_hi;
-                        cpu_unrank_combination(actual_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
+                        cpu_unrank_combination(sync_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
                         uint64_t full_mask = (qi_lo << L_bits) | lower_mask;
                         
                         uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
@@ -1926,7 +1931,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     found.clear();
                 }
                 firstBatch = true;
-                continue;
+                continue; // Skip the Walker Tiers since we just ran MITM
             }
 
             // =========================================================================
