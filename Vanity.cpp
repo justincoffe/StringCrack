@@ -1928,6 +1928,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     found.clear();
                 }
                 firstBatch = true;
+                continue;
             }
 
             // =========================================================================
