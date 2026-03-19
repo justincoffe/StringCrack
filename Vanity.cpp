@@ -1863,19 +1863,23 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
  
                         if (sliceId == 0) {
                             ttot = Timer::get_tick() - t0 + t_Paused;
-                            static double lastTime = 0.0;
-                            static uint64_t lastKeys = 0;
-                            if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                                uint64_t globalKeys = 0;
-                                for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
-                                double spd = (lastTime > 0)
-                                    ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                                lastTime = ttot; lastKeys = globalKeys;
-                                printf("[MITM-v2] h=%d k1=%d k_b=%d k_g=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
-                                    h, k1, k_b, k_g, (unsigned long long)W, spd,
-                                    (double)globalKeys / 1e9);
-                                fflush(stdout);
-                            }
+                            uint64_t globalKeys = 0;
+                            for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
+
+                            static double lastTime_mitm = 0.0;
+                            static uint64_t lastKeys_mitm = 0;
+                            double dt = ttot - lastTime_mitm;
+                            double spd = (dt > 0.01)
+                                ? (double)(globalKeys - lastKeys_mitm) / (dt * 1e6) : 0;
+                            lastTime_mitm = ttot;
+                            lastKeys_mitm = globalKeys;
+
+                            // FIX 3: Show T1/T2 sizes for throughput debugging
+                            printf("[MITM-v2] h=%d k1=%d k_b=%d k_g=%d | W=%llu T1=%llu T2=%llu | %.1f MK/s | %.2f BKeys\r",
+                                h, k1, k_b, k_g, (unsigned long long)W,
+                                (unsigned long long)T1_size, (unsigned long long)T2_size,
+                                spd, (double)globalKeys / 1e9);
+                            fflush(stdout);
                         }
                     }
                 }
