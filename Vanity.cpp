@@ -1838,9 +1838,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                     
                                     // NATIVE CheckAddr directly handles False Positives, File Output, and Formatting
                                     address_t hash160 = *(address_t*)(hash_check);
-                                    if (checkAddr(hash160, hash_check, k, SEARCH_COMPRESSED, thId, true)) {
-                                        endOfSearch = true; 
-                                    }
+                                    checkAddr(hash160, hash_check, k, SEARCH_COMPRESSED, thId, true);
                                 }
                                 found.clear();
                             }
