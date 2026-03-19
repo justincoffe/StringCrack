@@ -711,6 +711,13 @@ int main(int argc, char* argv[]) {
 			scConfig.enabled = true;
 			a++;
 		}
+		else if (strcmp(argv[a], "-mitm") == 0) { // <-- ADD THIS BLOCK
+			scConfig.useMitm = true;
+			scConfig.useRadius = true;
+			scConfig.useSEP = true;
+			scConfig.enabled = true;
+			a++;
+		}
 		else if (strcmp(argv[a], "-i") == 0) {
 			a++;
 			parseFile(string(argv[a]), address);

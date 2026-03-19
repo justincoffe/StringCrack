@@ -111,6 +111,7 @@ typedef struct {
     
     // SEP7: Revolving Door EC Walker
     bool useRevDoor;
+    bool useMitm;     // <-- ADD THIS LINE
 } StringCrackConfig;
 
 // Second level lookup
@@ -180,6 +181,13 @@ public:
   // SEP7: Coset-Aware Gosper Walk Kernel
   void LaunchCosetGosperWalkAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t L_totalCombs, int chunk_size, int total_walks, int W);
 
+  // MITM VRAM Engine (Phase 1)
+  bool BuildMITMTables(Secp256K1* secp, StringCrackConfig* config, 
+                       int L_baby, int k_baby, int L_giant, int k_giant);
+  void ShiftBabyTable(uint64_t bX[4], uint64_t bY[4], uint64_t bZ[4], uint64_t baby_size);
+  void LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64_t giant_size, uint64_t offset, uint64_t blocks, int s);
+  uint32_t SyncMITMBatch(int s, std::vector<ITEM>& found);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 
@@ -241,6 +249,18 @@ private:
   // SEP7: Warp-Packed Coset state
   int qi_batches_last;  // Stored for match reconstruction
   uint64_t* d_Qi_buffers[2];
+
+  // ==========================================
+  // MITM VRAM ENGINE POINTERS (Phase 1)
+  // ==========================================
+  uint64_t* d_mitm_baby_X;
+  uint64_t* d_mitm_baby_Y;
+  uint64_t* d_mitm_giant_X;
+  uint64_t* d_mitm_giant_Y;
+  uint64_t* d_mitm_baby_shifted_X;
+  uint64_t* d_mitm_baby_shifted_Y;
+  uint64_t* d_mitm_Gfree_X;
+  uint64_t* d_mitm_Gfree_Y;
 
 public:
   int currentStep;

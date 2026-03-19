@@ -399,6 +399,24 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
         d_radiusCount[i] = nullptr;
     }
 
+    // =========================================================================
+    // MITM VRAM ENGINE ALLOCATION (~1.0 GB Total)
+    // C(25, 12) = 5,200,300 elements maximum per layer
+    // =========================================================================
+    uint64_t max_mitm_elements = 5200300;
+    size_t mitm_bytes = max_mitm_elements * 4 * sizeof(uint64_t); // 32 bytes per coordinate
+
+    cudaMalloc((void**)&d_mitm_baby_X, mitm_bytes);
+    cudaMalloc((void**)&d_mitm_baby_Y, mitm_bytes);
+    cudaMalloc((void**)&d_mitm_giant_X, mitm_bytes);
+    cudaMalloc((void**)&d_mitm_giant_Y, mitm_bytes);
+    cudaMalloc((void**)&d_mitm_baby_shifted_X, mitm_bytes);
+    cudaMalloc((void**)&d_mitm_baby_shifted_Y, mitm_bytes);
+    
+    // Allocate space for the 64 G_free points to pass to the builder
+    cudaMalloc((void**)&d_mitm_Gfree_X, 64 * 4 * sizeof(uint64_t));
+    cudaMalloc((void**)&d_mitm_Gfree_Y, 64 * 4 * sizeof(uint64_t));
+
 }
 
 GPUEngine::~GPUEngine() {
@@ -418,6 +436,16 @@ GPUEngine::~GPUEngine() {
         if (h_radiusSeedsLo[i]) cudaFreeHost(h_radiusSeedsLo[i]);
         if (h_radiusSeedsHi[i]) cudaFreeHost(h_radiusSeedsHi[i]);
     }
+
+    // MITM VRAM ENGINE cleanup
+    if (d_mitm_baby_X) cudaFree(d_mitm_baby_X);
+    if (d_mitm_baby_Y) cudaFree(d_mitm_baby_Y);
+    if (d_mitm_giant_X) cudaFree(d_mitm_giant_X);
+    if (d_mitm_giant_Y) cudaFree(d_mitm_giant_Y);
+    if (d_mitm_baby_shifted_X) cudaFree(d_mitm_baby_shifted_X);
+    if (d_mitm_baby_shifted_Y) cudaFree(d_mitm_baby_shifted_Y);
+    if (d_mitm_Gfree_X) cudaFree(d_mitm_Gfree_X);
+    if (d_mitm_Gfree_Y) cudaFree(d_mitm_Gfree_Y);
 
     cudaFree(inputKey);
     cudaFree(inputAddress);
@@ -1280,6 +1308,7 @@ __device__ __forceinline__ void unrank_combination(
 // --- INJECT SEP7 KERNELS (after device definitions) ---
 #include "SEP7-GosperWalk-v2.cu"
 #include "SEP7-RevolvingDoor.cu"
+#include "MITM_Engine.cu"
 
 // =====================================================================================
 // SEP4: GPU-native Gosper kernel — combinatorial unranking in registers

@@ -1711,6 +1711,126 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             g.UploadQiArray(h_Qi_array, W);
 
             // =========================================================================
+            // NUCLEAR OPTION: THE MITM VRAM ENGINE (-mitm)
+            // =========================================================================
+            if (scConfig->useMitm) {
+                // Split the lower bits into Baby and Giant halves
+                int L_baby = L_bits / 2;
+                int L_giant = L_bits - L_baby;
+
+                // Iterate through all valid k_baby and k_giant splits that sum to k2
+                for (int k_b = 0; k_b <= k2 && k_b <= L_baby; k_b++) {
+                    int k_g = k2 - k_b;
+                    if (k_g < 0 || k_g > L_giant) continue;
+
+                    uint64_t baby_size = h_combTable[L_baby * tableK + k_b];
+                    uint64_t giant_size = h_combTable[L_giant * tableK + k_g];
+                    if (baby_size == 0 || giant_size == 0) continue;
+
+                    // 1. Build the VRAM Arrays (~2ms)
+                    g.BuildMITMTables(secp, scConfig, L_baby, k_b, L_giant, k_g);
+
+                    // 2. Slice the Q_i Top-Bit Workload across the GPUs
+                    uint64_t sliceSize = (W + sliceCount - 1) / sliceCount;
+                    uint64_t sliceStart = sliceId * sliceSize;
+                    uint64_t sliceEnd = sliceStart + sliceSize;
+                    if (sliceEnd > W) sliceEnd = W;
+
+                    for (uint64_t rank = sliceStart; rank < sliceEnd && !endOfSearch; rank++) {
+                        if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
+
+                        uint32_t qi_idx = rank;
+
+                        // Calculate the absolute exact Base Point for this specific Q_i
+                        uint64_t qi_mask_lo, qi_mask_hi;
+                        cpu_unrank_combination(qi_idx, B_top, k1, qi_mask_lo, qi_mask_hi, h_combTable, tableK);
+                        uint64_t qi_mask = qi_mask_lo << L_bits;
+
+                        uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+                        uint64_t seed_lo = (qi_mask ^ scConfig->targetSeedLo) & seedMaskLo;
+
+                        uint64_t keyBits[4] = { scConfig->lockVals[0], scConfig->lockVals[1], scConfig->lockVals[2], scConfig->lockVals[3] };
+                        for (int fb = 0; fb < n && fb < 64; fb++) {
+                            if (seed_lo & 1ULL) {
+                                int pos = scConfig->freeBitPositions[fb];
+                                keyBits[pos >> 6] |= (1ULL << (pos & 63));
+                            }
+                            seed_lo >>= 1;
+                        }
+
+                        Int baseKey; baseKey.SetInt32(0);
+                        baseKey.bits64[0] = keyBits[0]; baseKey.bits64[1] = keyBits[1];
+                        baseKey.bits64[2] = keyBits[2]; baseKey.bits64[3] = keyBits[3];
+
+                        Point P_base = secp->ComputePublicKey(&baseKey);
+                        uint64_t bX[4], bY[4], bZ[4];
+                        memcpy(bX, P_base.x.bits64, 32);
+                        memcpy(bY, P_base.y.bits64, 32);
+                        bZ[0] = 1; bZ[1] = 0; bZ[2] = 0; bZ[3] = 0; // Pure Affine Z=1
+
+                        // 3. Shift and Bake the Baby Table (Synchronous, ~1ms)
+                        g.ShiftBabyTable(bX, bY, bZ, baby_size);
+
+                        // 4. Intersect the Read-Only Matrix in Chunks (Live Terminal Updates!)
+                        uint64_t max_blocks = 20000; 
+                        
+                        for (uint64_t offset = 0; offset < giant_size && !endOfSearch; offset += max_blocks) {
+                            if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
+
+                            uint64_t blocks = giant_size - offset;
+                            if (blocks > max_blocks) blocks = max_blocks;
+
+                            int s = g.currentStep % 2;
+                            g.LaunchMITMChunkAsync(qi_idx, baby_size, giant_size, offset, blocks, s);
+
+                            // Async Sync and Key Reconstruction
+                            if (!firstBatch) {
+                                int prev_s = (g.currentStep - 2) % 2;
+                                uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
+                                for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                                    ITEM& it = found[fi];
+                                    printf("\n[!!!] MITM INTERSECT HIT! qi=%u giant=%u baby=%u\n", it.thId, it.endo, it.incr);
+                                    endOfSearch = true; 
+                                }
+                                found.clear();
+                            }
+                            firstBatch = false;
+
+                            // Update global counters per chunk so speed ticker lives!
+                            uint64_t chunk_keys = baby_size * blocks;
+                            totalKeysProcessed += chunk_keys;
+                            counters[thId] = totalKeysProcessed;
+
+                            if (sliceId == 0) {
+                                ttot = Timer::get_tick() - t0 + t_Paused;
+                                static double lastTime = 0.0; 
+                                static uint64_t lastKeys = 0;
+                                if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                                    uint64_t globalKeys = 0;
+                                    for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
+                                    double spd = (lastTime > 0) ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                                    lastTime = ttot; lastKeys = globalKeys;
+                                    printf("[SEP7-MITM-VRAM] GLOBAL h=%d k1=%d | %.1f MK/s | %.2f BKeys\r", 
+                                           h, k1, spd, (double)globalKeys / 1e9);
+                                    fflush(stdout);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Flush final async batch
+                if (!firstBatch) {
+                    int prev_s = (g.currentStep - 1) % 2;
+                    uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
+                    // ...
+                    found.clear();
+                }
+                firstBatch = true;
+                continue; // Skip the Walker Tiers since we just ran MITM
+            }
+
+            // =========================================================================
             // TIER 1: GOD ENGINE COSET REVDOOR (W >= 64) - GRID STRIDER
             // =========================================================================
             if (W >= 64) {
