@@ -322,17 +322,14 @@ void comp_mitm_god_matrix_v2(
                 uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
                 _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
 
-                if (sAddress[hash[0] & 0xFFFF] != 0) {
-                    uint32_t h0 = hash[0];
-                    uint32_t h1 = hash[1];
-                    uint32_t cl = h0 & 0xFFFF;
-                    uint32_t p = lookup32[cl];
-                    while (p != 0) {
-                        uint32_t* item = (uint32_t*)&sAddress[p];
-                        
-                        // FIX: Safe 32-bit reads. No 64-bit casting on unaligned array pointers!
-                        if (item[0] == h0 && item[1] == h1) {
-                            
+                uint32_t pr = hash[0] & 0xFFFF;
+                if (sAddress[pr] != 0) {
+                    uint32_t offset = lookup32[pr];
+                    uint16_t count = sAddress[pr];
+                    uint32_t la = hash[0];
+                    
+                    for (uint16_t c = 0; c < count; c++) {
+                        if (lookup32[offset + c] == la) {
                             int id = atomicAdd(&out[0], 1);
                             if (id < 256) {
                                 int off = 1 + (id * 8);
@@ -349,7 +346,6 @@ void comp_mitm_god_matrix_v2(
                             }
                             break;
                         }
-                        p = item[2];
                     }
                 }
             }
