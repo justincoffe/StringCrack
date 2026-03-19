@@ -321,4 +321,31 @@ void GPUEngine::LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64
     currentStep++;
 }
 
+// =====================================================================================
+// HOST SYNC: Read the hit buffer from the Intersector
+// =====================================================================================
+uint32_t GPUEngine::SyncMITMBatch(int s, std::vector<ITEM>& found) {
+    cudaStreamSynchronize(streams[s]);
+    uint32_t nbFound = h_outputPinned[s][8];
+    for (uint32_t i = 0; i < nbFound; i++) {
+        int offset = 9 + (i * 9);
+        ITEM it;
+        it.thId = h_outputPinned[s][offset + 0]; // qi_idx
+        
+        // Cast to uint32_t* to safely copy the 5 hash limbs natively
+        uint32_t* hash32 = (uint32_t*)it.hash;
+        hash32[0] = h_outputPinned[s][offset + 1];
+        hash32[1] = h_outputPinned[s][offset + 2];
+        hash32[2] = h_outputPinned[s][offset + 3];
+        hash32[3] = h_outputPinned[s][offset + 4];
+        hash32[4] = h_outputPinned[s][offset + 5];
+        
+        it.endo = h_outputPinned[s][offset + 6]; // giant_idx
+        it.incr = h_outputPinned[s][offset + 7]; // baby_idx
+        it.mode = h_outputPinned[s][offset + 8] == 1; 
+        found.push_back(it);
+    }
+    return nbFound;
+}
+
 #endif // MITM_ENGINE_CU
