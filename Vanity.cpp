@@ -1771,6 +1771,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                     firstBatch = false;
                     
+                    // --- MISSING INCREMENTS ---
+                    uint64_t keysThisBatch = batchCoverage * W;
+                    totalKeysProcessed += keysThisBatch;
+                    pos_offset += batchCoverage;
+                    
                     // CRITICAL: Update the global array so GPU 0 can read it
                     counters[thId] = totalKeysProcessed;
 
@@ -1876,6 +1881,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                     firstBatch = false;
                     
+                    // --- MISSING INCREMENTS ---
+                    uint64_t keysThisBatch = batchCoverage * W;
+                    totalKeysProcessed += keysThisBatch;
+                    pos_offset += batchCoverage;
+                    
                     // CRITICAL: Update the global array so GPU 0 can read it
                     counters[thId] = totalKeysProcessed;
 
@@ -1891,7 +1901,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             }
                             
                             double spd = (lastTime > 0) ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                            lastTime = ttot; 
+                            lastTime = ttot;
                             lastKeys = globalKeys;
                             
                             printf("[SEP7-GOD-ENGINE] GLOBAL h=%d k1=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
