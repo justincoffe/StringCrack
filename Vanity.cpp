@@ -1720,6 +1720,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 uint32_t active_qi[2] = {0};
                 int active_kb[2] = {0};
                 int active_kg[2] = {0};
+                uint64_t active_T1[2] = {0};
+                uint64_t active_T2[2] = {0};
  
                 // Compute P_locked ONCE for this entire (h, k1) iteration
                 uint64_t lockedKey[4] = {
@@ -1772,6 +1774,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
  
                     // Scale Q_i batch size to fill the GPU
                     uint64_t T1_size = (baby_size < giant_size) ? baby_size : giant_size;
+                    uint64_t T2_size = (baby_size > giant_size) ? baby_size : giant_size;
                     int blocks_per_qi = (T1_size + 127) / 128;
                     if (blocks_per_qi == 0) blocks_per_qi = 1;
                     uint64_t max_qi_batch = 10000;
@@ -1797,6 +1800,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         active_qi[s] = qi_start;
                         active_kb[s] = k_b;
                         active_kg[s] = k_g;
+                        active_T1[s] = T1_size;
+                        active_T2[s] = T2_size;
  
                         // *** FIX 2: v2 kernel uses precomputed Q_i points ***
                         g.LaunchMITMGodMatrixAsync(
