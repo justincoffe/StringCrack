@@ -261,8 +261,8 @@ void comp_mitm_intersect(
 
         // 4. NATIVE Hashing
         uint32_t hash[5];
-        uint32_t isOdd = (uint32_t)(aff_Y[0] & 1);
-        _GetHash160Comp(aff_X, isOdd, hash);
+        uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
+        _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
 
         address_t hash160 = *(address_t*)hash;
         uint32_t cl = hash160 & 0xFFFF;
