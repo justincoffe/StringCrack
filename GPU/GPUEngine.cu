@@ -417,6 +417,14 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     cudaMalloc((void**)&d_mitm_Gfree_X, 64 * 4 * sizeof(uint64_t));
     cudaMalloc((void**)&d_mitm_Gfree_Y, 64 * 4 * sizeof(uint64_t));
 
+    // Allocate space for up to ~130,000 Q_i points (adjust if W gets larger)
+    if (cudaMalloc((void**)&d_Qi_points_X, 131072 * 4 * sizeof(uint64_t)) != cudaSuccess) {
+        printf("Failed to allocate d_Qi_points_X\n");
+    }
+    if (cudaMalloc((void**)&d_Qi_points_Y, 131072 * 4 * sizeof(uint64_t)) != cudaSuccess) {
+        printf("Failed to allocate d_Qi_points_Y\n");
+    }
+
 }
 
 GPUEngine::~GPUEngine() {

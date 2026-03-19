@@ -188,7 +188,16 @@ public:
   void LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64_t giant_size, uint64_t offset, uint64_t blocks, int s);
   uint32_t SyncMITMBatch(int s, std::vector<ITEM>& found);
 
-  // MITM God Matrix Launcher
+  // MITM God Matrix pointers
+  uint64_t* d_Qi_points_X;
+  uint64_t* d_Qi_points_Y;
+
+  // V2 God Matrix Launchers
+  void BuildQiPoints(
+      uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
+      uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3,
+      int L_bits, int B_top, int k1, uint64_t W);
+
   void LaunchMITMGodMatrixAsync(
       uint64_t baby_size, uint64_t giant_size, 
       int L_bits, int B_top, int k1,
