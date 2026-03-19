@@ -280,7 +280,6 @@ void comp_mitm_intersect(
     }
     __syncthreads();
 
-    // Local Batch Buffers
     const int BATCH_SIZE = 16;
     uint64_t buf_X[BATCH_SIZE][4];
     uint64_t buf_Y[BATCH_SIZE][4];
@@ -313,10 +312,9 @@ void comp_mitm_intersect(
         buf_X[batch_count][0] = accX[0]; buf_X[batch_count][1] = accX[1]; buf_X[batch_count][2] = accX[2]; buf_X[batch_count][3] = accX[3];
         buf_Y[batch_count][0] = accY[0]; buf_Y[batch_count][1] = accY[1]; buf_Y[batch_count][2] = accY[2]; buf_Y[batch_count][3] = accY[3];
         buf_Z[batch_count][0] = accZ[0]; buf_Z[batch_count][1] = accZ[1]; buf_Z[batch_count][2] = accZ[2]; buf_Z[batch_count][3] = accZ[3];
-        buf_baby_idx[batch_count] = b_idx;
+        buf_baby_idx[batch_count] = (uint32_t)b_idx;
         batch_count++;
 
-        // Process Batch when full OR at the tail end of the loop
         if (batch_count >= BATCH_SIZE || (b_idx + blockDim.x) >= baby_size) {
             native_batch_invert<BATCH_SIZE>(Zinv, buf_Z, batch_count);
 
@@ -331,22 +329,10 @@ void comp_mitm_intersect(
                 uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
                 _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
 
-                if (sAddress[hash[0] & 0xFFFF] != 0) {
-                    int id = atomicAdd(&out[0], 1);
-                    if (id < 256) {
-                        int offset = 1 + (id * 8);
-                        out[offset + 0] = qi_idx;           
-                        out[offset + 1] = giant_idx;        
-                        out[offset + 2] = buf_baby_idx[i];  
-                        out[offset + 3] = hash[0];
-                        out[offset + 4] = hash[1];
-                        out[offset + 5] = hash[2];
-                        out[offset + 6] = hash[3];
-                        out[offset + 7] = hash[4];
-                    }
-                }
+                // Call NATIVE CheckPoint. Zero false positives!
+                CheckPoint(hash, buf_baby_idx[i], sAddress, lookup32, out);
             }
-            batch_count = 0; // Reset for next batch
+            batch_count = 0;
         }
     }
 }
@@ -384,20 +370,21 @@ void GPUEngine::LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64
 }
 
 // =====================================================================================
-// HOST SYNC: Read the exact 32-byte layout back
+// HOST SYNC: Native VanitySearch ITEM Extraction
 // =====================================================================================
 uint32_t GPUEngine::SyncMITMBatch(int s, std::vector<ITEM>& found) {
     cudaStreamSynchronize(streams[s]);
     uint32_t nbFound = h_outputPinned[s][0];
-    
-    for (uint32_t i = 0; i < nbFound && i < 256; i++) {
-        uint32_t* itemPtr = &h_outputPinned[s][1 + i * 8];
+    if (nbFound > maxFound) nbFound = maxFound;
+    for (uint32_t i = 0; i < nbFound; i++) {
+        uint32_t* itemPtr = h_outputPinned[s] + (i * ITEM_SIZE32 + 1);
         ITEM it;
-        it.thId = itemPtr[0]; // qi_idx
-        it.endo = itemPtr[1]; // giant_idx
-        it.incr = itemPtr[2]; // baby_idx
-        it.mode = true;
-        it.hash = (uint8_t*)&itemPtr[3]; 
+        it.thId = itemPtr[0];
+        int16_t* ptr = (int16_t*)&(itemPtr[1]);
+        it.endo = ptr[0] & 0x7FFF;
+        it.mode = (ptr[0] & 0x8000) != 0;
+        it.incr = ptr[1];
+        it.hash = (uint8_t*)(itemPtr + 2);
         found.push_back(it);
     }
     return nbFound;
