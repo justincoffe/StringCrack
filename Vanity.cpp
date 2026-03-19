@@ -1789,7 +1789,48 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                 uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
                                 for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                                     ITEM& it = found[fi];
-                                    printf("\n[!!!] MITM INTERSECT HIT! qi=%u giant=%u baby=%u\n", it.thId, it.endo, it.incr);
+                                    
+                                    // 1. Unrank the lower half (Baby & Giant)
+                                    uint64_t baby_lo, baby_hi, giant_lo, giant_hi;
+                                    cpu_unrank_combination(it.incr, L_baby, k_b, baby_lo, baby_hi, h_combTable, tableK);
+                                    cpu_unrank_combination(it.endo, L_giant, k_g, giant_lo, giant_hi, h_combTable, tableK);
+                                    uint64_t lower_mask = baby_lo | (giant_lo << L_baby);
+                                    
+                                    // 2. Unrank the upper half (Q_i)
+                                    uint64_t qi_lo, qi_hi;
+                                    cpu_unrank_combination(it.thId, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
+                                    uint64_t full_mask = (qi_lo << L_bits) | lower_mask;
+                                    
+                                    // 3. Apply Center String Polarity
+                                    uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+                                    uint64_t seed_lo = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
+                                    
+                                    // 4. Map the bits into the final 256-bit Key Array
+                                    uint64_t finalKey[4] = { scConfig->lockVals[0], scConfig->lockVals[1], scConfig->lockVals[2], scConfig->lockVals[3] };
+                                    for (int fb = 0; fb < n && fb < 64; fb++) {
+                                        if (seed_lo & 1ULL) {
+                                            int pos = scConfig->freeBitPositions[fb];
+                                            finalKey[pos >> 6] |= (1ULL << (pos & 63));
+                                        }
+                                        seed_lo >>= 1;
+                                    }
+                                    
+                                    Int k; k.SetInt32(0);
+                                    k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
+                                    k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
+                                    
+                                    // 5. Verify & Print!
+                                    Point P_check = secp->ComputePublicKey(&k);
+                                    uint8_t hash_check[20];
+                                    secp->GetHash160(SEARCH_COMPRESSED, true, P_check.x.bits64, P_check.y.bits64, hash_check);
+                                    
+                                    printf("\n\n=======================================================\n");
+                                    printf("[!!!] MITM MATRIX COLLISION VERIFIED!\n");
+                                    printf("Private Key : %s\n", k.GetBase16().c_str());
+                                    printf("WIF         : %s\n", secp->GetPrivAddress(SEARCH_COMPRESSED, k).c_str());
+                                    printf("Public Hash : %s\n", toHex(hash_check, 20).c_str());
+                                    printf("=======================================================\n");
+                                    
                                     endOfSearch = true; 
                                 }
                                 found.clear();

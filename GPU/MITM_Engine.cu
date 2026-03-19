@@ -228,7 +228,35 @@ __global__ void comp_shift_baby_table(
 }
 
 // =====================================================================================
-// KERNEL 3: The Intersector
+// DEVICE HELPER: Native Montgomery Batch Inversion
+// =====================================================================================
+template<int MAX_BATCH>
+__device__ __forceinline__ void native_batch_invert(uint64_t out[][4], uint64_t in[][4], int count) {
+    if (count == 0) return;
+    
+    uint64_t c[MAX_BATCH][4];
+    c[0][0] = in[0][0]; c[0][1] = in[0][1]; c[0][2] = in[0][2]; c[0][3] = in[0][3];
+
+    for (int i = 1; i < count; i++) {
+        _ModMult(c[i], c[i-1], in[i]);
+    }
+
+    uint64_t inv[5];
+    inv[0] = c[count-1][0]; inv[1] = c[count-1][1]; inv[2] = c[count-1][2]; inv[3] = c[count-1][3]; inv[4] = 0;
+    _ModInv(inv);
+
+    uint64_t inv4[4];
+    inv4[0] = inv[0]; inv4[1] = inv[1]; inv4[2] = inv[2]; inv4[3] = inv[3];
+
+    for (int i = count - 1; i > 0; i--) {
+        _ModMult(out[i], inv4, c[i-1]);
+        _ModMult(inv4, inv4, in[i]);
+    }
+    out[0][0] = inv4[0]; out[0][1] = inv4[1]; out[0][2] = inv4[2]; out[0][3] = inv4[3];
+}
+
+// =====================================================================================
+// KERNEL 3: The Intersector (16x Batch Mode)
 // =====================================================================================
 __global__ __launch_bounds__(128, 4) 
 void comp_mitm_intersect(
@@ -252,10 +280,18 @@ void comp_mitm_intersect(
     }
     __syncthreads();
 
+    // Local Batch Buffers
+    const int BATCH_SIZE = 16;
+    uint64_t buf_X[BATCH_SIZE][4];
+    uint64_t buf_Y[BATCH_SIZE][4];
+    uint64_t buf_Z[BATCH_SIZE][4];
+    uint64_t Zinv[BATCH_SIZE][4];
+    uint32_t buf_baby_idx[BATCH_SIZE];
+    int batch_count = 0;
+
     for (uint64_t b_idx = threadIdx.x; b_idx < baby_size; b_idx += blockDim.x) {
         
-        uint64_t bX[4];
-        uint64_t bY[4];
+        uint64_t bX[4], bY[4];
         bX[0] = baby_shifted_X[b_idx * 4 + 0]; bX[1] = baby_shifted_X[b_idx * 4 + 1]; 
         bX[2] = baby_shifted_X[b_idx * 4 + 2]; bX[3] = baby_shifted_X[b_idx * 4 + 3];
         
@@ -266,53 +302,51 @@ void comp_mitm_intersect(
         uint64_t accY[4] = {gY[0], gY[1], gY[2], gY[3]};
         uint64_t accZ[4] = {1, 0, 0, 0};
 
-        // Protection against Infinity!
         if (gX[0] == 0 && gX[1] == 0 && gX[2] == 0 && gX[3] == 0) {
             accX[0] = bX[0]; accX[1] = bX[1]; accX[2] = bX[2]; accX[3] = bX[3];
             accY[0] = bY[0]; accY[1] = bY[1]; accY[2] = bY[2]; accY[3] = bY[3];
             accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
         } else {
-            // NATIVE Add
             jacobian_add_affine_inplace(accX, accY, accZ, bX, bY);
         }
 
-        // 2. NATIVE Invert
-        uint64_t Zinv[5];
-        Zinv[0] = accZ[0]; Zinv[1] = accZ[1]; Zinv[2] = accZ[2]; Zinv[3] = accZ[3]; Zinv[4] = 0;
-        _ModInv(Zinv);
-        
-        // 3. NATIVE Affine conversion
-        uint64_t Zinv_sq[4];
-        uint64_t Zinv_cb[4];
-        uint64_t aff_X[4];
-        uint64_t aff_Y[4];
-        
-        _ModSqr(Zinv_sq, Zinv);
-        _ModMult(Zinv_cb, Zinv_sq, Zinv);
-        _ModMult(aff_X, accX, Zinv_sq);
-        _ModMult(aff_Y, accY, Zinv_cb);
+        buf_X[batch_count][0] = accX[0]; buf_X[batch_count][1] = accX[1]; buf_X[batch_count][2] = accX[2]; buf_X[batch_count][3] = accX[3];
+        buf_Y[batch_count][0] = accY[0]; buf_Y[batch_count][1] = accY[1]; buf_Y[batch_count][2] = accY[2]; buf_Y[batch_count][3] = accY[3];
+        buf_Z[batch_count][0] = accZ[0]; buf_Z[batch_count][1] = accZ[1]; buf_Z[batch_count][2] = accZ[2]; buf_Z[batch_count][3] = accZ[3];
+        buf_baby_idx[batch_count] = b_idx;
+        batch_count++;
 
-        // 4. NATIVE Hashing
-        uint32_t hash[5];
-        uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
-        _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
+        // Process Batch when full
+        if (batch_count >= BATCH_SIZE || (b_idx + blockDim.x) >= baby_size) {
+            native_batch_invert<BATCH_SIZE>(Zinv, buf_Z, batch_count);
 
-        // Fast Native Bloom Filter Check
-        if (sAddress[hash[0] & 0xFFFF] != 0) {
-            // We use out[0] as the global counter. 
-            int id = atomicAdd(&out[0], 1);
-            if (id < 256) {
-                // Pack exactly 8 integers (32 bytes) per hit to fit maxItemSize perfectly
-                int offset = 1 + (id * 8);
-                out[offset + 0] = qi_idx;           
-                out[offset + 1] = giant_idx;        
-                out[offset + 2] = (uint32_t)b_idx;  
-                out[offset + 3] = hash[0];
-                out[offset + 4] = hash[1];
-                out[offset + 5] = hash[2];
-                out[offset + 6] = hash[3];
-                out[offset + 7] = hash[4];
+            for (int i = 0; i < batch_count; i++) {
+                uint64_t Zsq[4], Zcb[4], aff_X[4], aff_Y[4];
+                _ModSqr(Zsq, Zinv[i]);
+                _ModMult(Zcb, Zsq, Zinv[i]);
+                _ModMult(aff_X, buf_X[i], Zsq);
+                _ModMult(aff_Y, buf_Y[i], Zcb);
+
+                uint32_t hash[5];
+                uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
+                _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
+
+                if (sAddress[hash[0] & 0xFFFF] != 0) {
+                    int id = atomicAdd(&out[0], 1);
+                    if (id < 256) {
+                        int offset = 1 + (id * 8);
+                        out[offset + 0] = qi_idx;           
+                        out[offset + 1] = giant_idx;        
+                        out[offset + 2] = buf_baby_idx[i];  
+                        out[offset + 3] = hash[0];
+                        out[offset + 4] = hash[1];
+                        out[offset + 5] = hash[2];
+                        out[offset + 6] = hash[3];
+                        out[offset + 7] = hash[4];
+                    }
+                }
             }
+            batch_count = 0; // Reset for next batch
         }
     }
 }
