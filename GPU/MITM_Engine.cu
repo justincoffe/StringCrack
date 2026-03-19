@@ -167,189 +167,153 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
 // PHASE 2: THE NUCLEAR REACTOR
 // ====================================================================================
 
-struct BasePointArgs {
-    uint64_t X[4];
-    uint64_t Y[4];
-    uint64_t Z[4];
-};
-
-__global__ void comp_shift_baby_table(
-    uint64_t* baby_X, uint64_t* baby_Y, 
-    uint64_t* shifted_X, uint64_t* shifted_Y, 
-    BasePointArgs base, uint64_t baby_size)
-{
-    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= baby_size) return;
-
-    uint64_t bX[4];
-    uint64_t bY[4];
-    bX[0] = baby_X[idx * 4 + 0]; bX[1] = baby_X[idx * 4 + 1]; 
-    bX[2] = baby_X[idx * 4 + 2]; bX[3] = baby_X[idx * 4 + 3];
-
-    bY[0] = baby_Y[idx * 4 + 0]; bY[1] = baby_Y[idx * 4 + 1]; 
-    bY[2] = baby_Y[idx * 4 + 2]; bY[3] = baby_Y[idx * 4 + 3];
-
-    uint64_t accX[4] = {base.X[0], base.X[1], base.X[2], base.X[3]};
-    uint64_t accY[4] = {base.Y[0], base.Y[1], base.Y[2], base.Y[3]};
-    uint64_t accZ[4] = {base.Z[0], base.Z[1], base.Z[2], base.Z[3]};
-
-    // Protection against Infinity!
-    if (bX[0] == 0 && bX[1] == 0 && bX[2] == 0 && bX[3] == 0) {
-        shifted_X[idx * 4 + 0] = accX[0]; shifted_X[idx * 4 + 1] = accX[1]; 
-        shifted_X[idx * 4 + 2] = accX[2]; shifted_X[idx * 4 + 3] = accX[3];
-        shifted_Y[idx * 4 + 0] = accY[0]; shifted_Y[idx * 4 + 1] = accY[1]; 
-        shifted_Y[idx * 4 + 2] = accY[2]; shifted_Y[idx * 4 + 3] = accY[3];
-        return;
-    }
-
-    // NATIVE Mixed Add
-    jacobian_add_affine_inplace(accX, accY, accZ, bX, bY);
-
-    // NATIVE Z-Invert
-    uint64_t Zinv[5];
-    Zinv[0] = accZ[0]; Zinv[1] = accZ[1]; Zinv[2] = accZ[2]; Zinv[3] = accZ[3]; Zinv[4] = 0;
-    _ModInv(Zinv);
-    
-    uint64_t Zinv_sq[4];
-    uint64_t Zinv_cb[4];
-    _ModSqr(Zinv_sq, Zinv);
-    _ModMult(Zinv_cb, Zinv_sq, Zinv);
-
-    uint64_t affX[4];
-    uint64_t affY[4];
-    _ModMult(affX, accX, Zinv_sq);
-    _ModMult(affY, accY, Zinv_cb);
-
-    shifted_X[idx * 4 + 0] = affX[0]; shifted_X[idx * 4 + 1] = affX[1]; 
-    shifted_X[idx * 4 + 2] = affX[2]; shifted_X[idx * 4 + 3] = affX[3];
-
-    shifted_Y[idx * 4 + 0] = affY[0]; shifted_Y[idx * 4 + 1] = affY[1]; 
-    shifted_Y[idx * 4 + 2] = affY[2]; shifted_Y[idx * 4 + 3] = affY[3];
-}
-
 // =====================================================================================
-// DEVICE HELPER: Native Montgomery Batch Inversion (Exactly from RevolvingDoor.cu)
+// DEVICE HELPER: Native Montgomery Batch Inversion
 // =====================================================================================
 template<int MAX_BATCH>
 __device__ __forceinline__ void mitm_batch_invert_Z(uint64_t Z_buf[][4], uint64_t Zinv_buf[][4], int count) {
     if (count == 0) return;
     if (count == 1) {
         uint64_t tmp[5];
-        Load256(tmp, Z_buf[0]);
-        tmp[4] = 0;
+        Load256(tmp, Z_buf[0]); tmp[4] = 0;
         _ModInv(tmp);
         Load256(Zinv_buf[0], tmp);
         return;
     }
-
-    uint64_t prefix[MAX_BATCH][4];
-    Load256(prefix[0], Z_buf[0]);
-    for (int i = 1; i < count; i++) {
-        _ModMult(prefix[i], prefix[i-1], Z_buf[i]);
-    }
-
-    uint64_t total_inv[5];
-    Load256(total_inv, prefix[count - 1]);
-    total_inv[4] = 0;
+    uint64_t prefix[MAX_BATCH][4]; Load256(prefix[0], Z_buf[0]);
+    for (int i = 1; i < count; i++) _ModMult(prefix[i], prefix[i-1], Z_buf[i]);
+    uint64_t total_inv[5]; Load256(total_inv, prefix[count - 1]); total_inv[4] = 0;
     _ModInv(total_inv);
-
     for (int i = count - 1; i >= 1; i--) {
         _ModMult(Zinv_buf[i], prefix[i-1], (uint64_t*)total_inv);
-        uint64_t t[4];
-        _ModMult(t, (uint64_t*)total_inv, Z_buf[i]);
-        Load256(total_inv, t);
+        uint64_t t[4]; _ModMult(t, (uint64_t*)total_inv, Z_buf[i]); Load256(total_inv, t);
     }
     Load256(Zinv_buf[0], total_inv);
 }
 
 // =====================================================================================
-// KERNEL 3: The Intersector (8x Batch Mode - ZERO REGISTER SPILLING)
+// THE GOD MATRIX: Perfect 1-EC-Add ILP, Zero CPU Overhead
+// Dynamically assigns threads to the smaller table to force max batching
 // =====================================================================================
 __global__ __launch_bounds__(128, 4) 
-void comp_mitm_intersect(
-    uint64_t* baby_shifted_X, uint64_t* baby_shifted_Y,
-    uint64_t* giant_X, uint64_t* giant_Y,
-    uint64_t baby_size, uint64_t giant_size, uint32_t qi_idx,
+void comp_mitm_god_matrix(
+    uint64_t* T1_X, uint64_t* T1_Y, uint64_t T1_size,
+    uint64_t* T2_X, uint64_t* T2_Y, uint64_t T2_size,
+    uint64_t* Gfree_X, uint64_t* Gfree_Y,
+    uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
+    uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3,
+    int L_bits, int B_top, int k1,
+    uint64_t qi_start, uint64_t qi_count,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
-    uint64_t giant_offset)
+    bool t1_is_baby)
 {
-    uint32_t giant_idx = blockIdx.x + giant_offset;
-    if (giant_idx >= giant_size) return;
+    int blocks_per_qi = (T1_size + 127) / 128;
+    if (blocks_per_qi == 0) blocks_per_qi = 1;
 
-    __shared__ uint64_t gX[4];
-    __shared__ uint64_t gY[4];
-    if (threadIdx.x == 0) {
-        gX[0] = giant_X[giant_idx * 4 + 0]; gX[1] = giant_X[giant_idx * 4 + 1]; 
-        gX[2] = giant_X[giant_idx * 4 + 2]; gX[3] = giant_X[giant_idx * 4 + 3];
+    uint64_t qi_idx = qi_start + (blockIdx.x / blocks_per_qi);
+    uint64_t t1_idx = (blockIdx.x % blocks_per_qi) * blockDim.x + threadIdx.x;
 
-        gY[0] = giant_Y[giant_idx * 4 + 0]; gY[1] = giant_Y[giant_idx * 4 + 1]; 
-        gY[2] = giant_Y[giant_idx * 4 + 2]; gY[3] = giant_Y[giant_idx * 4 + 3];
+    if (qi_idx >= (qi_start + qi_count) || t1_idx >= T1_size) return;
+
+    // 1. Unrank Q_i internally natively (Zero CPU Sync)
+    uint64_t qi_mask_lo = 0;
+    uint64_t temp_rank = qi_idx;
+    int remaining = k1;
+    for (int i = B_top - 1; i >= 0 && remaining > 0; i--) {
+        uint64_t c = __ldg(&d_rdCombTable[i * d_rdCombStride + remaining]);
+        if (temp_rank >= c) {
+            temp_rank -= c;
+            qi_mask_lo |= (1ULL << i);
+            remaining--;
+        }
     }
-    __syncthreads();
 
-    // Restricted to 8 to avoid SM Register Spilling!
+    // 2. Build True P_qi from Locked Base + Center String Gfree Table
+    uint64_t accX[4] = {lx0, lx1, lx2, lx3};
+    uint64_t accY[4] = {ly0, ly1, ly2, ly3};
+    uint64_t accZ[4] = {1, 0, 0, 0};
+
+    for (int i = 0; i < B_top; i++) {
+        if ((qi_mask_lo >> i) & 1) {
+            int real_idx = L_bits + i;
+            uint64_t ptX[4], ptY[4];
+            ptX[0] = Gfree_X[real_idx * 4]; ptX[1] = Gfree_X[real_idx * 4 + 1]; 
+            ptX[2] = Gfree_X[real_idx * 4 + 2]; ptX[3] = Gfree_X[real_idx * 4 + 3];
+            ptY[0] = Gfree_Y[real_idx * 4]; ptY[1] = Gfree_Y[real_idx * 4 + 1]; 
+            ptY[2] = Gfree_Y[real_idx * 4 + 2]; ptY[3] = Gfree_Y[real_idx * 4 + 3];
+            jacobian_add_affine_inplace(accX, accY, accZ, ptX, ptY);
+        }
+    }
+
+    // 3. Add T1 Thread Element (1 EC Add)
+    uint64_t t1X[4], t1Y[4];
+    t1X[0] = T1_X[t1_idx * 4 + 0]; t1X[1] = T1_X[t1_idx * 4 + 1]; t1X[2] = T1_X[t1_idx * 4 + 2]; t1X[3] = T1_X[t1_idx * 4 + 3];
+    t1Y[0] = T1_Y[t1_idx * 4 + 0]; t1Y[1] = T1_Y[t1_idx * 4 + 1]; t1Y[2] = T1_Y[t1_idx * 4 + 2]; t1Y[3] = T1_Y[t1_idx * 4 + 3];
+
+    if (!(t1X[0] == 0 && t1X[1] == 0 && t1X[2] == 0 && t1X[3] == 0)) {
+        jacobian_add_affine_inplace(accX, accY, accZ, t1X, t1Y);
+    }
+
+    // 4. Perfect ILP Loop over T2 (1 EC Add per Candidate)
     const int BATCH_SIZE = 8;
-    uint64_t buf_X[BATCH_SIZE][4];
-    uint64_t buf_Y[BATCH_SIZE][4];
-    uint64_t buf_Z[BATCH_SIZE][4];
-    uint64_t Zinv[BATCH_SIZE][4];
-    uint32_t buf_baby_idx[BATCH_SIZE];
+    uint64_t buf_X[BATCH_SIZE][4], buf_Y[BATCH_SIZE][4], buf_Z[BATCH_SIZE][4], Zinv[BATCH_SIZE][4];
+    uint32_t buf_t2_idx[BATCH_SIZE];
     int batch_count = 0;
 
-    for (uint64_t b_idx = threadIdx.x; b_idx < baby_size; b_idx += blockDim.x) {
-        
-        uint64_t bX[4], bY[4];
-        bX[0] = baby_shifted_X[b_idx * 4 + 0]; bX[1] = baby_shifted_X[b_idx * 4 + 1]; 
-        bX[2] = baby_shifted_X[b_idx * 4 + 2]; bX[3] = baby_shifted_X[b_idx * 4 + 3];
-        
-        bY[0] = baby_shifted_Y[b_idx * 4 + 0]; bY[1] = baby_shifted_Y[b_idx * 4 + 1]; 
-        bY[2] = baby_shifted_Y[b_idx * 4 + 2]; bY[3] = baby_shifted_Y[b_idx * 4 + 3];
+    for (uint64_t t2_idx = 0; t2_idx < T2_size; t2_idx++) {
+        uint64_t t2X[4], t2Y[4];
+        t2X[0] = T2_X[t2_idx * 4 + 0]; t2X[1] = T2_X[t2_idx * 4 + 1]; t2X[2] = T2_X[t2_idx * 4 + 2]; t2X[3] = T2_X[t2_idx * 4 + 3];
+        t2Y[0] = T2_Y[t2_idx * 4 + 0]; t2Y[1] = T2_Y[t2_idx * 4 + 1]; t2Y[2] = T2_Y[t2_idx * 4 + 2]; t2Y[3] = T2_Y[t2_idx * 4 + 3];
 
-        uint64_t accX[4] = {gX[0], gX[1], gX[2], gX[3]};
-        uint64_t accY[4] = {gY[0], gY[1], gY[2], gY[3]};
-        uint64_t accZ[4] = {1, 0, 0, 0};
+        uint64_t cX[4] = {accX[0], accX[1], accX[2], accX[3]};
+        uint64_t cY[4] = {accY[0], accY[1], accY[2], accY[3]};
+        uint64_t cZ[4] = {accZ[0], accZ[1], accZ[2], accZ[3]};
 
-        if (gX[0] == 0 && gX[1] == 0 && gX[2] == 0 && gX[3] == 0) {
-            accX[0] = bX[0]; accX[1] = bX[1]; accX[2] = bX[2]; accX[3] = bX[3];
-            accY[0] = bY[0]; accY[1] = bY[1]; accY[2] = bY[2]; accY[3] = bY[3];
-            accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
-        } else {
-            jacobian_add_affine_inplace(accX, accY, accZ, bX, bY);
+        if (!(t2X[0] == 0 && t2X[1] == 0 && t2X[2] == 0 && t2X[3] == 0)) {
+            jacobian_add_affine_inplace(cX, cY, cZ, t2X, t2Y);
         }
 
-        buf_X[batch_count][0] = accX[0]; buf_X[batch_count][1] = accX[1]; buf_X[batch_count][2] = accX[2]; buf_X[batch_count][3] = accX[3];
-        buf_Y[batch_count][0] = accY[0]; buf_Y[batch_count][1] = accY[1]; buf_Y[batch_count][2] = accY[2]; buf_Y[batch_count][3] = accY[3];
-        buf_Z[batch_count][0] = accZ[0]; buf_Z[batch_count][1] = accZ[1]; buf_Z[batch_count][2] = accZ[2]; buf_Z[batch_count][3] = accZ[3];
-        buf_baby_idx[batch_count] = (uint32_t)b_idx;
+        buf_X[batch_count][0] = cX[0]; buf_X[batch_count][1] = cX[1]; buf_X[batch_count][2] = cX[2]; buf_X[batch_count][3] = cX[3];
+        buf_Y[batch_count][0] = cY[0]; buf_Y[batch_count][1] = cY[1]; buf_Y[batch_count][2] = cY[2]; buf_Y[batch_count][3] = cY[3];
+        buf_Z[batch_count][0] = cZ[0]; buf_Z[batch_count][1] = cZ[1]; buf_Z[batch_count][2] = cZ[2]; buf_Z[batch_count][3] = cZ[3];
+        buf_t2_idx[batch_count] = (uint32_t)t2_idx;
         batch_count++;
 
-        if (batch_count >= BATCH_SIZE || (b_idx + blockDim.x) >= baby_size) {
+        if (batch_count >= BATCH_SIZE || t2_idx == T2_size - 1) {
             mitm_batch_invert_Z<BATCH_SIZE>(buf_Z, Zinv, batch_count);
 
             for (int i = 0; i < batch_count; i++) {
                 uint64_t Zsq[4], Zcb[4], aff_X[4], aff_Y[4];
-                _ModSqr(Zsq, Zinv[i]);
-                _ModMult(Zcb, Zsq, Zinv[i]);
-                _ModMult(aff_X, buf_X[i], Zsq);
-                _ModMult(aff_Y, buf_Y[i], Zcb);
+                _ModSqr(Zsq, Zinv[i]); _ModMult(Zcb, Zsq, Zinv[i]);
+                _ModMult(aff_X, buf_X[i], Zsq); _ModMult(aff_Y, buf_Y[i], Zcb);
 
-                uint32_t hash[5];
-                uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
+                uint32_t hash[5]; uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
                 _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
 
-                // 16-bit Bloom Filter
                 if (sAddress[hash[0] & 0xFFFF] != 0) {
-                    int id = atomicAdd(&out[0], 1);
-                    if (id < 256) {
-                        int offset = 1 + (id * 8);
-                        out[offset + 0] = qi_idx;           
-                        out[offset + 1] = giant_idx;        
-                        out[offset + 2] = buf_baby_idx[i];  
-                        out[offset + 3] = hash[0];
-                        out[offset + 4] = hash[1];
-                        out[offset + 5] = hash[2];
-                        out[offset + 6] = hash[3];
-                        out[offset + 7] = hash[4];
+                    uint64_t hash160 = *(uint64_t*)hash;
+                    uint32_t cl = hash160 & 0xFFFF;
+                    uint32_t p = lookup32[cl];
+                    while (p != 0) {
+                        uint32_t* item = (uint32_t*)&sAddress[p];
+                        if (((uint64_t*)item)[0] == hash160) {
+                            int id = atomicAdd(&out[0], 1);
+                            if (id < 256) {
+                                int offset = 1 + (id * 8);
+                                uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : buf_t2_idx[i];
+                                uint32_t g_idx = t1_is_baby ? buf_t2_idx[i] : (uint32_t)t1_idx;
+                                
+                                out[offset + 0] = (uint32_t)qi_idx;           
+                                out[offset + 1] = g_idx;        
+                                out[offset + 2] = b_idx;  
+                                out[offset + 3] = hash[0];
+                                out[offset + 4] = hash[1];
+                                out[offset + 5] = hash[2];
+                                out[offset + 6] = hash[3];
+                                out[offset + 7] = hash[4];
+                            }
+                        }
+                        p = item[2];
                     }
                 }
             }
@@ -359,39 +323,49 @@ void comp_mitm_intersect(
 }
 
 // =====================================================================================
-// HOST LAUNCHERS
+// HOST LAUNCHER
 // =====================================================================================
-void GPUEngine::ShiftBabyTable(uint64_t bX[4], uint64_t bY[4], uint64_t bZ[4], uint64_t baby_size) {
-    BasePointArgs base;
-    memcpy(base.X, bX, 32); memcpy(base.Y, bY, 32); memcpy(base.Z, bZ, 32);
-
-    int threadsPerBlock = 128;
-    int blocks = (baby_size + threadsPerBlock - 1) / threadsPerBlock;
-    if (blocks < 1) blocks = 1;
+void GPUEngine::LaunchMITMGodMatrixAsync(
+    uint64_t baby_size, uint64_t giant_size, 
+    int L_bits, int B_top, int k1,
+    uint64_t qi_start, uint64_t qi_count, 
+    uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
+    uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3, int s)
+{
+    cudaMemsetAsync(d_output[s], 0, 8192, streams[s]);
     
-    comp_shift_baby_table<<<blocks, threadsPerBlock>>>(
-        d_mitm_baby_X, d_mitm_baby_Y, 
-        d_mitm_baby_shifted_X, d_mitm_baby_shifted_Y, 
-        base, baby_size);
-        
-    cudaDeviceSynchronize(); 
-}
+    uint64_t* T1_X; uint64_t* T1_Y; uint64_t T1_size;
+    uint64_t* T2_X; uint64_t* T2_Y; uint64_t T2_size;
+    bool t1_is_baby;
 
-void GPUEngine::LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64_t giant_size, uint64_t offset, uint64_t blocks, int s) {
-    cudaMemsetAsync(d_output[s], 0, 36, streams[s]);
-    
-    comp_mitm_intersect<<<blocks, 128, 0, streams[s]>>>(
-        d_mitm_baby_shifted_X, d_mitm_baby_shifted_Y, 
-        d_mitm_giant_X, d_mitm_giant_Y,
-        baby_size, giant_size, qi_idx, 
-        inputAddress, inputAddressLookUp, d_output[s], offset);
-        
+    // Dynamically assign Thread to the SMALLER table to maximize batch inversion looping!
+    if (baby_size < giant_size) {
+        T1_X = d_mitm_baby_X; T1_Y = d_mitm_baby_Y; T1_size = baby_size;
+        T2_X = d_mitm_giant_X; T2_Y = d_mitm_giant_Y; T2_size = giant_size;
+        t1_is_baby = true;
+    } else {
+        T1_X = d_mitm_giant_X; T1_Y = d_mitm_giant_Y; T1_size = giant_size;
+        T2_X = d_mitm_baby_X; T2_Y = d_mitm_baby_Y; T2_size = baby_size;
+        t1_is_baby = false;
+    }
+
+    int blocks_per_qi = (T1_size + 127) / 128;
+    if (blocks_per_qi == 0) blocks_per_qi = 1;
+    int numBlocks = qi_count * blocks_per_qi;
+
+    comp_mitm_god_matrix<<<numBlocks, 128, 0, streams[s]>>>(
+        T1_X, T1_Y, T1_size, T2_X, T2_Y, T2_size,
+        d_mitm_Gfree_X, d_mitm_Gfree_Y,
+        lx0, lx1, lx2, lx3, ly0, ly1, ly2, ly3,
+        L_bits, B_top, k1, qi_start, qi_count,
+        inputAddress, inputAddressLookUp, d_output[s], t1_is_baby);
+
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;
 }
 
 // =====================================================================================
-// HOST SYNC: Native VanitySearch ITEM Extraction
+// HOST SYNC
 // =====================================================================================
 uint32_t GPUEngine::SyncMITMBatch(int s, std::vector<ITEM>& found) {
     cudaStreamSynchronize(streams[s]);
@@ -400,7 +374,7 @@ uint32_t GPUEngine::SyncMITMBatch(int s, std::vector<ITEM>& found) {
     for (uint32_t i = 0; i < nbFound; i++) {
         uint32_t* itemPtr = &h_outputPinned[s][1 + i * 8];
         ITEM it;
-        it.thId = itemPtr[0]; // qi_idx
+        it.thId = itemPtr[0]; // EXACT qi_idx passed directly!
         it.endo = itemPtr[1]; // giant_idx
         it.incr = itemPtr[2]; // baby_idx
         it.mode = true;

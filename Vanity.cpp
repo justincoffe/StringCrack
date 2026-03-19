@@ -1736,160 +1736,131 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     // 1. Build the VRAM Arrays (~2ms)
                     g.BuildMITMTables(secp, scConfig, L_baby, k_b, L_giant, k_g);
 
-                    // 2. Slice the Q_i Top-Bit Workload across the GPUs
+                    // 2. Compute Physical Base Point exactly ONCE per split
+                    uint64_t lockedKey[4] = { scConfig->lockVals[0], scConfig->lockVals[1], scConfig->lockVals[2], scConfig->lockVals[3] };
+                    for (int fb = 0; fb < n && fb < 64; fb++) {
+                        if ((scConfig->targetSeedLo >> fb) & 1ULL) {
+                            int pos = scConfig->freeBitPositions[fb];
+                            lockedKey[pos >> 6] |= (1ULL << (pos & 63));
+                        }
+                    }
+                    Int lockedInt; lockedInt.SetInt32(0);
+                    lockedInt.bits64[0] = lockedKey[0]; lockedInt.bits64[1] = lockedKey[1];
+                    lockedInt.bits64[2] = lockedKey[2]; lockedInt.bits64[3] = lockedKey[3];
+                    Point P_locked = secp->ComputePublicKey(&lockedInt);
+
+                    // 3. Slice the Q_i Top-Bit Workload
                     uint64_t sliceSize = (W + sliceCount - 1) / sliceCount;
                     uint64_t sliceStart = sliceId * sliceSize;
                     uint64_t sliceEnd = sliceStart + sliceSize;
                     if (sliceEnd > W) sliceEnd = W;
 
-                    for (uint64_t rank = sliceStart; rank < sliceEnd && !endOfSearch; rank++) {
+                    // Automatically scale Q_i chunks to maximize GPU saturation
+                    uint64_t max_qi_batch = 10000; 
+                    uint64_t T1_size = (baby_size < giant_size) ? baby_size : giant_size;
+                    int blocks_per_qi = (T1_size + 127) / 128;
+                    if (blocks_per_qi == 0) blocks_per_qi = 1;
+                    if (max_qi_batch * blocks_per_qi > 65535) {
+                        max_qi_batch = 65535 / blocks_per_qi;
+                        if (max_qi_batch == 0) max_qi_batch = 1;
+                    }
+
+                    // 4. Fire the God Matrix!
+                    for (uint64_t qi_start = sliceStart; qi_start < sliceEnd && !endOfSearch; qi_start += max_qi_batch) {
                         if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
 
-                        uint32_t qi_idx = rank;
+                        uint64_t qi_count = max_qi_batch;
+                        if (qi_start + qi_count > sliceEnd) qi_count = sliceEnd - qi_start;
 
-                        uint64_t qi_mask_lo, qi_mask_hi;
-                        cpu_unrank_combination(qi_idx, B_top, k1, qi_mask_lo, qi_mask_hi, h_combTable, tableK);
-                        uint64_t qi_mask = qi_mask_lo << L_bits;
-
-                        uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-                        uint64_t seed_lo = (qi_mask ^ scConfig->targetSeedLo) & seedMaskLo;
-
-                        uint64_t keyBits[4] = { scConfig->lockVals[0], scConfig->lockVals[1], scConfig->lockVals[2], scConfig->lockVals[3] };
-                        for (int fb = 0; fb < n && fb < 64; fb++) {
-                            if (seed_lo & 1ULL) {
-                                int pos = scConfig->freeBitPositions[fb];
-                                keyBits[pos >> 6] |= (1ULL << (pos & 63));
-                            }
-                            seed_lo >>= 1;
-                        }
-
-                        Int baseKey; baseKey.SetInt32(0);
-                        baseKey.bits64[0] = keyBits[0]; baseKey.bits64[1] = keyBits[1];
-                        baseKey.bits64[2] = keyBits[2]; baseKey.bits64[3] = keyBits[3];
-
-                        Point P_base = secp->ComputePublicKey(&baseKey);
-                        uint64_t bX[4], bY[4], bZ[4];
-                        memcpy(bX, P_base.x.bits64, 32);
-                        memcpy(bY, P_base.y.bits64, 32);
-                        bZ[0] = 1; bZ[1] = 0; bZ[2] = 0; bZ[3] = 0; // Pure Affine Z=1
-
-                        // 3. Shift and Bake the Baby Table (Synchronous, ~1ms)
-                        g.ShiftBabyTable(bX, bY, bZ, baby_size);
-
-                        // 4. Intersect the Read-Only Matrix in Chunks
-                        uint64_t max_blocks = 20000; 
+                        int s = g.currentStep % 2;
+                        active_qi[s] = qi_start; 
+                        active_kb[s] = k_b;
+                        active_kg[s] = k_g;
                         
-                        for (uint64_t offset = 0; offset < giant_size && !endOfSearch; offset += max_blocks) {
-                            if (Pause) { Paused = true; t_Paused = Timer::get_tick() - t0 + t_Paused; while (Pause && !endOfSearch) Timer::SleepMillis(100); if (endOfSearch) break; endOfSearch = true; break; }
+                        g.LaunchMITMGodMatrixAsync(
+                            baby_size, giant_size, L_bits, B_top, k1, qi_start, qi_count,
+                            P_locked.x.bits64[0], P_locked.x.bits64[1], P_locked.x.bits64[2], P_locked.x.bits64[3],
+                            P_locked.y.bits64[0], P_locked.y.bits64[1], P_locked.y.bits64[2], P_locked.y.bits64[3], s);
 
-                            uint64_t blocks = giant_size - offset;
-                            if (blocks > max_blocks) blocks = max_blocks;
-
-                            int s = g.currentStep % 2;
-                            active_qi[s] = qi_idx;
-                            active_offset[s] = offset;
-                            active_kb[s] = k_b;
-                            active_kg[s] = k_g;
+                        // Async Sync and Key Reconstruction
+                        if (!firstBatch) {
+                            int prev_s = (g.currentStep - 2) % 2;
+                            uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
+                            int sync_kb = active_kb[prev_s];
+                            int sync_kg = active_kg[prev_s];
                             
-                            g.LaunchMITMChunkAsync(qi_idx, baby_size, giant_size, offset, blocks, s);
-
-                            // Async Sync and Key Reconstruction
-                            if (!firstBatch) {
-                                int prev_s = (g.currentStep - 2) % 2;
-                                uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
-                                uint32_t sync_qi = active_qi[prev_s];
-                                int sync_kb = active_kb[prev_s];
-                                int sync_kg = active_kg[prev_s];
+                            for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                                ITEM& it = found[fi];
+                                uint32_t actual_qi = it.thId; // Exact Q_i matched natively!
+                                uint32_t giant_idx = it.endo;
+                                uint32_t baby_idx = it.incr;
                                 
-                                for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                                    ITEM& it = found[fi];
-                                    
-                                    uint32_t giant_idx = it.endo;
-                                    uint32_t baby_idx = it.incr;
-                                    
-                                    uint64_t baby_lo, baby_hi, giant_lo, giant_hi;
-                                    cpu_unrank_combination(baby_idx, L_baby, sync_kb, baby_lo, baby_hi, h_combTable, tableK);
-                                    cpu_unrank_combination(giant_idx, L_giant, sync_kg, giant_lo, giant_hi, h_combTable, tableK);
-                                    uint64_t lower_mask = baby_lo | (giant_lo << L_baby);
-                                    
-                                    uint64_t qi_lo, qi_hi;
-                                    cpu_unrank_combination(sync_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
-                                    uint64_t full_mask = (qi_lo << L_bits) | lower_mask;
-                                    
-                                    uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-                                    uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
-                                    
-                                    uint64_t finalKey[4] = { scConfig->lockVals[0], scConfig->lockVals[1], scConfig->lockVals[2], scConfig->lockVals[3] };
-                                    for (int fb = 0; fb < n && fb < 64; fb++) {
-                                        if (seed_lo_final & 1ULL) {
-                                            int pos = scConfig->freeBitPositions[fb];
-                                            finalKey[pos >> 6] |= (1ULL << (pos & 63));
-                                        }
-                                        seed_lo_final >>= 1;
+                                uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
+                                cpu_unrank_combination(baby_idx, L_baby, sync_kb, baby_lo, baby_hi, h_combTable, tableK);
+                                cpu_unrank_combination(giant_idx, L_giant, sync_kg, giant_lo, giant_hi, h_combTable, tableK);
+                                cpu_unrank_combination(actual_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
+                                
+                                uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
+                                uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+                                uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
+                                
+                                uint64_t finalKey[4] = { scConfig->lockVals[0], scConfig->lockVals[1], scConfig->lockVals[2], scConfig->lockVals[3] };
+                                for (int fb = 0; fb < n && fb < 64; fb++) {
+                                    if (seed_lo_final & 1ULL) {
+                                        int pos = scConfig->freeBitPositions[fb];
+                                        finalKey[pos >> 6] |= (1ULL << (pos & 63));
                                     }
-                                    
-                                    Int k; k.SetInt32(0);
-                                    k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
-                                    k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
-                                    
-                                    Point P_check = secp->ComputePublicKey(&k);
-                                    uint8_t hash_check[20];
-                                    secp->GetHash160(SEARCH_COMPRESSED, true, P_check, hash_check);
-                                    
-                                    // NATIVE CheckAddr directly handles False Positives, File Output, and Formatting
-                                    address_t hash160 = *(address_t*)(hash_check);
-                                    checkAddr(hash160, hash_check, k, SEARCH_COMPRESSED, thId, true);
+                                    seed_lo_final >>= 1;
                                 }
-                                found.clear();
+                                
+                                Int k; k.SetInt32(0);
+                                k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1]; k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
+                                Point P_check = secp->ComputePublicKey(&k);
+                                uint8_t hash_check[20];
+                                secp->GetHash160(SEARCH_COMPRESSED, true, P_check, hash_check);
+                                checkAddr(*(address_t*)(hash_check), hash_check, k, SEARCH_COMPRESSED, thId, true);
                             }
-                            firstBatch = false;
+                            found.clear();
+                        }
+                        firstBatch = false;
 
-                            uint64_t chunk_keys = baby_size * blocks;
-                            totalKeysProcessed += chunk_keys;
-                            counters[thId] = totalKeysProcessed;
+                        uint64_t chunk_keys = qi_count * baby_size * giant_size;
+                        totalKeysProcessed += chunk_keys;
+                        counters[thId] = totalKeysProcessed;
 
-                            if (sliceId == 0) {
-                                ttot = Timer::get_tick() - t0 + t_Paused;
-                                static double lastTime = 0.0; 
-                                static uint64_t lastKeys = 0;
-                                if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                                    uint64_t globalKeys = 0;
-                                    for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
-                                    double spd = (lastTime > 0) ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                                    lastTime = ttot; lastKeys = globalKeys;
-                                    printf("[SEP7-MITM-VRAM] GLOBAL h=%d k1=%d | %.1f MK/s | %.2f BKeys\r", 
-                                           h, k1, spd, (double)globalKeys / 1e9);
-                                    fflush(stdout);
-                                }
+                        if (sliceId == 0) {
+                            ttot = Timer::get_tick() - t0 + t_Paused;
+                            static double lastTime = 0.0; static uint64_t lastKeys = 0;
+                            if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
+                                uint64_t globalKeys = 0;
+                                for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
+                                double spd = (lastTime > 0) ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                                lastTime = ttot; lastKeys = globalKeys;
+                                printf("[SEP7-MITM-VRAM] GLOBAL h=%d k1=%d | %.1f MK/s | %.2f BKeys\r", h, k1, spd, (double)globalKeys / 1e9);
+                                fflush(stdout);
                             }
                         }
                     }
                 }
 
-                // Flush final async batch
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 1) % 2;
                     uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
-                    uint32_t sync_qi = active_qi[prev_s];
-                    uint64_t sync_offset = active_offset[prev_s];
                     int sync_kb = active_kb[prev_s];
                     int sync_kg = active_kg[prev_s];
                     
                     for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                         ITEM& it = found[fi];
-                        
-                        uint32_t giant_idx = (it.thId / 128) + sync_offset;
+                        uint32_t actual_qi = it.thId; 
+                        uint32_t giant_idx = it.endo;
                         uint32_t baby_idx = it.incr;
                         
-                        uint64_t baby_lo, baby_hi, giant_lo, giant_hi;
+                        uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
                         cpu_unrank_combination(baby_idx, L_baby, sync_kb, baby_lo, baby_hi, h_combTable, tableK);
                         cpu_unrank_combination(giant_idx, L_giant, sync_kg, giant_lo, giant_hi, h_combTable, tableK);
-                        uint64_t lower_mask = baby_lo | (giant_lo << L_baby);
+                        cpu_unrank_combination(actual_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
                         
-                        uint64_t qi_lo, qi_hi;
-                        cpu_unrank_combination(sync_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
-                        uint64_t full_mask = (qi_lo << L_bits) | lower_mask;
-                        
+                        uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
                         uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
                         uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
                         
@@ -1903,21 +1874,16 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         }
                         
                         Int k; k.SetInt32(0);
-                        k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
-                        k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
-                        
+                        k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1]; k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
                         Point P_check = secp->ComputePublicKey(&k);
                         uint8_t hash_check[20];
                         secp->GetHash160(SEARCH_COMPRESSED, true, P_check, hash_check);
-                        
-                        // NATIVE CheckAddr directly handles False Positives, File Output, and Formatting
-                        address_t hash160 = *(address_t*)(hash_check);
-                        checkAddr(hash160, hash_check, k, SEARCH_COMPRESSED, thId, true); 
+                        checkAddr(*(address_t*)(hash_check), hash_check, k, SEARCH_COMPRESSED, thId, true);
                     }
                     found.clear();
                 }
                 firstBatch = true;
-                continue; // Skip the Walker Tiers since we just ran MITM
+                continue;
             }
 
             // =========================================================================

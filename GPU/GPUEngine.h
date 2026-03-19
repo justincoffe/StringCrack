@@ -188,6 +188,14 @@ public:
   void LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64_t giant_size, uint64_t offset, uint64_t blocks, int s);
   uint32_t SyncMITMBatch(int s, std::vector<ITEM>& found);
 
+  // MITM God Matrix Launcher
+  void LaunchMITMGodMatrixAsync(
+      uint64_t baby_size, uint64_t giant_size, 
+      int L_bits, int B_top, int k1,
+      uint64_t qi_start, uint64_t qi_count, 
+      uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
+      uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3, int s);
+
   bool Check(Secp256K1 *secp);
   std::string deviceName;
 
