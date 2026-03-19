@@ -1771,17 +1771,26 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                     firstBatch = false;
                     
-                    pos_offset += batchCoverage;
-                    totalKeysProcessed += batchCoverage * W; 
+                    // CRITICAL: Update the global array so GPU 0 can read it
                     counters[thId] = totalKeysProcessed;
-                    
+
                     if (sliceId == 0) {
                         ttot = Timer::get_tick() - t0 + t_Paused;
-                        static double lastTime = 0.0; static uint64_t lastKeys = 0;
+                        static double lastTime = 0.0; 
+                        static uint64_t lastKeys = 0;
+                        
                         if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                            lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-GOD-ENGINE] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            uint64_t globalKeys = 0;
+                            for (int i = 0; i < sliceCount; i++) {
+                                globalKeys += counters[i];
+                            }
+                            
+                            double spd = (lastTime > 0) ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; 
+                            lastKeys = globalKeys;
+                            
+                            printf("[SEP7-GOD-ENGINE] GLOBAL h=%d k1=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
+                                   h, k1, (unsigned long long)W, spd, (double)globalKeys / 1e9);
                             fflush(stdout);
                         }
                     }
@@ -1819,6 +1828,15 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 uint64_t sliceStart = sliceId * sliceSize;
                 uint64_t sliceEnd   = sliceStart + sliceSize;
                 if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
+                
+                // RESTORED SLICE TELEMETRY
+                if (sliceStart < sliceEnd) {
+                    printf("[GPU %d] TIER 2 (W=%llu) | h=%d k1=%d | Ranks: [%llu, %llu) of %llu\n", 
+                           sliceId, (unsigned long long)W, h, k1,
+                           (unsigned long long)sliceStart, (unsigned long long)sliceEnd, 
+                           (unsigned long long)L_totalCombs);
+                    fflush(stdout);
+                }
                 
                 uint64_t pos_offset = sliceStart;
                 while (pos_offset < sliceEnd && !endOfSearch) {
@@ -1858,17 +1876,26 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
                     firstBatch = false;
                     
-                    pos_offset += batchCoverage;
-                    totalKeysProcessed += batchCoverage * W; 
+                    // CRITICAL: Update the global array so GPU 0 can read it
                     counters[thId] = totalKeysProcessed;
 
                     if (sliceId == 0) {
                         ttot = Timer::get_tick() - t0 + t_Paused;
-                        static double lastTime = 0.0; static uint64_t lastKeys = 0;
+                        static double lastTime = 0.0; 
+                        static uint64_t lastKeys = 0;
+                        
                         if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                            lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-WP-REVDOOR] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            uint64_t globalKeys = 0;
+                            for (int i = 0; i < sliceCount; i++) {
+                                globalKeys += counters[i];
+                            }
+                            
+                            double spd = (lastTime > 0) ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; 
+                            lastKeys = globalKeys;
+                            
+                            printf("[SEP7-GOD-ENGINE] GLOBAL h=%d k1=%d | W=%llu | %.1f MK/s | %.2f BKeys\r", 
+                                   h, k1, (unsigned long long)W, spd, (double)globalKeys / 1e9);
                             fflush(stdout);
                         }
                     }
@@ -1909,7 +1936,16 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 uint64_t sliceStart = sliceId * sliceSize;
                 uint64_t sliceEnd   = sliceStart + sliceSize;
                 if (sliceEnd > L_totalCombs) sliceEnd = L_totalCombs;
-
+                
+                // RESTORED SLICE TELEMETRY
+                if (sliceStart < sliceEnd) {
+                    printf("[GPU %d] TIER 3 (W=%llu) | h=%d k1=%d | Ranks: [%llu, %llu) of %llu\n", 
+                           sliceId, (unsigned long long)W, h, k1,
+                           (unsigned long long)sliceStart, (unsigned long long)sliceEnd, 
+                           (unsigned long long)L_totalCombs);
+                    fflush(stdout);
+                }
+                
                 uint64_t pos_offset = sliceStart;
 
                 while (pos_offset < sliceEnd && !endOfSearch) {
@@ -1961,15 +1997,26 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     totalKeysProcessed += keysThisBatch;
                     pos_offset += batchCoverage;
 
+                    // CRITICAL: Update the global array so GPU 0 can read it
+                    counters[thId] = totalKeysProcessed;
+
                     if (sliceId == 0) {
                         ttot = Timer::get_tick() - t0 + t_Paused;
-                        static double lastTime = 0.0;
+                        static double lastTime = 0.0; 
                         static uint64_t lastKeys = 0;
+                        
                         if (ttot - lastTime >= 0.5 || lastTime == 0.0) {
-                            double spd = (lastTime > 0) ? (double)(totalKeysProcessed - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
-                            lastTime = ttot; lastKeys = totalKeysProcessed;
-                            printf("[SEP7-GW-THIN] h=%d | k1=%d k2=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
-                                   h, k1, k2, (unsigned long long)W, spd, (double)totalKeysProcessed / 1e9);
+                            uint64_t globalKeys = 0;
+                            for (int i = 0; i < sliceCount; i++) {
+                                globalKeys += counters[i];
+                            }
+                            
+                            double spd = (lastTime > 0) ? (double)(globalKeys - lastKeys) / ((ttot - lastTime) * 1e6) : 0;
+                            lastTime = ttot; 
+                            lastKeys = globalKeys;
+                            
+                            printf("[SEP7-GOD-ENGINE] GLOBAL h=%d k1=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
+                                   h, k1, (unsigned long long)W, spd, (double)globalKeys / 1e9);
                             fflush(stdout);
                         }
                     }
