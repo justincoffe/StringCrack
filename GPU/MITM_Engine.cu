@@ -372,11 +372,11 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
     uint64_t baby_combs = nCr(L_baby, k_baby);
     uint64_t giant_combs = nCr(L_giant, k_giant);
 
-    printf("[MITM-v2] Baby: C(%d,%d)=%llu  Giant: C(%d,%d)=%llu  VRAM: %.0f MB\n",
-           L_baby, k_baby, (unsigned long long)baby_combs,
-           L_giant, k_giant, (unsigned long long)giant_combs,
-           (baby_combs + giant_combs) * 64.0 / 1e6);
-    fflush(stdout);
+    // printf("[MITM-v2] Baby: C(%d,%d)=%llu  Giant: C(%d,%d)=%llu  VRAM: %.0f MB\n",
+    //        L_baby, k_baby, (unsigned long long)baby_combs,
+    //        L_giant, k_giant, (unsigned long long)giant_combs,
+    //        (baby_combs + giant_combs) * 64.0 / 1e6);
+    // fflush(stdout);
 
     int n = config->numFreeBits;
     uint64_t* h_GX = (uint64_t*)calloc(n * 4, sizeof(uint64_t));
