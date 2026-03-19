@@ -228,35 +228,42 @@ __global__ void comp_shift_baby_table(
 }
 
 // =====================================================================================
-// DEVICE HELPER: Native Montgomery Batch Inversion
+// DEVICE HELPER: Native Montgomery Batch Inversion (Exactly from RevolvingDoor.cu)
 // =====================================================================================
 template<int MAX_BATCH>
-__device__ __forceinline__ void native_batch_invert(uint64_t out[][4], uint64_t in[][4], int count) {
+__device__ __forceinline__ void mitm_batch_invert_Z(uint64_t Z_buf[][4], uint64_t Zinv_buf[][4], int count) {
     if (count == 0) return;
-    
-    uint64_t c[MAX_BATCH][4];
-    c[0][0] = in[0][0]; c[0][1] = in[0][1]; c[0][2] = in[0][2]; c[0][3] = in[0][3];
+    if (count == 1) {
+        uint64_t tmp[5];
+        Load256(tmp, Z_buf[0]);
+        tmp[4] = 0;
+        _ModInv(tmp);
+        Load256(Zinv_buf[0], tmp);
+        return;
+    }
 
+    uint64_t prefix[MAX_BATCH][4];
+    Load256(prefix[0], Z_buf[0]);
     for (int i = 1; i < count; i++) {
-        _ModMult(c[i], c[i-1], in[i]);
+        _ModMult(prefix[i], prefix[i-1], Z_buf[i]);
     }
 
-    uint64_t inv[5];
-    inv[0] = c[count-1][0]; inv[1] = c[count-1][1]; inv[2] = c[count-1][2]; inv[3] = c[count-1][3]; inv[4] = 0;
-    _ModInv(inv);
+    uint64_t total_inv[5];
+    Load256(total_inv, prefix[count - 1]);
+    total_inv[4] = 0;
+    _ModInv(total_inv);
 
-    uint64_t inv4[4];
-    inv4[0] = inv[0]; inv4[1] = inv[1]; inv4[2] = inv[2]; inv4[3] = inv[3];
-
-    for (int i = count - 1; i > 0; i--) {
-        _ModMult(out[i], inv4, c[i-1]);
-        _ModMult(inv4, inv4, in[i]);
+    for (int i = count - 1; i >= 1; i--) {
+        _ModMult(Zinv_buf[i], prefix[i-1], (uint64_t*)total_inv);
+        uint64_t t[4];
+        _ModMult(t, (uint64_t*)total_inv, Z_buf[i]);
+        Load256(total_inv, t);
     }
-    out[0][0] = inv4[0]; out[0][1] = inv4[1]; out[0][2] = inv4[2]; out[0][3] = inv4[3];
+    Load256(Zinv_buf[0], total_inv);
 }
 
 // =====================================================================================
-// KERNEL 3: The Intersector (8x Batch Mode)
+// KERNEL 3: The Intersector (8x Batch Mode - ZERO REGISTER SPILLING)
 // =====================================================================================
 __global__ __launch_bounds__(128, 4) 
 void comp_mitm_intersect(
@@ -280,7 +287,7 @@ void comp_mitm_intersect(
     }
     __syncthreads();
 
-    // Reduced to 8 to prevent VRAM Register Spilling!
+    // Restricted to 8 to avoid SM Register Spilling!
     const int BATCH_SIZE = 8;
     uint64_t buf_X[BATCH_SIZE][4];
     uint64_t buf_Y[BATCH_SIZE][4];
@@ -317,7 +324,7 @@ void comp_mitm_intersect(
         batch_count++;
 
         if (batch_count >= BATCH_SIZE || (b_idx + blockDim.x) >= baby_size) {
-            native_batch_invert<BATCH_SIZE>(Zinv, buf_Z, batch_count);
+            mitm_batch_invert_Z<BATCH_SIZE>(buf_Z, Zinv, batch_count);
 
             for (int i = 0; i < batch_count; i++) {
                 uint64_t Zsq[4], Zcb[4], aff_X[4], aff_Y[4];
@@ -330,29 +337,19 @@ void comp_mitm_intersect(
                 uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
                 _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
 
-                // FULL 64-BIT NATIVE LOOKUP. Zero false positives.
-                uint64_t hash160 = *(uint64_t*)hash;
-                uint32_t cl = hash160 & 0xFFFF;
-
-                if (sAddress[cl] != 0) {
-                    uint32_t p = lookup32[cl];
-                    while (p != 0) {
-                        uint32_t* item = (uint32_t*)&sAddress[p];
-                        if (((uint64_t*)item)[0] == hash160) {
-                            int id = atomicAdd(&out[0], 1);
-                            if (id < 256) {
-                                int offset = 1 + (id * 8);
-                                out[offset + 0] = qi_idx;           
-                                out[offset + 1] = giant_idx;        
-                                out[offset + 2] = buf_baby_idx[i];  
-                                out[offset + 3] = hash[0];
-                                out[offset + 4] = hash[1];
-                                out[offset + 5] = hash[2];
-                                out[offset + 6] = hash[3];
-                                out[offset + 7] = hash[4];
-                            }
-                        }
-                        p = item[2];
+                // 16-bit Bloom Filter
+                if (sAddress[hash[0] & 0xFFFF] != 0) {
+                    int id = atomicAdd(&out[0], 1);
+                    if (id < 256) {
+                        int offset = 1 + (id * 8);
+                        out[offset + 0] = qi_idx;           
+                        out[offset + 1] = giant_idx;        
+                        out[offset + 2] = buf_baby_idx[i];  
+                        out[offset + 3] = hash[0];
+                        out[offset + 4] = hash[1];
+                        out[offset + 5] = hash[2];
+                        out[offset + 6] = hash[3];
+                        out[offset + 7] = hash[4];
                     }
                 }
             }
@@ -399,16 +396,15 @@ void GPUEngine::LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64
 uint32_t GPUEngine::SyncMITMBatch(int s, std::vector<ITEM>& found) {
     cudaStreamSynchronize(streams[s]);
     uint32_t nbFound = h_outputPinned[s][0];
-    if (nbFound > maxFound) nbFound = maxFound;
+    if (nbFound > 256) nbFound = 256;
     for (uint32_t i = 0; i < nbFound; i++) {
-        uint32_t* itemPtr = h_outputPinned[s] + (i * ITEM_SIZE32 + 1);
+        uint32_t* itemPtr = &h_outputPinned[s][1 + i * 8];
         ITEM it;
-        it.thId = itemPtr[0];
-        int16_t* ptr = (int16_t*)&(itemPtr[1]);
-        it.endo = ptr[0] & 0x7FFF;
-        it.mode = (ptr[0] & 0x8000) != 0;
-        it.incr = ptr[1];
-        it.hash = (uint8_t*)(itemPtr + 2);
+        it.thId = itemPtr[0]; // qi_idx
+        it.endo = itemPtr[1]; // giant_idx
+        it.incr = itemPtr[2]; // baby_idx
+        it.mode = true;
+        it.hash = (uint8_t*)&itemPtr[3]; 
         found.push_back(it);
     }
     return nbFound;

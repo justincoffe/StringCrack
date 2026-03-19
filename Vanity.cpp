@@ -1798,14 +1798,13 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                 int prev_s = (g.currentStep - 2) % 2;
                                 uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
                                 uint32_t sync_qi = active_qi[prev_s];
-                                uint64_t sync_offset = active_offset[prev_s];
                                 int sync_kb = active_kb[prev_s];
                                 int sync_kg = active_kg[prev_s];
                                 
                                 for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
                                     ITEM& it = found[fi];
                                     
-                                    uint32_t giant_idx = (it.thId / 128) + sync_offset;
+                                    uint32_t giant_idx = it.endo;
                                     uint32_t baby_idx = it.incr;
                                     
                                     uint64_t baby_lo, baby_hi, giant_lo, giant_hi;
@@ -1817,6 +1816,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                     cpu_unrank_combination(sync_qi, B_top, k1, qi_lo, qi_hi, h_combTable, tableK);
                                     uint64_t full_mask = (qi_lo << L_bits) | lower_mask;
                                     
+                                    uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
                                     uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
                                     
                                     uint64_t finalKey[4] = { scConfig->lockVals[0], scConfig->lockVals[1], scConfig->lockVals[2], scConfig->lockVals[3] };
@@ -1836,16 +1836,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                     uint8_t hash_check[20];
                                     secp->GetHash160(SEARCH_COMPRESSED, true, P_check, hash_check);
                                     
-                                    printf("\n\n=======================================================\n");
-                                    printf("[!!!] MITM MATRIX COLLISION VERIFIED!\n");
-                                    printf("Private Key : %s\n", k.GetBase16().c_str());
-                                    printf("WIF         : %s\n", secp->GetPrivAddress(SEARCH_COMPRESSED, k).c_str());
-                                    
-                                    printf("Public Hash : ");
-                                    for(int x = 0; x < 20; x++) printf("%02x", hash_check[x]);
-                                    printf("\n=======================================================\n");
-                                    
-                                    endOfSearch = true; 
+                                    // NATIVE CheckAddr directly handles False Positives, File Output, and Formatting
+                                    address_t hash160 = *(address_t*)(hash_check);
+                                    if (checkAddr(hash160, hash_check, k, SEARCH_COMPRESSED, thId, true)) {
+                                        endOfSearch = true; 
+                                    }
                                 }
                                 found.clear();
                             }
