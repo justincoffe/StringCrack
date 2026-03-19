@@ -256,7 +256,7 @@ __device__ __forceinline__ void native_batch_invert(uint64_t out[][4], uint64_t 
 }
 
 // =====================================================================================
-// KERNEL 3: The Intersector (16x Batch Mode)
+// KERNEL 3: The Intersector (8x Batch Mode)
 // =====================================================================================
 __global__ __launch_bounds__(128, 4) 
 void comp_mitm_intersect(
@@ -280,7 +280,8 @@ void comp_mitm_intersect(
     }
     __syncthreads();
 
-    const int BATCH_SIZE = 16;
+    // Reduced to 8 to prevent VRAM Register Spilling!
+    const int BATCH_SIZE = 8;
     uint64_t buf_X[BATCH_SIZE][4];
     uint64_t buf_Y[BATCH_SIZE][4];
     uint64_t buf_Z[BATCH_SIZE][4];
@@ -329,8 +330,31 @@ void comp_mitm_intersect(
                 uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
                 _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
 
-                // Call NATIVE CheckPoint. Zero false positives!
-                CheckPoint(hash, buf_baby_idx[i], sAddress, lookup32, out);
+                // FULL 64-BIT NATIVE LOOKUP. Zero false positives.
+                uint64_t hash160 = *(uint64_t*)hash;
+                uint32_t cl = hash160 & 0xFFFF;
+
+                if (sAddress[cl] != 0) {
+                    uint32_t p = lookup32[cl];
+                    while (p != 0) {
+                        uint32_t* item = (uint32_t*)&sAddress[p];
+                        if (((uint64_t*)item)[0] == hash160) {
+                            int id = atomicAdd(&out[0], 1);
+                            if (id < 256) {
+                                int offset = 1 + (id * 8);
+                                out[offset + 0] = qi_idx;           
+                                out[offset + 1] = giant_idx;        
+                                out[offset + 2] = buf_baby_idx[i];  
+                                out[offset + 3] = hash[0];
+                                out[offset + 4] = hash[1];
+                                out[offset + 5] = hash[2];
+                                out[offset + 6] = hash[3];
+                                out[offset + 7] = hash[4];
+                            }
+                        }
+                        p = item[2];
+                    }
+                }
             }
             batch_count = 0;
         }

@@ -1725,7 +1725,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 int active_kg[2] = {0};
 
                 // Iterate through all valid k_baby and k_giant splits that sum to k2
-                for (int k_b = 0; k_b <= k2 && k_b <= L_baby; k_b++) {
+                for (int k_b = 0; k_b <= k2 && k_b <= L_baby && !endOfSearch; k_b++) {
                     int k_g = k2 - k_b;
                     if (k_g < 0 || k_g > L_giant) continue;
 
