@@ -30,15 +30,20 @@ __global__ void comp_build_mitm_table(
     }
 
     // 2. Build the Base Point using NATIVE jacobian_add_affine
-    uint64_t accX[4] = {0}, accY[4] = {0}, accZ[4] = {0};
-    uint64_t newX[4], newY[4], newZ[4];
+    __align__(32) uint64_t accX[4] = {0};
+    __align__(32) uint64_t accY[4] = {0};
+    __align__(32) uint64_t accZ[4] = {0};
+    __align__(32) uint64_t newX[4];
+    __align__(32) uint64_t newY[4];
+    __align__(32) uint64_t newZ[4];
     bool first = true;
     
     for(int i = 0; i < L_half; i++) {
         if ((mask >> i) & 1) {
             int real_idx = i + bit_offset; 
             
-            uint64_t ptX[4], ptY[4];
+            __align__(32) uint64_t ptX[4];
+            __align__(32) uint64_t ptY[4];
             ptX[0] = Gfree_X[real_idx * 4]; ptX[1] = Gfree_X[real_idx * 4 + 1]; 
             ptX[2] = Gfree_X[real_idx * 4 + 2]; ptX[3] = Gfree_X[real_idx * 4 + 3];
             
@@ -60,15 +65,17 @@ __global__ void comp_build_mitm_table(
     }
 
     // 3. NATIVE Scalar Z-Inversion (Converts Jacobian back to pure Affine)
-    uint64_t Zinv[5];
+    __align__(32) uint64_t Zinv[5];
     Zinv[0] = accZ[0]; Zinv[1] = accZ[1]; Zinv[2] = accZ[2]; Zinv[3] = accZ[3]; Zinv[4] = 0;
     _ModInv(Zinv);
     
-    uint64_t Zinv_sq[4], Zinv_cb[4];
+    __align__(32) uint64_t Zinv_sq[4];
+    __align__(32) uint64_t Zinv_cb[4];
     _ModSqr(Zinv_sq, Zinv);
     _ModMult(Zinv_cb, Zinv_sq, Zinv);
 
-    uint64_t affX[4], affY[4];
+    __align__(32) uint64_t affX[4];
+    __align__(32) uint64_t affY[4];
     _ModMult(affX, accX, Zinv_sq);
     _ModMult(affY, accY, Zinv_cb);
 
@@ -134,6 +141,9 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
     int baby_blocks = (int)((baby_combs + threadsPerBlock - 1) / threadsPerBlock);
     int giant_blocks = (int)((giant_combs + threadsPerBlock - 1) / threadsPerBlock);
     
+    if (baby_blocks < 1) baby_blocks = 1;
+    if (giant_blocks < 1) giant_blocks = 1;
+    
     printf("[MITM-BUILDER] Launching Silicon Builder (%d blocks)...\n", baby_blocks + giant_blocks);
     
     comp_build_mitm_table<<<baby_blocks, threadsPerBlock>>>(L_baby, k_baby, 0, d_mitm_Gfree_X, d_mitm_Gfree_Y, d_mitm_baby_X, d_mitm_baby_Y, baby_combs);
@@ -151,10 +161,14 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
     return true;
 }
 
+// ====================================================================================
+// PHASE 2: THE NUCLEAR REACTOR
+// ====================================================================================
+
 // =====================================================================================
 // BASE POINT STRUCT (Passes 96 bytes directly to Constant Memory for instant access)
 // =====================================================================================
-struct BasePointArgs {
+struct __align__(32) BasePointArgs {
     uint64_t X[4];
     uint64_t Y[4];
     uint64_t Z[4];
@@ -171,31 +185,36 @@ __global__ void comp_shift_baby_table(
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= baby_size) return;
 
-    uint64_t bX[4], bY[4];
+    __align__(32) uint64_t bX[4];
+    __align__(32) uint64_t bY[4];
     bX[0] = baby_X[idx * 4 + 0]; bX[1] = baby_X[idx * 4 + 1]; 
     bX[2] = baby_X[idx * 4 + 2]; bX[3] = baby_X[idx * 4 + 3];
 
     bY[0] = baby_Y[idx * 4 + 0]; bY[1] = baby_Y[idx * 4 + 1]; 
     bY[2] = baby_Y[idx * 4 + 2]; bY[3] = baby_Y[idx * 4 + 3];
 
-    uint64_t accX[4] = {base.X[0], base.X[1], base.X[2], base.X[3]};
-    uint64_t accY[4] = {base.Y[0], base.Y[1], base.Y[2], base.Y[3]};
-    uint64_t accZ[4] = {base.Z[0], base.Z[1], base.Z[2], base.Z[3]};
-    uint64_t newX[4], newY[4], newZ[4];
+    __align__(32) uint64_t accX[4] = {base.X[0], base.X[1], base.X[2], base.X[3]};
+    __align__(32) uint64_t accY[4] = {base.Y[0], base.Y[1], base.Y[2], base.Y[3]};
+    __align__(32) uint64_t accZ[4] = {base.Z[0], base.Z[1], base.Z[2], base.Z[3]};
+    __align__(32) uint64_t newX[4];
+    __align__(32) uint64_t newY[4];
+    __align__(32) uint64_t newZ[4];
 
     // NATIVE Mixed Add
     jacobian_add_affine(accX, accY, accZ, bX, bY, newX, newY, newZ);
 
     // NATIVE Z-Invert
-    uint64_t Zinv[5];
+    __align__(32) uint64_t Zinv[5];
     Zinv[0] = newZ[0]; Zinv[1] = newZ[1]; Zinv[2] = newZ[2]; Zinv[3] = newZ[3]; Zinv[4] = 0;
     _ModInv(Zinv);
     
-    uint64_t Zinv_sq[4], Zinv_cb[4];
+    __align__(32) uint64_t Zinv_sq[4];
+    __align__(32) uint64_t Zinv_cb[4];
     _ModSqr(Zinv_sq, Zinv);
     _ModMult(Zinv_cb, Zinv_sq, Zinv);
 
-    uint64_t affX[4], affY[4];
+    __align__(32) uint64_t affX[4];
+    __align__(32) uint64_t affY[4];
     _ModMult(affX, newX, Zinv_sq);
     _ModMult(affY, newY, Zinv_cb);
 
@@ -207,7 +226,7 @@ __global__ void comp_shift_baby_table(
 }
 
 // =====================================================================================
-// KERNEL 3: The Intersector (SCALAR INVERSION FOR GUARANTEED NATIVE COMPILATION)
+// KERNEL 3: The Intersector
 // =====================================================================================
 __global__ __launch_bounds__(128, 4) 
 void comp_mitm_intersect(
@@ -220,7 +239,8 @@ void comp_mitm_intersect(
     uint32_t giant_idx = blockIdx.x + giant_offset;
     if (giant_idx >= giant_size) return;
 
-    __shared__ uint64_t gX[4], gY[4];
+    __shared__ __align__(32) uint64_t gX[4];
+    __shared__ __align__(32) uint64_t gY[4];
     if (threadIdx.x == 0) {
         gX[0] = giant_X[giant_idx * 4 + 0]; gX[1] = giant_X[giant_idx * 4 + 1]; 
         gX[2] = giant_X[giant_idx * 4 + 2]; gX[3] = giant_X[giant_idx * 4 + 3];
@@ -232,35 +252,42 @@ void comp_mitm_intersect(
 
     for (uint64_t b_idx = threadIdx.x; b_idx < baby_size; b_idx += blockDim.x) {
         
-        uint64_t bX[4], bY[4];
+        __align__(32) uint64_t bX[4];
+        __align__(32) uint64_t bY[4];
         bX[0] = baby_shifted_X[b_idx * 4 + 0]; bX[1] = baby_shifted_X[b_idx * 4 + 1]; 
         bX[2] = baby_shifted_X[b_idx * 4 + 2]; bX[3] = baby_shifted_X[b_idx * 4 + 3];
         
         bY[0] = baby_shifted_Y[b_idx * 4 + 0]; bY[1] = baby_shifted_Y[b_idx * 4 + 1]; 
         bY[2] = baby_shifted_Y[b_idx * 4 + 2]; bY[3] = baby_shifted_Y[b_idx * 4 + 3];
 
-        uint64_t accX[4] = {gX[0], gX[1], gX[2], gX[3]};
-        uint64_t accY[4] = {gY[0], gY[1], gY[2], gY[3]};
-        uint64_t accZ[4] = {1, 0, 0, 0};
-        uint64_t newX[4], newY[4], newZ[4];
+        __align__(32) uint64_t accX[4] = {gX[0], gX[1], gX[2], gX[3]};
+        __align__(32) uint64_t accY[4] = {gY[0], gY[1], gY[2], gY[3]};
+        __align__(32) uint64_t accZ[4] = {1, 0, 0, 0};
+        __align__(32) uint64_t newX[4];
+        __align__(32) uint64_t newY[4];
+        __align__(32) uint64_t newZ[4];
 
         // 1. NATIVE Add
         jacobian_add_affine(accX, accY, accZ, bX, bY, newX, newY, newZ);
 
         // 2. NATIVE Invert
-        uint64_t Zinv[5];
+        __align__(32) uint64_t Zinv[5];
         Zinv[0] = newZ[0]; Zinv[1] = newZ[1]; Zinv[2] = newZ[2]; Zinv[3] = newZ[3]; Zinv[4] = 0;
         _ModInv(Zinv);
         
         // 3. NATIVE Affine conversion
-        uint64_t Zinv_sq[4], Zinv_cb[4], aff_X[4], aff_Y[4];
+        __align__(32) uint64_t Zinv_sq[4];
+        __align__(32) uint64_t Zinv_cb[4];
+        __align__(32) uint64_t aff_X[4];
+        __align__(32) uint64_t aff_Y[4];
+        
         _ModSqr(Zinv_sq, Zinv);
         _ModMult(Zinv_cb, Zinv_sq, Zinv);
         _ModMult(aff_X, newX, Zinv_sq);
         _ModMult(aff_Y, newY, Zinv_cb);
 
         // 4. NATIVE Hashing
-        uint32_t hash[5];
+        __align__(32) uint32_t hash[5];
         uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
         _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
 
@@ -299,6 +326,7 @@ void GPUEngine::ShiftBabyTable(uint64_t bX[4], uint64_t bY[4], uint64_t bZ[4], u
 
     int threadsPerBlock = 128;
     int blocks = (baby_size + threadsPerBlock - 1) / threadsPerBlock;
+    if (blocks < 1) blocks = 1;
     
     comp_shift_baby_table<<<blocks, threadsPerBlock>>>(
         d_mitm_baby_X, d_mitm_baby_Y, 
@@ -332,7 +360,6 @@ uint32_t GPUEngine::SyncMITMBatch(int s, std::vector<ITEM>& found) {
         ITEM it;
         it.thId = h_outputPinned[s][offset + 0]; // qi_idx
         
-        // Cast to uint32_t* to safely copy the 5 hash limbs natively
         uint32_t* hash32 = (uint32_t*)it.hash;
         hash32[0] = h_outputPinned[s][offset + 1];
         hash32[1] = h_outputPinned[s][offset + 2];
