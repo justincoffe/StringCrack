@@ -1710,10 +1710,18 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             }
             g.UploadQiArray(h_Qi_array, W);
 
-            // =====================================================================================
-            // NUCLEAR OPTION: THE MITM VRAM ENGINE v2 (-mitm)
             // =========================================================================
-            if (scConfig->useMitm) {
+            // THE HYBRID ROUTER LOGIC
+            // =========================================================================
+            bool route_to_mitm = false;
+            
+            // Route to MITM if the bottom space is fat enough to justify VRAM allocation.
+            // 250,000 is the mathematical crossover where ILP beats Register Caching.
+            if (scConfig->useMitm && L_totalCombs >= 250000) {
+                route_to_mitm = true;
+            }
+
+            if (route_to_mitm) {
                 int L_baby = L_bits / 2;
                 int L_giant = L_bits - L_baby;
  
@@ -1756,12 +1764,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint64_t baby_size = h_combTable[L_baby * tableK + k_b];
                     uint64_t giant_size = h_combTable[L_giant * tableK + k_g];
                     if (baby_size == 0 || giant_size == 0) continue;
- 
-                    // *** FIX 1: Skip tiny splits that starve batch inversion ***
-                    // min(baby, giant) < 64 means the inner loop runs < 64 iterations
-                    // → batch buffers never fill properly → degenerates to scalar ModInv
-                    // These splits account for <0.001% of total candidates.
-                    if (baby_size < 64 || giant_size < 64) continue;
  
                     // Build VRAM tables for this (k_b, k_g) split
                     g.BuildMITMTables(secp, scConfig, L_baby, k_b, L_giant, k_g);
