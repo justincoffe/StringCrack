@@ -391,9 +391,10 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
         else          key.bits64[1] |= (1ULL << (pos - 64));
         Point P_i = secp->ComputePublicKey(&key);
 
+        // Check if free bit i is set in the center (seed-space indexed)
         bool center_bit = false;
-        if (pos < 64) center_bit = (config->targetSeedLo & (1ULL << pos)) != 0;
-        else          center_bit = (config->targetSeedHi & (1ULL << (pos - 64))) != 0;
+        if (i < 64) center_bit = (config->targetSeedLo & (1ULL << i)) != 0;
+        else         center_bit = (config->targetSeedHi & (1ULL << (i - 64))) != 0;
         if (center_bit) P_i.y.ModNeg();
 
         memcpy(&h_GX[i * 4], P_i.x.bits64, 32);
