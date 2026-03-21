@@ -324,27 +324,29 @@ void comp_mitm_god_matrix_v2(
 
                 uint32_t pr = hash[0] & 0xFFFF;
                 if (sAddress[pr] != 0) {
-                    uint32_t offset = lookup32[pr];
-                    uint16_t count = sAddress[pr];
-                    uint32_t la = hash[0];
-                    
-                    for (uint16_t c = 0; c < count; c++) {
-                        if (lookup32[offset + c] == la) {
-                            int id = atomicAdd(&out[0], 1);
-                            if (id < 256) {
-                                int off = 1 + (id * 8);
-                                uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : buf_t2_idx[i];
-                                uint32_t g_idx = t1_is_baby ? buf_t2_idx[i] : (uint32_t)t1_idx;
-                                out[off + 0] = (uint32_t)qi_idx;
-                                out[off + 1] = g_idx;
-                                out[off + 2] = b_idx;
-                                out[off + 3] = hash[0];
-                                out[off + 4] = hash[1];
-                                out[off + 5] = hash[2];
-                                out[off + 6] = hash[3];
-                                out[off + 7] = hash[4];
-                            }
-                            break;
+                    bool reportHit = false;
+                    if (lookup32 != NULL) {
+                        uint32_t offset = lookup32[pr];
+                        uint16_t count = sAddress[pr];
+                        uint32_t la = hash[0];
+                        for (uint16_t c = 0; c < count; c++) {
+                            if (lookup32[offset + c] == la) { reportHit = true; break; }
+                        }
+                    } else {
+                        reportHit = true;
+                    }
+                    if (reportHit) {
+                        int id = atomicAdd(&out[0], 1);
+                        if (id < 256) {
+                            int off = 1 + (id * 8);
+                            uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : buf_t2_idx[i];
+                            uint32_t g_idx = t1_is_baby ? buf_t2_idx[i] : (uint32_t)t1_idx;
+                            out[off + 0] = (uint32_t)qi_idx;
+                            out[off + 1] = g_idx;
+                            out[off + 2] = b_idx;
+                            out[off + 3] = hash[0]; out[off + 4] = hash[1];
+                            out[off + 5] = hash[2]; out[off + 6] = hash[3];
+                            out[off + 7] = hash[4];
                         }
                     }
                 }
