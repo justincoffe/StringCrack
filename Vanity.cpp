@@ -1892,57 +1892,57 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             fflush(stdout);
                         }
                     }
-                }
 
-                // === DRAIN FINAL BATCH FOR THIS k_b SPLIT ===
-                if (!firstBatch) {
-                    int prev_s = (g.currentStep - 1) % 2;
-                    uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
-                    int sync_kb = active_kb[prev_s];
-                    int sync_kg = active_kg[prev_s];
-                    for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                        ITEM& it = found[fi];
-                        uint32_t actual_qi = it.thId;
-                        uint32_t giant_idx = it.endo;
-                        uint32_t baby_idx = it.incr;
+                    // === DRAIN FINAL BATCH FOR THIS k_b SPLIT ===
+                    if (!firstBatch) {
+                        int prev_s = (g.currentStep - 1) % 2;
+                        uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
+                        int sync_kb = active_kb[prev_s];
+                        int sync_kg = active_kg[prev_s];
+                        for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                            ITEM& it = found[fi];
+                            uint32_t actual_qi = it.thId;
+                            uint32_t giant_idx = it.endo;
+                            uint32_t baby_idx = it.incr;
 
-                        uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
-                        cpu_unrank_combination(baby_idx, L_baby, sync_kb,
-                            baby_lo, baby_hi, h_combTable, tableK);
-                        cpu_unrank_combination(giant_idx, L_giant, sync_kg,
-                            giant_lo, giant_hi, h_combTable, tableK);
-                        cpu_unrank_combination(actual_qi, B_top, k1,
-                            qi_lo, qi_hi, h_combTable, tableK);
+                            uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
+                            cpu_unrank_combination(baby_idx, L_baby, sync_kb,
+                                baby_lo, baby_hi, h_combTable, tableK);
+                            cpu_unrank_combination(giant_idx, L_giant, sync_kg,
+                                giant_lo, giant_hi, h_combTable, tableK);
+                            cpu_unrank_combination(actual_qi, B_top, k1,
+                                qi_lo, qi_hi, h_combTable, tableK);
 
-                        uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
-                        uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-                        uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
+                            uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
+                            uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+                            uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
 
-                        uint64_t finalKey[4] = {
-                            scConfig->lockVals[0], scConfig->lockVals[1],
-                            scConfig->lockVals[2], scConfig->lockVals[3]
-                        };
-                        for (int fb = 0; fb < n && fb < 64; fb++) {
-                            if (seed_lo_final & 1ULL) {
-                                int pos = scConfig->freeBitPositions[fb];
-                                finalKey[pos >> 6] |= (1ULL << (pos & 63));
+                            uint64_t finalKey[4] = {
+                                scConfig->lockVals[0], scConfig->lockVals[1],
+                                scConfig->lockVals[2], scConfig->lockVals[3]
+                            };
+                            for (int fb = 0; fb < n && fb < 64; fb++) {
+                                if (seed_lo_final & 1ULL) {
+                                    int pos = scConfig->freeBitPositions[fb];
+                                    finalKey[pos >> 6] |= (1ULL << (pos & 63));
+                                }
+                                seed_lo_final >>= 1;
                             }
-                            seed_lo_final >>= 1;
-                        }
 
-                        Int k; k.SetInt32(0);
-                        k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
-                        k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
-                        Point P_check = secp->ComputePublicKey(&k);
-                        uint8_t hash_check[20];
-                        secp->GetHash160(SEARCH_COMPRESSED, true, P_check, hash_check);
-                        checkAddr(*(address_t*)(hash_check), hash_check, k,
-                            SEARCH_COMPRESSED, thId, true);
+                            Int k; k.SetInt32(0);
+                            k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
+                            k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
+                            Point P_check = secp->ComputePublicKey(&k);
+                            uint8_t hash_check[20];
+                            secp->GetHash160(SEARCH_COMPRESSED, true, P_check, hash_check);
+                            checkAddr(*(address_t*)(hash_check), hash_check, k,
+                                SEARCH_COMPRESSED, thId, true);
+                        }
+                        found.clear();
                     }
-                    found.clear();
+                    firstBatch = true;
+                    // ===================================================
                 }
-                firstBatch = true;
-                // ===================================================
 
                 continue;
             }
