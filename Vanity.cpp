@@ -1809,6 +1809,10 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         active_T2[s] = T2_size;
  
                         // *** FIX 2: v2 kernel uses precomputed Q_i points ***
+                        printf("DEBUG: h=%d k1=%d k_b=%d k_g=%d W=%llu qi_start=%llu qi_count=%llu baby=%llu giant=%llu blocks_per_qi=%d numBlocks=%d\n",
+                            h, k1, k_b, k_g, (unsigned long long)W, (unsigned long long)qi_start, (unsigned long long)qi_count,
+                            (unsigned long long)baby_size, (unsigned long long)giant_size, blocks_per_qi, (int)(qi_count * blocks_per_qi));
+                        fflush(stdout);
                         g.LaunchMITMGodMatrixAsync(
                             baby_size, giant_size, L_bits, B_top, k1,
                             qi_start, qi_count,
