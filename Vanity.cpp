@@ -1693,6 +1693,9 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
         
         // Iterate k1 (top bits) and k2 (bottom bits)
         for (int k1 = 0; k1 <= B_top && k1 <= h; k1++) {
+            cudaDeviceSynchronize();
+            firstBatch = true;
+            
             int k2 = h - k1;
             if (k2 > L_bits || k2 < 0) continue;
             
@@ -1890,8 +1893,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         }
                     }
                 }
- 
-                // Drain final batch
+
+                // === DRAIN FINAL BATCH FOR THIS k_b SPLIT ===
                 if (!firstBatch) {
                     int prev_s = (g.currentStep - 1) % 2;
                     uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
@@ -1902,7 +1905,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         uint32_t actual_qi = it.thId;
                         uint32_t giant_idx = it.endo;
                         uint32_t baby_idx = it.incr;
- 
+
                         uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
                         cpu_unrank_combination(baby_idx, L_baby, sync_kb,
                             baby_lo, baby_hi, h_combTable, tableK);
@@ -1910,11 +1913,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             giant_lo, giant_hi, h_combTable, tableK);
                         cpu_unrank_combination(actual_qi, B_top, k1,
                             qi_lo, qi_hi, h_combTable, tableK);
- 
+
                         uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
                         uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
                         uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
- 
+
                         uint64_t finalKey[4] = {
                             scConfig->lockVals[0], scConfig->lockVals[1],
                             scConfig->lockVals[2], scConfig->lockVals[3]
@@ -1926,7 +1929,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             }
                             seed_lo_final >>= 1;
                         }
- 
+
                         Int k; k.SetInt32(0);
                         k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
                         k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
@@ -1939,6 +1942,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     found.clear();
                 }
                 firstBatch = true;
+                // ===================================================
+
                 continue;
             }
 
@@ -1946,6 +1951,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             // TIER 1: GOD ENGINE COSET REVDOOR (W >= 64) - GRID STRIDER
             // =========================================================================
             if (W >= 64) {
+                firstBatch = true;
                 int blocksPerSM = 4; // Matches the __launch_bounds__(128, 4) to prevent spills
                 int maxBlocks = smCount * blocksPerSM; 
                 
