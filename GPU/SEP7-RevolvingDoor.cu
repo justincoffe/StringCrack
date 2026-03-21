@@ -1386,6 +1386,11 @@ void GPUEngine::UploadQiArray(uint64_t* h_Qi, uint64_t size) {
     cudaMemcpyAsync(d_Qi_buffers[s], h_Qi, size * sizeof(uint64_t), cudaMemcpyHostToDevice, streams[s]);
 }
 
+void GPUEngine::UploadQiArrayBoth(uint64_t* h_Qi, uint64_t size) {
+    cudaMemcpy(d_Qi_buffers[0], h_Qi, size * sizeof(uint64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Qi_buffers[1], h_Qi, size * sizeof(uint64_t), cudaMemcpyHostToDevice);
+}
+
 void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks, int qi_chunks, uint64_t W) {
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);

@@ -169,6 +169,7 @@ public:
 
   // SEP7: Coset Revolving Door
   void UploadQiArray(uint64_t* h_Qi, uint64_t size);
+  void UploadQiArrayBoth(uint64_t* h_Qi, uint64_t size);
   void LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64_t base_pos, uint64_t totalCombs, int chunk_size, int numBlocks, int qi_chunks, uint64_t W);
 
   // SEP7: Warp-Packed Coset Revolving Door (32 <= W < 128)

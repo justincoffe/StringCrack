@@ -1711,8 +1711,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 cpu_unrank_combination(rank, B_top, k1, mask_lo, mask_hi, h_combTable, tableK);
                 h_Qi_array[rank] = mask_lo;
             }
-            g.UploadQiArray(h_Qi_array, W);
-            cudaMemcpy(g.d_Qi_buffers[(g.currentStep + 1) % 2], h_Qi_array, W * sizeof(uint64_t), cudaMemcpyHostToDevice);
+            g.UploadQiArrayBoth(h_Qi_array, W);
 
             // =========================================================================
             // THE HYBRID ROUTER LOGIC
