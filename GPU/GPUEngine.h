@@ -287,10 +287,6 @@ private:
   uint8_t* d_mitm_giant_seedpc;
   uint8_t* d_mitm_qi_seedpc;
 
-  // MITM popcount bounds (set by BuildMITMTables)
-  int mitm_baby_pc_min, mitm_baby_pc_max;
-  int mitm_giant_pc_min, mitm_giant_pc_max;
-
 public:
   int currentStep;
 };

@@ -234,8 +234,7 @@ void comp_mitm_god_matrix_v2(
     uint64_t* T1_X, uint64_t* T1_Y, uint64_t T1_size,
     uint64_t* T2_X, uint64_t* T2_Y, uint64_t T2_size,
     uint64_t* Qi_X, uint64_t* Qi_Y,
-    uint8_t* T1_seedpc, uint8_t* Qi_seedpc,
-    int t2_pc_min, int t2_pc_max,
+    uint8_t* T1_seedpc, uint8_t* T2_seedpc, uint8_t* Qi_seedpc,
     uint64_t qi_start, uint64_t qi_count,
     uint64_t t2_start, uint64_t t2_end,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
@@ -252,12 +251,14 @@ void comp_mitm_god_matrix_v2(
     uint64_t qi_idx = qi_start + qi_local;
 
     // ═══ POPCOUNT PRE-FILTER (before any EC math) ═══
-    if (d_popcountMin > 0 || d_popcountMax < 256) {
-        int qi_pc = (int)Qi_seedpc[qi_local];
-        int t1_pc = (int)T1_seedpc[t1_idx];
-        int partial_pc = d_lockedPopcount + qi_pc + t1_pc;
-        if (partial_pc > d_popcountMax) return;
-        if (partial_pc + 64 < d_popcountMin) return;
+    int _partial_pc = 0;
+    bool _use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
+    if (_use_pcfilter) {
+        _partial_pc = d_lockedPopcount + (int)Qi_seedpc[qi_local] + (int)T1_seedpc[t1_idx];
+        // Hard upper bound: even with T2 contributing 0 bits, over max → dead
+        if (_partial_pc > d_popcountMax) return;
+        // Hard lower bound: even with T2 contributing all its bits (max 64), under min → dead
+        if (_partial_pc + 64 < d_popcountMin) return;
     }
 
     // STEP 1: Load precomputed Q_i point (affine)
@@ -354,6 +355,12 @@ void comp_mitm_god_matrix_v2(
                 _ModMult(aff_X, buf_X[i], Zsq);
                 _ModMult(Zcb, Zsq, Zinv_buf[i]);
                 _ModMult(aff_Y, buf_Y[i], Zcb);
+
+                // Exact popcount check (after EC math, before expensive hash)
+                if (_use_pcfilter) {
+                    int total_pc = _partial_pc + (int)T2_seedpc[buf_t2_idx[i]];
+                    if (total_pc < d_popcountMin || total_pc > d_popcountMax) continue;
+                }
 
                 __align__(32) uint32_t hash[5];
                 uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
@@ -473,25 +480,6 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
         return false;
     }
 
-    // Scan seedpc arrays for min/max bounds (used by kernel hoisted check)
-    uint8_t* h_baby_pc = (uint8_t*)malloc(baby_combs);
-    uint8_t* h_giant_pc = (uint8_t*)malloc(giant_combs);
-    cudaMemcpy(h_baby_pc, d_mitm_baby_seedpc, baby_combs, cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_giant_pc, d_mitm_giant_seedpc, giant_combs, cudaMemcpyDeviceToHost);
-
-    mitm_baby_pc_min = 255; mitm_baby_pc_max = 0;
-    for (uint64_t i = 0; i < baby_combs; i++) {
-        if (h_baby_pc[i] < mitm_baby_pc_min) mitm_baby_pc_min = h_baby_pc[i];
-        if (h_baby_pc[i] > mitm_baby_pc_max) mitm_baby_pc_max = h_baby_pc[i];
-    }
-    mitm_giant_pc_min = 255; mitm_giant_pc_max = 0;
-    for (uint64_t i = 0; i < giant_combs; i++) {
-        if (h_giant_pc[i] < mitm_giant_pc_min) mitm_giant_pc_min = h_giant_pc[i];
-        if (h_giant_pc[i] > mitm_giant_pc_max) mitm_giant_pc_max = h_giant_pc[i];
-    }
-    free(h_baby_pc);
-    free(h_giant_pc);
-
     return true;
 }
 
@@ -547,30 +535,22 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
     uint64_t* qi_Y_offset = d_Qi_points_Y + qi_start * 4;
 
     uint8_t* T1_seedpc;
+    uint8_t* T2_seedpc;
     if (baby_size <= giant_size) {
         T1_seedpc = d_mitm_baby_seedpc;
+        T2_seedpc = d_mitm_giant_seedpc;
     } else {
         T1_seedpc = d_mitm_giant_seedpc;
+        T2_seedpc = d_mitm_baby_seedpc;
     }
 
     uint8_t* qi_seedpc_offset = d_mitm_qi_seedpc + qi_start;
-
-    // Compute T2 popcount bounds for the hoisted kernel check
-    int t2_pc_min, t2_pc_max;
-    if (t1_is_baby) {
-        t2_pc_min = mitm_giant_pc_min;
-        t2_pc_max = mitm_giant_pc_max;
-    } else {
-        t2_pc_min = mitm_baby_pc_min;
-        t2_pc_max = mitm_baby_pc_max;
-    }
 
     comp_mitm_god_matrix_v2<<<numBlocks, 128, 0, streams[s]>>>(
         T1_X, T1_Y, T1_size,
         T2_X, T2_Y, T2_size,
         qi_X_offset, qi_Y_offset,
-        T1_seedpc, qi_seedpc_offset,
-        t2_pc_min, t2_pc_max,
+        T1_seedpc, T2_seedpc, qi_seedpc_offset,
         qi_start, qi_count,
         t2_start, t2_end,
         inputAddress, inputAddressLookUp, d_output[s], t1_is_baby);
