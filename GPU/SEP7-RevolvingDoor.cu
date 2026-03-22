@@ -687,40 +687,73 @@ void comp_keys_revdoor(
     uint64_t max_steps = totalCombs - start_pos;
     if ((uint64_t)end_step > max_steps) end_step = (int)max_steps;
 
-    // Store initial point as batch entry 0
+    // Initialize walk tracking
+    uint64_t last_ec_mask = mask;
+    bool use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
+    steps_done = 1;
     int batch_count = 0;
-    Load256(buf_X[0], accX);
-    Load256(buf_Y[0], accY);
-    Load256(buf_Z[0], accZ);
-    buf_masks[0] = mask;
-    batch_count = 1;
-    steps_done = 1; // step 0 = initial combination (from unranking)
+
+    // Buffer initial point ONLY if it passes popcount
+    if (use_pcfilter) {
+        uint64_t seed_check = (mask ^ d_targetSeedLo) & seedMaskLo;
+        int pc_abs = __popcll(seed_check) + d_lockedPopcount;
+        if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
+            Load256(buf_X[0], accX);
+            Load256(buf_Y[0], accY);
+            Load256(buf_Z[0], accZ);
+            buf_masks[0] = mask;
+            batch_count = 1;
+        }
+    } else {
+        Load256(buf_X[0], accX);
+        Load256(buf_Y[0], accY);
+        Load256(buf_Z[0], accZ);
+        buf_masks[0] = mask;
+        batch_count = 1;
+    }
+
+    // ═══════ TELEPORTATION-ENABLED WALK LOOP ═══════
+    // Track last EC-synced mask. When popcount fails, advance mask only (5 cycles).
+    // When popcount passes, teleport EC accumulator via seed-space XOR diff.
 
     while (steps_done < end_step) {
 
-        // ─── REVOLVING DOOR STEP: exactly one swap ───
+        // ─── REVOLVING DOOR STEP: update mask (always, ~5 cycles) ───
         int removed_idx, added_idx;
         if (!revdoor_step_reg(mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
-            break; // exhausted this walk's portion of C(n, h)
+            break;
         }
-
-        // Update bitmask
         mask = (mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
-
-        // ─── SINGLE EC ADDITION via D-table (MANDATORY — walk is sequential) ───
-        uint64_t dX[4], dY[4];
-        load_Dtable(removed_idx, added_idx, n, dX, dY);
-        jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
         steps_done++;
 
-        // ─── POPCOUNT PRE-FILTER: skip buffering if key popcount out of range ───
-        {
-            uint64_t seed_check = (mask ^ d_targetSeedLo) & d_seedMaskLo;
+        // ─── POPCOUNT PRE-FILTER ───
+        if (use_pcfilter) {
+            uint64_t seed_check = (mask ^ d_targetSeedLo) & seedMaskLo;
             int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) {
+                // SKIP: Don't update EC accumulator. Don't buffer.
+                // The mask advances but the EC point stays at last_ec_mask.
+                continue;
+            }
         }
 
-        // Buffer this step (only if popcount passes)
+        // ─── UPDATE EC ACCUMULATOR ───
+        // Compute accumulated seed-space change since last EC sync
+        uint64_t old_seed = (last_ec_mask ^ d_targetSeedLo) & seedMaskLo;
+        uint64_t new_seed = (mask ^ d_targetSeedLo) & seedMaskLo;
+
+        if (old_seed == new_seed) {
+            // Edge case: mask changed but seed didn't (XOR with center cancelled out)
+            // EC point is already correct, no update needed
+        } else {
+            // Teleport: apply all accumulated changes via seed-space XOR diff
+            // For single swaps this is 2 EC additions (add one, remove one)
+            // For multi-step teleports this is O(total_bits_changed)
+            apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
+        }
+        last_ec_mask = mask;
+
+        // ─── Buffer this passing candidate ───
         Load256(buf_X[batch_count], accX);
         Load256(buf_Y[batch_count], accY);
         Load256(buf_Z[batch_count], accZ);
@@ -733,9 +766,7 @@ void comp_keys_revdoor(
             rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
             for (int b = 0; b < batch_count; b++) {
-                // Popcount already filtered at buffering time
-
-                // Affine conversion
+                // All entries already passed popcount — no filter needed here
                 uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
                 _ModSqr(Zinv_sq, Zinv[b]);
                 _ModMult(px, Zinv_sq, buf_X[b]);
@@ -760,7 +791,7 @@ void comp_keys_revdoor(
                 }
             }
 
-            // Reset accumulator to affine from the LAST batch entry
+            // Reset accumulator to affine from LAST batch entry
             if (steps_done < end_step) {
                 int last = batch_count - 1;
                 uint64_t Zinv_sq[4], Zinv_cb[4];
@@ -769,6 +800,8 @@ void comp_keys_revdoor(
                 _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
                 _ModMult(accY, Zinv_cb, buf_Y[last]);
                 accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                // After affine reset, the accumulator is synced to the last buffered mask
+                // last_ec_mask is already correct (set when we buffered)
             }
 
             batch_count = 0;
@@ -780,8 +813,7 @@ void comp_keys_revdoor(
         rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
         for (int b = 0; b < batch_count; b++) {
-            // Popcount already filtered at buffering time
-
+            // All entries already passed popcount at buffering time
             uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
             _ModSqr(Zinv_sq, Zinv[b]);
             _ModMult(px, Zinv_sq, buf_X[b]);
