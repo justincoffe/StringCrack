@@ -306,21 +306,26 @@ void comp_keys_gosper_walk(
         uint64_t new_seed = (mask ^ d_targetSeedLo) & d_seedMaskLo;
 
         apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
+        steps_done++;
+
+        // ─── POPCOUNT PRE-FILTER ───
+        {
+            uint64_t s_check = (mask ^ d_targetSeedLo) & d_seedMaskLo;
+            int pc_abs = __popcll(s_check) + d_lockedPopcount;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+        }
 
         Load256(buf_X[batch_count], accX);
         Load256(buf_Y[batch_count], accY);
         Load256(buf_Z[batch_count], accZ);
         buf_masks[batch_count] = mask;
         batch_count++;
-        steps_done++;
 
         if (batch_count >= MAX_BATCH) {
             batch_invert_Z(buf_Z, Zinv, batch_count);
 
             for (int b = 0; b < batch_count; b++) {
-                uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-                int pc_abs = __popcll(s_check) + d_lockedPopcount;
-                if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+                // Popcount already filtered at buffering time
 
                 uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
                 _ModSqr(Zinv_sq, Zinv[b]);
@@ -356,9 +361,7 @@ void comp_keys_gosper_walk(
         batch_invert_Z(buf_Z, Zinv, batch_count);
 
         for (int b = 0; b < batch_count; b++) {
-            uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-            int pc_abs = __popcll(s_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+            // Popcount already filtered at buffering time
 
             uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
             _ModSqr(Zinv_sq, Zinv[b]);
@@ -473,16 +476,23 @@ void comp_keys_coset_gosper_walk(
         apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
 
         full_mask = qi_mask | mask;
+        steps_done++;
+
+        // ─── POPCOUNT PRE-FILTER ───
+        {
+            uint64_t s_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
+            int pc_abs = __popcll(s_check) + d_lockedPopcount;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+        }
+
         Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
         buf_masks[batch_count] = full_mask;
-        batch_count++; steps_done++;
+        batch_count++;
 
         if (batch_count >= MAX_BATCH) {
             batch_invert_Z(buf_Z, Zinv, batch_count);
             for (int b = 0; b < batch_count; b++) {
-                uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-                int pc_abs = __popcll(s_check) + d_lockedPopcount;
-                if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+                // Popcount already filtered at buffering time
 
                 uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
                 _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);
@@ -510,9 +520,7 @@ void comp_keys_coset_gosper_walk(
     if (batch_count > 0) {
         batch_invert_Z(buf_Z, Zinv, batch_count);
         for (int b = 0; b < batch_count; b++) {
-            uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-            int pc_abs = __popcll(s_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+            // Popcount already filtered at buffering time
 
             uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
             _ModSqr(Zinv_sq, Zinv[b]); _ModMult(px, Zinv_sq, buf_X[b]);

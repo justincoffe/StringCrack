@@ -707,19 +707,25 @@ void comp_keys_revdoor(
         // Update bitmask
         mask = (mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
 
-        // ─── SINGLE EC ADDITION via D-table ───
-        // This is the ONLY EC operation per step. Perfectly uniform across the warp.
+        // ─── SINGLE EC ADDITION via D-table (MANDATORY — walk is sequential) ───
         uint64_t dX[4], dY[4];
         load_Dtable(removed_idx, added_idx, n, dX, dY);
         jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
+        steps_done++;
 
-        // Buffer this step
+        // ─── POPCOUNT PRE-FILTER: skip buffering if key popcount out of range ───
+        {
+            uint64_t seed_check = (mask ^ d_targetSeedLo) & d_seedMaskLo;
+            int pc_abs = __popcll(seed_check) + d_lockedPopcount;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+        }
+
+        // Buffer this step (only if popcount passes)
         Load256(buf_X[batch_count], accX);
         Load256(buf_Y[batch_count], accY);
         Load256(buf_Z[batch_count], accZ);
         buf_masks[batch_count] = mask;
         batch_count++;
-        steps_done++;
 
         // ─── FLUSH BATCH when full ───
         if (batch_count >= MAX_BATCH) {
@@ -727,10 +733,7 @@ void comp_keys_revdoor(
             rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
             for (int b = 0; b < batch_count; b++) {
-                // Popcount pre-filter
-                uint64_t seed_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-                int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-                if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+                // Popcount already filtered at buffering time
 
                 // Affine conversion
                 uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
@@ -777,9 +780,7 @@ void comp_keys_revdoor(
         rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
         for (int b = 0; b < batch_count; b++) {
-            uint64_t seed_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-            int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+            // Popcount already filtered at buffering time
 
             uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
             _ModSqr(Zinv_sq, Zinv[b]);
@@ -971,9 +972,7 @@ __device__ __forceinline__ void rd_process_batch(
 {
     rd_batch_invert_Z(buf_Z, Zinv, batch_count);
     for (int b = 0; b < batch_count; b++) {
-        uint64_t s_check = (buf_masks[b] ^ d_targetSeedLo) & d_seedMaskLo;
-        int pc_abs = __popcll(s_check) + d_lockedPopcount;
-        if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+        // Popcount already filtered at buffering time
 
         uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
         _ModSqr(Zinv_sq, Zinv[b]);
@@ -1111,10 +1110,18 @@ void comp_keys_coset_revdoor(
         uint64_t dX[4], dY[4];
         load_Dtable(removed_idx, added_idx, d_numFreeBits, dX, dY);
         jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
+        steps_done++;
+
+        // ─── POPCOUNT PRE-FILTER ───
+        {
+            uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
+            int pc_abs = __popcll(seed_check) + d_lockedPopcount;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+        }
 
         Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
         buf_masks[batch_count] = full_mask;
-        batch_count++; steps_done++;
+        batch_count++;
 
         if (batch_count >= MAX_BATCH) {
             uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
@@ -1255,6 +1262,14 @@ void comp_keys_warp_packed_revdoor(
 
         // STEP 3: Pure register accumulator update — no shared memory, no sync
         jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
+        steps_done++;
+
+        // ─── POPCOUNT PRE-FILTER ───
+        {
+            uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
+            int pc_abs = __popcll(seed_check) + d_lockedPopcount;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+        }
 
         // Buffer the result
         Load256(buf_X[batch_count], accX);
@@ -1262,7 +1277,6 @@ void comp_keys_warp_packed_revdoor(
         Load256(buf_Z[batch_count], accZ);
         buf_masks[batch_count] = full_mask;
         batch_count++;
-        steps_done++;
 
         // Flush batch when full
         if (batch_count >= MAX_BATCH) {

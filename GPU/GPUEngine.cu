@@ -417,6 +417,11 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     cudaMalloc((void**)&d_mitm_Gfree_X, 64 * 4 * sizeof(uint64_t));
     cudaMalloc((void**)&d_mitm_Gfree_Y, 64 * 4 * sizeof(uint64_t));
 
+    // MITM popcount pre-filter arrays (1 byte per table entry)
+    cudaMalloc((void**)&d_mitm_baby_seedpc, max_mitm_elements * sizeof(uint8_t));
+    cudaMalloc((void**)&d_mitm_giant_seedpc, max_mitm_elements * sizeof(uint8_t));
+    cudaMalloc((void**)&d_mitm_qi_seedpc, 131072 * sizeof(uint8_t));
+
     // Allocate space for up to ~130,000 Q_i points (adjust if W gets larger)
     if (cudaMalloc((void**)&d_Qi_points_X, 131072 * 4 * sizeof(uint64_t)) != cudaSuccess) {
         printf("Failed to allocate d_Qi_points_X\n");
@@ -454,6 +459,10 @@ GPUEngine::~GPUEngine() {
     if (d_mitm_baby_shifted_Y) cudaFree(d_mitm_baby_shifted_Y);
     if (d_mitm_Gfree_X) cudaFree(d_mitm_Gfree_X);
     if (d_mitm_Gfree_Y) cudaFree(d_mitm_Gfree_Y);
+
+    if (d_mitm_baby_seedpc) cudaFree(d_mitm_baby_seedpc);
+    if (d_mitm_giant_seedpc) cudaFree(d_mitm_giant_seedpc);
+    if (d_mitm_qi_seedpc) cudaFree(d_mitm_qi_seedpc);
 
     cudaFree(inputKey);
     cudaFree(inputAddress);

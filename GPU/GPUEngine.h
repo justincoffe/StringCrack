@@ -197,7 +197,8 @@ public:
   void BuildQiPoints(
       uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
       uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3,
-      int L_bits, int B_top, int k1, uint64_t W);
+      int L_bits, int B_top, int k1, uint64_t W,
+      uint64_t qi_center_slice);
 
   void LaunchMITMGodMatrixAsync(
       uint64_t baby_size, uint64_t giant_size, 
@@ -279,6 +280,11 @@ private:
   uint64_t* d_mitm_baby_shifted_Y;
   uint64_t* d_mitm_Gfree_X;
   uint64_t* d_mitm_Gfree_Y;
+
+  // MITM popcount pre-filter arrays (1 byte per table entry)
+  uint8_t* d_mitm_baby_seedpc;
+  uint8_t* d_mitm_giant_seedpc;
+  uint8_t* d_mitm_qi_seedpc;
 
 public:
   int currentStep;

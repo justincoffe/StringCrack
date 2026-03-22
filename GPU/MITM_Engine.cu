@@ -61,6 +61,8 @@ __global__ void comp_build_mitm_table(
     int L_half, int k_half, int bit_offset,
     uint64_t* Gfree_X, uint64_t* Gfree_Y,
     uint64_t* out_X, uint64_t* out_Y,
+    uint8_t* out_seedpc,
+    uint64_t center_slice,
     uint64_t total_combinations)
 {
     uint64_t rank = blockIdx.x * blockDim.x + threadIdx.x;
@@ -69,6 +71,7 @@ __global__ void comp_build_mitm_table(
     if (k_half == 0) {
         out_X[rank * 4 + 0] = 0; out_X[rank * 4 + 1] = 0; out_X[rank * 4 + 2] = 0; out_X[rank * 4 + 3] = 0;
         out_Y[rank * 4 + 0] = 0; out_Y[rank * 4 + 1] = 0; out_Y[rank * 4 + 2] = 0; out_Y[rank * 4 + 3] = 0;
+        out_seedpc[rank] = (uint8_t)__popcll(center_slice);
         return;
     }
 
@@ -83,6 +86,10 @@ __global__ void comp_build_mitm_table(
             remaining--;
         }
     }
+
+    // Compute seed popcount for this entry
+    uint64_t seed_bits = mask ^ center_slice;
+    out_seedpc[rank] = (uint8_t)__popcll(seed_bits);
 
     __align__(32) uint64_t accX[4] = {0};
     __align__(32) uint64_t accY[4] = {0};
@@ -132,6 +139,8 @@ __global__ void comp_build_mitm_table(
 __global__ void comp_build_qi_points(
     uint64_t* Gfree_X, uint64_t* Gfree_Y,
     uint64_t* out_X, uint64_t* out_Y,
+    uint8_t* out_seedpc,
+    uint64_t center_slice,
     uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
     uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3,
     int L_bits, int B_top, int k1, uint64_t W)
@@ -150,6 +159,10 @@ __global__ void comp_build_qi_points(
             remaining--;
         }
     }
+
+    // Compute seed popcount for this Q_i entry
+    uint64_t qi_seed_bits = qi_mask ^ center_slice;
+    out_seedpc[qi_idx] = (uint8_t)__popcll(qi_seed_bits);
 
     __align__(32) uint64_t accX[4] = {lx0, lx1, lx2, lx3};
     __align__(32) uint64_t accY[4] = {ly0, ly1, ly2, ly3};
@@ -221,6 +234,7 @@ void comp_mitm_god_matrix_v2(
     uint64_t* T1_X, uint64_t* T1_Y, uint64_t T1_size,
     uint64_t* T2_X, uint64_t* T2_Y, uint64_t T2_size,
     uint64_t* Qi_X, uint64_t* Qi_Y,
+    uint8_t* T1_seedpc, uint8_t* T2_seedpc, uint8_t* Qi_seedpc,
     uint64_t qi_start, uint64_t qi_count,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     bool t1_is_baby)
@@ -234,6 +248,15 @@ void comp_mitm_god_matrix_v2(
     if (qi_local >= qi_count || t1_idx >= T1_size) return;
 
     uint64_t qi_idx = qi_start + qi_local;
+
+    // ═══ POPCOUNT PRE-FILTER (before any EC math) ═══
+    if (d_popcountMin > 0 || d_popcountMax < 256) {
+        int qi_pc = (int)Qi_seedpc[qi_local];
+        int t1_pc = (int)T1_seedpc[t1_idx];
+        int partial_pc = d_lockedPopcount + qi_pc + t1_pc;
+        if (partial_pc > d_popcountMax) return;
+        if (partial_pc + 64 < d_popcountMin) return;
+    }
 
     // STEP 1: Load precomputed Q_i point (affine)
     __align__(32) uint64_t qiX[4];
@@ -250,6 +273,16 @@ void comp_mitm_god_matrix_v2(
     t1X[2] = __ldg(&T1_X[t1_idx * 4 + 2]); t1X[3] = __ldg(&T1_X[t1_idx * 4 + 3]);
     t1Y[0] = __ldg(&T1_Y[t1_idx * 4 + 0]); t1Y[1] = __ldg(&T1_Y[t1_idx * 4 + 1]);
     t1Y[2] = __ldg(&T1_Y[t1_idx * 4 + 2]); t1Y[3] = __ldg(&T1_Y[t1_idx * 4 + 3]);
+
+    // Preload popcount components for this (qi, t1) pair
+    int _qi_pc = 0, _t1_pc = 0, _partial_pc = 0;
+    bool _use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
+    if (_use_pcfilter) {
+        _qi_pc = (int)Qi_seedpc[qi_local];
+        _t1_pc = (int)T1_seedpc[t1_idx];
+        _partial_pc = d_lockedPopcount + _qi_pc + _t1_pc;
+        if (_partial_pc > d_popcountMax) return;  // early exit entire thread
+    }
 
     // STEP 3: Compute base = Q_i + T1
     __align__(32) uint64_t baseJX[4], baseJY[4], baseJZ[4];
@@ -298,6 +331,11 @@ void comp_mitm_god_matrix_v2(
         t2Y[2] = __ldg(&T2_Y[t2_idx * 4 + 2]); t2Y[3] = __ldg(&T2_Y[t2_idx * 4 + 3]);
 
         if (t2X[0] == 0 && t2X[1] == 0 && t2X[2] == 0 && t2X[3] == 0) continue;
+
+        if (_use_pcfilter) {
+            int total_pc = _partial_pc + (int)T2_seedpc[t2_idx];
+            if (total_pc < d_popcountMin || total_pc > d_popcountMax) continue;
+        }
 
         __align__(32) uint64_t cX[4], cY[4], cZ[4];
         affine_add_affine_to_jacobian(baseX, baseY, t2X, t2Y, cX, cY, cZ);
@@ -411,15 +449,23 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
     if (baby_blocks < 1) baby_blocks = 1;
     if (giant_blocks < 1) giant_blocks = 1;
 
+    // Extract center bit slices for popcount computation
+    uint64_t baby_center_slice = config->targetSeedLo & ((L_baby < 64) ? ((1ULL << L_baby) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+    uint64_t giant_center_slice = (config->targetSeedLo >> L_baby) & ((L_giant < 64) ? ((1ULL << L_giant) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+
     comp_build_mitm_table<<<baby_blocks, tpb>>>(
         L_baby, k_baby, 0,
         d_mitm_Gfree_X, d_mitm_Gfree_Y,
-        d_mitm_baby_X, d_mitm_baby_Y, baby_combs);
+        d_mitm_baby_X, d_mitm_baby_Y,
+        d_mitm_baby_seedpc, baby_center_slice,
+        baby_combs);
 
     comp_build_mitm_table<<<giant_blocks, tpb>>>(
         L_giant, k_giant, L_baby,
         d_mitm_Gfree_X, d_mitm_Gfree_Y,
-        d_mitm_giant_X, d_mitm_giant_Y, giant_combs);
+        d_mitm_giant_X, d_mitm_giant_Y,
+        d_mitm_giant_seedpc, giant_center_slice,
+        giant_combs);
 
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
@@ -433,7 +479,8 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
 void GPUEngine::BuildQiPoints(
     uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
     uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3,
-    int L_bits, int B_top, int k1, uint64_t W)
+    int L_bits, int B_top, int k1, uint64_t W,
+    uint64_t qi_center_slice)
 {
     int tpb = 128;
     int blocks = (int)((W + tpb - 1) / tpb);
@@ -442,6 +489,7 @@ void GPUEngine::BuildQiPoints(
     comp_build_qi_points<<<blocks, tpb>>>(
         d_mitm_Gfree_X, d_mitm_Gfree_Y,
         d_Qi_points_X, d_Qi_points_Y,
+        d_mitm_qi_seedpc, qi_center_slice,
         lx0, lx1, lx2, lx3, ly0, ly1, ly2, ly3,
         L_bits, B_top, k1, W);
 
@@ -478,10 +526,23 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
     uint64_t* qi_X_offset = d_Qi_points_X + qi_start * 4;
     uint64_t* qi_Y_offset = d_Qi_points_Y + qi_start * 4;
 
+    uint8_t* T1_seedpc;
+    uint8_t* T2_seedpc;
+    if (baby_size <= giant_size) {
+        T1_seedpc = d_mitm_baby_seedpc;
+        T2_seedpc = d_mitm_giant_seedpc;
+    } else {
+        T1_seedpc = d_mitm_giant_seedpc;
+        T2_seedpc = d_mitm_baby_seedpc;
+    }
+
+    uint8_t* qi_seedpc_offset = d_mitm_qi_seedpc + qi_start;
+
     comp_mitm_god_matrix_v2<<<numBlocks, 128, 0, streams[s]>>>(
         T1_X, T1_Y, T1_size,
         T2_X, T2_Y, T2_size,
         qi_X_offset, qi_Y_offset,
+        T1_seedpc, T2_seedpc, qi_seedpc_offset,
         qi_start, qi_count,
         inputAddress, inputAddressLookUp, d_output[s], t1_is_baby);
 

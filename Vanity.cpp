@@ -1752,12 +1752,15 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
  
                 // ─── Precompute Q_i points for this k1 ───
                 // Built once, reused across all (k_b, k_g) splits for this k1
+                // Compute qi center slice: bits [L_bits, L_bits+B_top-1] of targetSeedLo
+                uint64_t qi_center_slice = (scConfig->targetSeedLo >> L_bits) & ((B_top < 64) ? ((1ULL << B_top) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+
                 g.BuildQiPoints(
                     P_locked.x.bits64[0], P_locked.x.bits64[1],
                     P_locked.x.bits64[2], P_locked.x.bits64[3],
                     P_locked.y.bits64[0], P_locked.y.bits64[1],
                     P_locked.y.bits64[2], P_locked.y.bits64[3],
-                    L_bits, B_top, k1, W);
+                    L_bits, B_top, k1, W, qi_center_slice);
  
                 // Iterate valid (k_b, k_g) splits — SKIP TINY TABLES
                 for (int k_b = 0; k_b <= k2 && k_b <= L_baby && !endOfSearch; k_b++) {
