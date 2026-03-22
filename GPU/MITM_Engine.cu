@@ -236,6 +236,7 @@ void comp_mitm_god_matrix_v2(
     uint64_t* Qi_X, uint64_t* Qi_Y,
     uint8_t* T1_seedpc, uint8_t* T2_seedpc, uint8_t* Qi_seedpc,
     uint64_t qi_start, uint64_t qi_count,
+    uint64_t t2_start, uint64_t t2_end,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     bool t1_is_baby)
 {
@@ -321,7 +322,7 @@ void comp_mitm_god_matrix_v2(
     __align__(32) uint32_t buf_t2_idx[BATCH_SIZE];
     int batch_count = 0;
 
-    for (uint64_t t2_idx = 0; t2_idx < T2_size; t2_idx++) {
+    for (uint64_t t2_idx = t2_start; t2_idx < t2_end; t2_idx++) {
 
         __align__(32) uint64_t t2X[4];
         __align__(32) uint64_t t2Y[4];
@@ -500,6 +501,7 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
     uint64_t baby_size, uint64_t giant_size,
     int L_bits, int B_top, int k1,
     uint64_t qi_start, uint64_t qi_count,
+    uint64_t t2_start, uint64_t t2_end,
     uint64_t lx0, uint64_t lx1, uint64_t lx2, uint64_t lx3,
     uint64_t ly0, uint64_t ly1, uint64_t ly2, uint64_t ly3, int s)
 {
@@ -544,6 +546,7 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
         qi_X_offset, qi_Y_offset,
         T1_seedpc, T2_seedpc, qi_seedpc_offset,
         qi_start, qi_count,
+        t2_start, t2_end,
         inputAddress, inputAddressLookUp, d_output[s], t1_is_baby);
 
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize,

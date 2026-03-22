@@ -1794,9 +1794,26 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         max_qi_batch = 65535 / blocks_per_qi;
                         if (max_qi_batch == 0) max_qi_batch = 1;
                     }
- 
-                    // ─── Fire the God Matrix v2 ───
-                    for (uint64_t qi_start = sliceStart; qi_start < sliceEnd && !endOfSearch; qi_start += max_qi_batch) {
+
+                    // ─── T2 CHUNKING: prevent frozen display on large kernels ───
+                    // Target: each kernel launch should process at most ~2B candidates
+                    // so it completes in ~0.5s at 4000 MK/s, allowing display updates.
+                    uint64_t target_candidates = 2000000000ULL; // 2B per launch
+                    uint64_t candidates_per_launch = max_qi_batch * T1_size * T2_size;
+                    
+                    uint64_t t2_chunk = T2_size; // default: no chunking
+                    if (candidates_per_launch > target_candidates && T2_size > 1) {
+                        t2_chunk = target_candidates / (max_qi_batch * T1_size);
+                        if (t2_chunk < 1) t2_chunk = 1;
+                    }
+
+                    // ─── Fire the God Matrix v2 (with T2 chunking) ───
+                    for (uint64_t t2_off = 0; t2_off < T2_size && !endOfSearch; t2_off += t2_chunk) {
+                      uint64_t t2_start = t2_off;
+                      uint64_t t2_end = t2_off + t2_chunk;
+                      if (t2_end > T2_size) t2_end = T2_size;
+
+                      for (uint64_t qi_start = sliceStart; qi_start < sliceEnd && !endOfSearch; qi_start += max_qi_batch) {
                         if (Pause) {
                             Paused = true;
                             t_Paused = Timer::get_tick() - t0 + t_Paused;
@@ -1823,6 +1840,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         g.LaunchMITMGodMatrixAsync(
                             baby_size, giant_size, L_bits, B_top, k1,
                             qi_start, qi_count,
+                            t2_start, t2_end,
                             P_locked.x.bits64[0], P_locked.x.bits64[1],
                             P_locked.x.bits64[2], P_locked.x.bits64[3],
                             P_locked.y.bits64[0], P_locked.y.bits64[1],
@@ -1878,7 +1896,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         }
                         firstBatch = false;
  
-                        uint64_t chunk_keys = qi_count * baby_size * giant_size;
+                        uint64_t chunk_keys = qi_count * T1_size * (t2_end - t2_start);
                         totalKeysProcessed += chunk_keys;
                         counters[thId] = totalKeysProcessed;
  
@@ -1978,7 +1996,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         }
                     }
                     // ===================================================
-                }
+                    } // closes qi_start loop
+                    } // closes t2_off loop (T2 chunking)
 
                 continue;
             }
