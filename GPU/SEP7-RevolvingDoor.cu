@@ -33,7 +33,7 @@
 #define SEP7_REVOLVING_DOOR_CU
 
 #ifndef BATCH_N
-#define BATCH_N 8   // Candidates buffered per thread before batch ModInv
+#define BATCH_N 20   // Tier 3: Increased for warp-cooperative flush (covers ~20 steps of variance)
 #endif
 
 // Maximum recursion depth for the revolving door state machine.
@@ -692,6 +692,8 @@ void comp_keys_revdoor(
     bool use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
     steps_done = 1;
     int batch_count = 0;
+    const int FLUSH_INTERVAL = 16;
+    int steps_since_flush = 0;
 
     // Buffer initial point ONLY if it passes popcount
     if (use_pcfilter) {
@@ -715,130 +717,95 @@ void comp_keys_revdoor(
     // ═══════ TELEPORTATION-ENABLED WALK LOOP ═══════
     // Track last EC-synced mask. When popcount fails, advance mask only (5 cycles).
     // When popcount passes, teleport EC accumulator via seed-space XOR diff.
+    // WARP-COOPERATIVE: Flush synchronized every FLUSH_INTERVAL steps to eliminate divergence.
 
     while (steps_done < end_step) {
 
-        // ─── REVOLVING DOOR STEP: update mask (always, ~5 cycles) ───
+        // ─── REVOLVING DOOR STEP ───
         int removed_idx, added_idx;
         if (!revdoor_step_reg(mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
             break;
         }
         mask = (mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
         steps_done++;
+        steps_since_flush++;  // Counts ALL steps, including filtered ones
 
         // ─── POPCOUNT PRE-FILTER ───
+        bool passes = true;
         if (use_pcfilter) {
             uint64_t seed_check = (mask ^ d_targetSeedLo) & seedMaskLo;
             int pc_abs = __popcll(seed_check) + d_lockedPopcount;
             if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) {
-                // SKIP: Don't update EC accumulator. Don't buffer.
-                // The mask advances but the EC point stays at last_ec_mask.
-                continue;
+                passes = false;
             }
         }
 
-        // ─── UPDATE EC ACCUMULATOR ───
-        // Compute accumulated seed-space change since last EC sync
-        uint64_t old_seed = (last_ec_mask ^ d_targetSeedLo) & seedMaskLo;
-        uint64_t new_seed = (mask ^ d_targetSeedLo) & seedMaskLo;
+        // ─── TELEPORT + BUFFER (only if passes) ───
+        if (passes) {
+            uint64_t old_seed = (last_ec_mask ^ d_targetSeedLo) & seedMaskLo;
+            uint64_t new_seed = (mask ^ d_targetSeedLo) & seedMaskLo;
 
-        if (old_seed == new_seed) {
-            // Edge case: mask changed but seed didn't (XOR with center cancelled out)
-            // EC point is already correct, no update needed
-        } else {
-            // Teleport: apply all accumulated changes via seed-space XOR diff
-            // For single swaps this is 2 EC additions (add one, remove one)
-            // For multi-step teleports this is O(total_bits_changed)
-            apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
+            if (old_seed != new_seed) {
+                apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
+            }
+            last_ec_mask = mask;
+
+            Load256(buf_X[batch_count], accX);
+            Load256(buf_Y[batch_count], accY);
+            Load256(buf_Z[batch_count], accZ);
+            buf_masks[batch_count] = mask;
+            batch_count++;
         }
-        last_ec_mask = mask;
 
-        // ─── Buffer this passing candidate ───
-        Load256(buf_X[batch_count], accX);
-        Load256(buf_Y[batch_count], accY);
-        Load256(buf_Z[batch_count], accZ);
-        buf_masks[batch_count] = mask;
-        batch_count++;
+        // ─── WARP-COOPERATIVE FLUSH ───
+        // steps_since_flush is identical across ALL threads in the warp
+        // because it increments on every step (including filtered ones).
+        // Therefore this condition evaluates to the SAME value for all threads.
+        if (steps_since_flush >= FLUSH_INTERVAL || batch_count >= MAX_BATCH) {
+            steps_since_flush = 0;
 
-        // ─── FLUSH BATCH when full ───
-        if (batch_count >= MAX_BATCH) {
+            if (batch_count > 0) {
+                rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
-            rd_batch_invert_Z(buf_Z, Zinv, batch_count);
+                for (int b = 0; b < batch_count; b++) {
+                    uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+                    _ModSqr(Zinv_sq, Zinv[b]);
+                    _ModMult(px, Zinv_sq, buf_X[b]);
+                    _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+                    _ModMult(py, Zinv_cb, buf_Y[b]);
 
-            for (int b = 0; b < batch_count; b++) {
-                // All entries already passed popcount — no filter needed here
-                uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-                _ModSqr(Zinv_sq, Zinv[b]);
-                _ModMult(px, Zinv_sq, buf_X[b]);
-                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
-                _ModMult(py, Zinv_cb, buf_Y[b]);
+                    uint8_t odd_py = (uint8_t)(py[0] & 1);
+                    uint32_t h[5];
+                    _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
-                uint8_t odd_py = (uint8_t)(py[0] & 1);
-                uint32_t h[5];
-                _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-                if (sAddress[h[0] & 0xFFFF] != 0) {
-                    uint32_t step_idx = steps_done - batch_count + b;
-                    uint32_t pos = atomicAdd(out, 1);
-                    if (pos < 65536) {
-                        uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                        item[0] = walk_id;
-                        int16_t* ptr = (int16_t*)&item[1];
-                        ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                        ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                        memcpy(item + 2, h, 20);
+                    if (sAddress[h[0] & 0xFFFF] != 0) {
+                        uint32_t step_idx = steps_done - batch_count + b;
+                        uint32_t pos = atomicAdd(out, 1);
+                        if (pos < 65536) {
+                            uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                            item[0] = walk_id;
+                            int16_t* ptr = (int16_t*)&item[1];
+                            ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                            ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                            memcpy(item + 2, h, 20);
+                        }
                     }
                 }
-            }
 
-            // Reset accumulator to affine from LAST batch entry
-            if (steps_done < end_step) {
-                int last = batch_count - 1;
-                uint64_t Zinv_sq[4], Zinv_cb[4];
-                _ModSqr(Zinv_sq, Zinv[last]);
-                _ModMult(accX, Zinv_sq, buf_X[last]);
-                _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
-                _ModMult(accY, Zinv_cb, buf_Y[last]);
-                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
-                // After affine reset, the accumulator is synced to the last buffered mask
-                // last_ec_mask is already correct (set when we buffered)
-            }
-
-            batch_count = 0;
-        }
-    }
-
-    // ─── FLUSH REMAINING BATCH ───
-    if (batch_count > 0) {
-        rd_batch_invert_Z(buf_Z, Zinv, batch_count);
-
-        for (int b = 0; b < batch_count; b++) {
-            // All entries already passed popcount at buffering time
-            uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-            _ModSqr(Zinv_sq, Zinv[b]);
-            _ModMult(px, Zinv_sq, buf_X[b]);
-            _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
-            _ModMult(py, Zinv_cb, buf_Y[b]);
-
-            uint8_t odd_py = (uint8_t)(py[0] & 1);
-            uint32_t h[5];
-            _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-            if (sAddress[h[0] & 0xFFFF] != 0) {
-                uint32_t step_idx = steps_done - batch_count + b;
-                uint32_t pos = atomicAdd(out, 1);
-                if (pos < 65536) {
-                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                    item[0] = walk_id;
-                    int16_t* ptr = (int16_t*)&item[1];
-                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                    memcpy(item + 2, h, 20);
+                // Reset accumulator to affine
+                if (steps_done < end_step) {
+                    int last = batch_count - 1;
+                    uint64_t Zinv_sq[4], Zinv_cb[4];
+                    _ModSqr(Zinv_sq, Zinv[last]);
+                    _ModMult(accX, Zinv_sq, buf_X[last]);
+                    _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
+                    _ModMult(accY, Zinv_cb, buf_Y[last]);
+                    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
                 }
+                batch_count = 0;
             }
         }
     }
-}
 
 
 // =====================================================================================
