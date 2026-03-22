@@ -234,7 +234,8 @@ void comp_mitm_god_matrix_v2(
     uint64_t* T1_X, uint64_t* T1_Y, uint64_t T1_size,
     uint64_t* T2_X, uint64_t* T2_Y, uint64_t T2_size,
     uint64_t* Qi_X, uint64_t* Qi_Y,
-    uint8_t* T1_seedpc, uint8_t* T2_seedpc, uint8_t* Qi_seedpc,
+    uint8_t* T1_seedpc, uint8_t* Qi_seedpc,
+    int t2_pc_min, int t2_pc_max,
     uint64_t qi_start, uint64_t qi_count,
     uint64_t t2_start, uint64_t t2_end,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
@@ -275,14 +276,14 @@ void comp_mitm_god_matrix_v2(
     t1Y[0] = __ldg(&T1_Y[t1_idx * 4 + 0]); t1Y[1] = __ldg(&T1_Y[t1_idx * 4 + 1]);
     t1Y[2] = __ldg(&T1_Y[t1_idx * 4 + 2]); t1Y[3] = __ldg(&T1_Y[t1_idx * 4 + 3]);
 
-    // Preload popcount components for this (qi, t1) pair
-    int _qi_pc = 0, _t1_pc = 0, _partial_pc = 0;
+    // Popcount pre-filter: hoisted check with T2 bounds (zero inner-loop overhead)
     bool _use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
     if (_use_pcfilter) {
-        _qi_pc = (int)Qi_seedpc[qi_local];
-        _t1_pc = (int)T1_seedpc[t1_idx];
-        _partial_pc = d_lockedPopcount + _qi_pc + _t1_pc;
-        if (_partial_pc > d_popcountMax) return;  // early exit entire thread
+        int _partial_pc = d_lockedPopcount + (int)Qi_seedpc[qi_local] + (int)T1_seedpc[t1_idx];
+        // Even the best T2 entry can't bring us up to minimum
+        if (_partial_pc + t2_pc_max < d_popcountMin) return;
+        // Even the smallest T2 entry pushes us over maximum
+        if (_partial_pc + t2_pc_min > d_popcountMax) return;
     }
 
     // STEP 3: Compute base = Q_i + T1
@@ -333,10 +334,7 @@ void comp_mitm_god_matrix_v2(
 
         if (t2X[0] == 0 && t2X[1] == 0 && t2X[2] == 0 && t2X[3] == 0) continue;
 
-        if (_use_pcfilter) {
-            int total_pc = _partial_pc + (int)T2_seedpc[t2_idx];
-            if (total_pc < d_popcountMin || total_pc > d_popcountMax) continue;
-        }
+        // (NO popcount check here — handled by hoisted bounds)
 
         __align__(32) uint64_t cX[4], cY[4], cZ[4];
         affine_add_affine_to_jacobian(baseX, baseY, t2X, t2Y, cX, cY, cZ);
@@ -474,6 +472,26 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
         printf("[MITM-v2] TABLE BUILD FAILED: %s\n", cudaGetErrorString(err));
         return false;
     }
+
+    // Scan seedpc arrays for min/max bounds (used by kernel hoisted check)
+    uint8_t* h_baby_pc = (uint8_t*)malloc(baby_combs);
+    uint8_t* h_giant_pc = (uint8_t*)malloc(giant_combs);
+    cudaMemcpy(h_baby_pc, d_mitm_baby_seedpc, baby_combs, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_giant_pc, d_mitm_giant_seedpc, giant_combs, cudaMemcpyDeviceToHost);
+
+    mitm_baby_pc_min = 255; mitm_baby_pc_max = 0;
+    for (uint64_t i = 0; i < baby_combs; i++) {
+        if (h_baby_pc[i] < mitm_baby_pc_min) mitm_baby_pc_min = h_baby_pc[i];
+        if (h_baby_pc[i] > mitm_baby_pc_max) mitm_baby_pc_max = h_baby_pc[i];
+    }
+    mitm_giant_pc_min = 255; mitm_giant_pc_max = 0;
+    for (uint64_t i = 0; i < giant_combs; i++) {
+        if (h_giant_pc[i] < mitm_giant_pc_min) mitm_giant_pc_min = h_giant_pc[i];
+        if (h_giant_pc[i] > mitm_giant_pc_max) mitm_giant_pc_max = h_giant_pc[i];
+    }
+    free(h_baby_pc);
+    free(h_giant_pc);
+
     return true;
 }
 
@@ -529,22 +547,30 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
     uint64_t* qi_Y_offset = d_Qi_points_Y + qi_start * 4;
 
     uint8_t* T1_seedpc;
-    uint8_t* T2_seedpc;
     if (baby_size <= giant_size) {
         T1_seedpc = d_mitm_baby_seedpc;
-        T2_seedpc = d_mitm_giant_seedpc;
     } else {
         T1_seedpc = d_mitm_giant_seedpc;
-        T2_seedpc = d_mitm_baby_seedpc;
     }
 
     uint8_t* qi_seedpc_offset = d_mitm_qi_seedpc + qi_start;
+
+    // Compute T2 popcount bounds for the hoisted kernel check
+    int t2_pc_min, t2_pc_max;
+    if (t1_is_baby) {
+        t2_pc_min = mitm_giant_pc_min;
+        t2_pc_max = mitm_giant_pc_max;
+    } else {
+        t2_pc_min = mitm_baby_pc_min;
+        t2_pc_max = mitm_baby_pc_max;
+    }
 
     comp_mitm_god_matrix_v2<<<numBlocks, 128, 0, streams[s]>>>(
         T1_X, T1_Y, T1_size,
         T2_X, T2_Y, T2_size,
         qi_X_offset, qi_Y_offset,
-        T1_seedpc, T2_seedpc, qi_seedpc_offset,
+        T1_seedpc, qi_seedpc_offset,
+        t2_pc_min, t2_pc_max,
         qi_start, qi_count,
         t2_start, t2_end,
         inputAddress, inputAddressLookUp, d_output[s], t1_is_baby);
