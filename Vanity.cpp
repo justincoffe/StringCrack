@@ -1785,7 +1785,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint64_t T2_size = (baby_size > giant_size) ? baby_size : giant_size;
                     int blocks_per_qi = (T1_size + 127) / 128;
                     if (blocks_per_qi == 0) blocks_per_qi = 1;
-                    uint64_t max_qi_batch = 10000;
+                    // Cap qi_batch so the loop iterates enough for display updates
+                    // Target: at least 4 iterations through the qi_start loop
+                    uint64_t slice_qi = sliceEnd - sliceStart;
+                    uint64_t max_qi_batch = (slice_qi > 16) ? (slice_qi / 4) : slice_qi;
+                    if (max_qi_batch > 10000) max_qi_batch = 10000;
                     if (max_qi_batch * blocks_per_qi > 65535) {
                         max_qi_batch = 65535 / blocks_per_qi;
                         if (max_qi_batch == 0) max_qi_batch = 1;
@@ -1880,23 +1884,23 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
  
                         if (sliceId == 0) {
                             ttot = Timer::get_tick() - t0 + t_Paused;
-                            uint64_t globalKeys = 0;
-                            for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
-
                             static double lastTime_mitm = 0.0;
                             static uint64_t lastKeys_mitm = 0;
                             double dt = ttot - lastTime_mitm;
-                            double spd = (dt > 0.01)
-                                ? (double)(globalKeys - lastKeys_mitm) / (dt * 1e6) : 0;
-                            lastTime_mitm = ttot;
-                            lastKeys_mitm = globalKeys;
-
-                            // FIX 3: Show T1/T2 sizes for throughput debugging
-                            printf("[MITM-v2] h=%d k1=%d k_b=%d k_g=%d | W=%llu T1=%llu T2=%llu | %.1f MK/s | %.2f BKeys\r",
-                                h, k1, k_b, k_g, (unsigned long long)W,
-                                (unsigned long long)T1_size, (unsigned long long)T2_size,
-                                spd, (double)globalKeys / 1e9);
-                            fflush(stdout);
+                            
+                            if (dt >= 0.5 || lastTime_mitm == 0.0) {
+                                uint64_t globalKeys = 0;
+                                for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
+                                double spd = (dt > 0.01)
+                                    ? (double)(globalKeys - lastKeys_mitm) / (dt * 1e6) : 0;
+                                lastTime_mitm = ttot;
+                                lastKeys_mitm = globalKeys;
+                                printf("[MITM-v2] h=%d k1=%d k_b=%d k_g=%d | W=%llu T1=%llu T2=%llu | %.1f MK/s | %.2f BKeys\r",
+                                    h, k1, k_b, k_g, (unsigned long long)W,
+                                    (unsigned long long)T1_size, (unsigned long long)T2_size,
+                                    spd, (double)globalKeys / 1e9);
+                                fflush(stdout);
+                            }
                         }
                     }
 
@@ -1948,6 +1952,31 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         found.clear();
                     }
                     firstBatch = true;
+
+                    // === DISPLAY UPDATE after each k_b drain ===
+                    {
+                        totalKeysProcessed += 0; // already counted above
+                        counters[thId] = totalKeysProcessed;
+                        if (sliceId == 0) {
+                            ttot = Timer::get_tick() - t0 + t_Paused;
+                            uint64_t globalKeys = 0;
+                            for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
+                            
+                            static double lastTime_drain = 0.0;
+                            static uint64_t lastKeys_drain = 0;
+                            double dt = ttot - lastTime_drain;
+                            if (dt >= 0.5) {  // Throttle to 2Hz max
+                                double spd = (dt > 0.01) 
+                                    ? (double)(globalKeys - lastKeys_drain) / (dt * 1e6) : 0;
+                                lastTime_drain = ttot;
+                                lastKeys_drain = globalKeys;
+                                printf("[MITM-v2] h=%d k1=%d k_b=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
+                                    h, k1, k_b, (unsigned long long)W,
+                                    spd, (double)globalKeys / 1e9);
+                                fflush(stdout);
+                            }
+                        }
+                    }
                     // ===================================================
                 }
 
