@@ -1796,9 +1796,9 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     }
 
                     // ─── T2 CHUNKING: prevent frozen display on large kernels ───
-                    // Target: each kernel launch should process at most ~2B candidates
-                    // so it completes in ~0.5s at 4000 MK/s, allowing display updates.
-                    uint64_t target_candidates = 2000000000ULL; // 2B per launch
+                    // Target: each kernel launch should process at most ~24B candidates
+                    // so it completes in ~2s at 12 GK/s, allowing display updates.
+                    uint64_t target_candidates = 24000000000ULL; // 24B per launch (~2s at 12 GK/s)
                     uint64_t candidates_per_launch = max_qi_batch * T1_size * T2_size;
                     
                     uint64_t t2_chunk = T2_size; // default: no chunking
