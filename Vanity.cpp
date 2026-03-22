@@ -1785,11 +1785,7 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     uint64_t T2_size = (baby_size > giant_size) ? baby_size : giant_size;
                     int blocks_per_qi = (T1_size + 127) / 128;
                     if (blocks_per_qi == 0) blocks_per_qi = 1;
-                    // Cap qi_batch so the loop iterates enough for display updates
-                    // Target: at least 4 iterations through the qi_start loop
-                    uint64_t slice_qi = sliceEnd - sliceStart;
-                    uint64_t max_qi_batch = (slice_qi > 16) ? (slice_qi / 4) : slice_qi;
-                    if (max_qi_batch > 10000) max_qi_batch = 10000;
+                    uint64_t max_qi_batch = 10000;
                     if (max_qi_batch * blocks_per_qi > 65535) {
                         max_qi_batch = 65535 / blocks_per_qi;
                         if (max_qi_batch == 0) max_qi_batch = 1;
