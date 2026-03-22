@@ -1966,31 +1966,6 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                         found.clear();
                     }
                     firstBatch = true;
-
-                    // === DISPLAY UPDATE after each k_b drain ===
-                    {
-                        totalKeysProcessed += 0; // already counted above
-                        counters[thId] = totalKeysProcessed;
-                        if (sliceId == 0) {
-                            ttot = Timer::get_tick() - t0 + t_Paused;
-                            uint64_t globalKeys = 0;
-                            for (int i = 0; i < sliceCount; i++) globalKeys += counters[i];
-                            
-                            static double lastTime_drain = 0.0;
-                            static uint64_t lastKeys_drain = 0;
-                            double dt = ttot - lastTime_drain;
-                            if (dt >= 0.5) {  // Throttle to 2Hz max
-                                double spd = (dt > 0.01) 
-                                    ? (double)(globalKeys - lastKeys_drain) / (dt * 1e6) : 0;
-                                lastTime_drain = ttot;
-                                lastKeys_drain = globalKeys;
-                                printf("[MITM-v2] h=%d k1=%d k_b=%d | W=%llu | %.1f MK/s | %.2f BKeys\r",
-                                    h, k1, k_b, (unsigned long long)W,
-                                    spd, (double)globalKeys / 1e9);
-                                fflush(stdout);
-                            }
-                        }
-                    }
                     // ===================================================
                     } // closes qi_start loop
                     } // closes t2_off loop (T2 chunking)
