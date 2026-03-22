@@ -10,6 +10,11 @@
 // External native RevDoor tables guaranteed by g.ComputeDTable()
 // (Do NOT use extern __device__ here to avoid redefinition errors with RevolvingDoor.cu)
 
+// T2 popcount bucket offsets (66 entries: seedpc 0..64, plus sentinel)
+// offsets[pc] = first sorted index with seedpc >= pc
+// offsets[65] = first index with seedpc >= 65 = T2_size
+__device__ __constant__ uint32_t d_t2_pc_offsets[66];
+
 // =====================================================================================
 // SPECIALIZED AFFINE+AFFINE → JACOBIAN ADD (Z1 = 1)
 // Saves 1 ModSqr + 2 ModMult = ~3 × 33 = 99 cycles per candidate (25% reduction).
@@ -234,7 +239,8 @@ void comp_mitm_god_matrix_v2(
     uint64_t* T1_X, uint64_t* T1_Y, uint64_t T1_size,
     uint64_t* T2_X, uint64_t* T2_Y, uint64_t T2_size,
     uint64_t* Qi_X, uint64_t* Qi_Y,
-    uint8_t* T1_seedpc, uint8_t* T2_seedpc, uint8_t* Qi_seedpc,
+    uint8_t* T1_seedpc, uint8_t* Qi_seedpc,
+    uint32_t* T2_perm,
     uint64_t qi_start, uint64_t qi_count,
     uint64_t t2_start, uint64_t t2_end,
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
@@ -250,15 +256,35 @@ void comp_mitm_god_matrix_v2(
 
     uint64_t qi_idx = qi_start + qi_local;
 
-    // ═══ POPCOUNT PRE-FILTER (before any EC math) ═══
-    int _partial_pc = 0;
+    // ═══ POPCOUNT-AWARE T2 RANGE (sorted T2 table) ═══
+    uint64_t t2_range_start = t2_start;
+    uint64_t t2_range_end = t2_end;
+
     bool _use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
     if (_use_pcfilter) {
-        _partial_pc = d_lockedPopcount + (int)Qi_seedpc[qi_local] + (int)T1_seedpc[t1_idx];
-        // Hard upper bound: even with T2 contributing 0 bits, over max → dead
-        if (_partial_pc > d_popcountMax) return;
-        // Hard lower bound: even with T2 contributing all its bits (max 64), under min → dead
-        if (_partial_pc + 64 < d_popcountMin) return;
+        int _partial_pc = d_lockedPopcount + (int)Qi_seedpc[qi_local] + (int)T1_seedpc[t1_idx];
+
+        // Compute which T2 seedpc values are valid
+        int valid_lo = d_popcountMin - _partial_pc;
+        int valid_hi = d_popcountMax - _partial_pc;
+
+        // Clamp to [0, 65)
+        if (valid_lo < 0) valid_lo = 0;
+        if (valid_hi > 64) valid_hi = 64;
+
+        // If no valid range, kill thread entirely
+        if (valid_lo > 64 || valid_hi < 0 || valid_lo > valid_hi) return;
+
+        // Look up contiguous range in sorted T2 table
+        uint32_t bucket_start = d_t2_pc_offsets[valid_lo];
+        uint32_t bucket_end = d_t2_pc_offsets[valid_hi + 1];
+
+        // Intersect with the T2 chunk range (from t2_start/t2_end)
+        t2_range_start = (t2_start > bucket_start) ? t2_start : bucket_start;
+        t2_range_end = (t2_end < bucket_end) ? t2_end : bucket_end;
+
+        // Nothing to do
+        if (t2_range_start >= t2_range_end) return;
     }
 
     // STEP 1: Load precomputed Q_i point (affine)
@@ -314,7 +340,7 @@ void comp_mitm_god_matrix_v2(
     __align__(32) uint32_t buf_t2_idx[BATCH_SIZE];
     int batch_count = 0;
 
-    for (uint64_t t2_idx = t2_start; t2_idx < t2_end; t2_idx++) {
+    for (uint64_t t2_idx = t2_range_start; t2_idx < t2_range_end; t2_idx++) {
 
         __align__(32) uint64_t t2X[4];
         __align__(32) uint64_t t2Y[4];
@@ -325,8 +351,6 @@ void comp_mitm_god_matrix_v2(
 
         if (t2X[0] == 0 && t2X[1] == 0 && t2X[2] == 0 && t2X[3] == 0) continue;
 
-        // (NO popcount check here — handled by hoisted bounds)
-
         __align__(32) uint64_t cX[4], cY[4], cZ[4];
         affine_add_affine_to_jacobian(baseX, baseY, t2X, t2Y, cX, cY, cZ);
 
@@ -336,7 +360,7 @@ void comp_mitm_god_matrix_v2(
         buf_t2_idx[batch_count] = (uint32_t)t2_idx;
         batch_count++;
 
-        if (batch_count >= BATCH_SIZE || t2_idx == T2_size - 1) {
+        if (batch_count >= BATCH_SIZE || t2_idx == t2_range_end - 1) {
             mitm_batch_invert_Z<BATCH_SIZE>(buf_Z, Zinv_buf, batch_count);
 
             for (int i = 0; i < batch_count; i++) {
@@ -345,12 +369,6 @@ void comp_mitm_god_matrix_v2(
                 _ModMult(aff_X, buf_X[i], Zsq);
                 _ModMult(Zcb, Zsq, Zinv_buf[i]);
                 _ModMult(aff_Y, buf_Y[i], Zcb);
-
-                // Exact popcount check (after EC math, before expensive hash)
-                if (_use_pcfilter) {
-                    int total_pc = _partial_pc + (int)T2_seedpc[buf_t2_idx[i]];
-                    if (total_pc < d_popcountMin || total_pc > d_popcountMax) continue;
-                }
 
                 __align__(32) uint32_t hash[5];
                 uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
@@ -373,8 +391,10 @@ void comp_mitm_god_matrix_v2(
                         int id = atomicAdd(&out[0], 1);
                         if (id < 256) {
                             int off = 1 + (id * 8);
-                            uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : buf_t2_idx[i];
-                            uint32_t g_idx = t1_is_baby ? buf_t2_idx[i] : (uint32_t)t1_idx;
+                            uint32_t raw_t2 = buf_t2_idx[i];
+                            uint32_t orig_t2 = T2_perm[raw_t2];
+                            uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : orig_t2;
+                            uint32_t g_idx = t1_is_baby ? orig_t2 : (uint32_t)t1_idx;
                             out[off + 0] = (uint32_t)qi_idx;
                             out[off + 1] = g_idx;
                             out[off + 2] = b_idx;
@@ -470,6 +490,63 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
         return false;
     }
 
+    // ═══ SORT T2 TABLE BY SEEDPC FOR POPCOUNT BUCKET ITERATION ═══
+    {
+        // Determine which is T2 (the larger table)
+        bool baby_is_t1 = (baby_combs <= giant_combs);
+        uint64_t T2_combs  = baby_is_t1 ? giant_combs : baby_combs;
+        uint8_t* d_T2_pc   = baby_is_t1 ? d_mitm_giant_seedpc : d_mitm_baby_seedpc;
+        uint64_t* d_T2_X   = baby_is_t1 ? d_mitm_giant_X : d_mitm_baby_X;
+        uint64_t* d_T2_Y   = baby_is_t1 ? d_mitm_giant_Y : d_mitm_baby_Y;
+
+        // Download seedpc for sorting
+        uint8_t* h_pc = (uint8_t*)malloc(T2_combs);
+        cudaMemcpy(h_pc, d_T2_pc, T2_combs, cudaMemcpyDeviceToHost);
+
+        // Counting sort
+        uint32_t counts[66] = {0};
+        for (uint64_t i = 0; i < T2_combs; i++) counts[h_pc[i]]++;
+
+        uint32_t offsets[66];
+        offsets[0] = 0;
+        for (int pc = 1; pc <= 65; pc++) offsets[pc] = offsets[pc-1] + counts[pc-1];
+
+        // Build permutation
+        uint32_t* perm = (uint32_t*)malloc(T2_combs * sizeof(uint32_t));
+        uint32_t wpos[66];
+        memcpy(wpos, offsets, sizeof(offsets));
+        for (uint64_t i = 0; i < T2_combs; i++) {
+            perm[wpos[h_pc[i]]++] = (uint32_t)i;
+        }
+
+        // Reorder EC points in-place via temp buffer
+        size_t pt_bytes = T2_combs * 4 * sizeof(uint64_t);
+        uint64_t* h_X = (uint64_t*)malloc(pt_bytes);
+        uint64_t* h_Y = (uint64_t*)malloc(pt_bytes);
+        uint64_t* h_Xs = (uint64_t*)malloc(pt_bytes);
+        uint64_t* h_Ys = (uint64_t*)malloc(pt_bytes);
+        cudaMemcpy(h_X, d_T2_X, pt_bytes, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_Y, d_T2_Y, pt_bytes, cudaMemcpyDeviceToHost);
+        for (uint64_t i = 0; i < T2_combs; i++) {
+            memcpy(&h_Xs[i*4], &h_X[perm[i]*4], 32);
+            memcpy(&h_Ys[i*4], &h_Y[perm[i]*4], 32);
+        }
+        cudaMemcpy(d_T2_X, h_Xs, pt_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_T2_Y, h_Ys, pt_bytes, cudaMemcpyHostToDevice);
+
+        // Upload permutation for hit index mapping
+        cudaMemcpy(d_mitm_t2_perm, perm, T2_combs * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+        // Upload offset table to constant memory
+        // offsets[66]: offsets[pc] = first index with seedpc >= pc
+        // offsets[65] = T2_combs (end sentinel)
+        offsets[65] = (uint32_t)T2_combs;
+        cudaMemcpyToSymbol(d_t2_pc_offsets, offsets, 66 * sizeof(uint32_t));
+
+        free(h_pc); free(perm);
+        free(h_X); free(h_Y); free(h_Xs); free(h_Ys);
+    }
+
     return true;
 }
 
@@ -525,13 +602,10 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
     uint64_t* qi_Y_offset = d_Qi_points_Y + qi_start * 4;
 
     uint8_t* T1_seedpc;
-    uint8_t* T2_seedpc;
     if (baby_size <= giant_size) {
         T1_seedpc = d_mitm_baby_seedpc;
-        T2_seedpc = d_mitm_giant_seedpc;
     } else {
         T1_seedpc = d_mitm_giant_seedpc;
-        T2_seedpc = d_mitm_baby_seedpc;
     }
 
     uint8_t* qi_seedpc_offset = d_mitm_qi_seedpc + qi_start;
@@ -540,7 +614,8 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
         T1_X, T1_Y, T1_size,
         T2_X, T2_Y, T2_size,
         qi_X_offset, qi_Y_offset,
-        T1_seedpc, T2_seedpc, qi_seedpc_offset,
+        T1_seedpc, qi_seedpc_offset,
+        d_mitm_t2_perm,
         qi_start, qi_count,
         t2_start, t2_end,
         inputAddress, inputAddressLookUp, d_output[s], t1_is_baby);

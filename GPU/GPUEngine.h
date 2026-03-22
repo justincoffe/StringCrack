@@ -287,6 +287,9 @@ private:
   uint8_t* d_mitm_giant_seedpc;
   uint8_t* d_mitm_qi_seedpc;
 
+  // Sorted T2 popcount infrastructure
+  uint32_t* d_mitm_t2_perm;      // sorted→original rank mapping
+
 public:
   int currentStep;
 };
