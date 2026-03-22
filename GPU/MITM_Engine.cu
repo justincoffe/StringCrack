@@ -277,16 +277,6 @@ void comp_mitm_god_matrix_v2(
     t1Y[0] = __ldg(&T1_Y[t1_idx * 4 + 0]); t1Y[1] = __ldg(&T1_Y[t1_idx * 4 + 1]);
     t1Y[2] = __ldg(&T1_Y[t1_idx * 4 + 2]); t1Y[3] = __ldg(&T1_Y[t1_idx * 4 + 3]);
 
-    // Popcount pre-filter: hoisted check with T2 bounds (zero inner-loop overhead)
-    bool _use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
-    if (_use_pcfilter) {
-        int _partial_pc = d_lockedPopcount + (int)Qi_seedpc[qi_local] + (int)T1_seedpc[t1_idx];
-        // Even the best T2 entry can't bring us up to minimum
-        if (_partial_pc + t2_pc_max < d_popcountMin) return;
-        // Even the smallest T2 entry pushes us over maximum
-        if (_partial_pc + t2_pc_min > d_popcountMax) return;
-    }
-
     // STEP 3: Compute base = Q_i + T1
     __align__(32) uint64_t baseJX[4], baseJY[4], baseJZ[4];
 
