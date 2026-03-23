@@ -34,7 +34,7 @@
 
 // RevDoor batch size — independent of GosperWalk's BATCH_N
 // Must be >= FLUSH_INTERVAL (16) to prevent overflow during cooperative flush
-#define RD_BATCH_N 16
+#define RD_BATCH_N 20
 
 // Maximum recursion depth for the revolving door state machine.
 // Bounded by n (num free bits). 66 allows n up to 64 with margin.
