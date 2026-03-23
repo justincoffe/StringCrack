@@ -34,7 +34,7 @@
 
 // RevDoor batch size — independent of GosperWalk's BATCH_N
 // Must be >= FLUSH_INTERVAL (16) to prevent overflow during cooperative flush
-#define RD_BATCH_N 20
+#define RD_BATCH_N 8   // Original size. Phantom Inverse eliminates need for extra slots.
 
 // Maximum recursion depth for the revolving door state machine.
 // Bounded by n (num free bits). 66 allows n up to 64 with margin.
@@ -684,144 +684,84 @@ void comp_keys_revdoor(
     int steps_done = 0;
     int end_step = chunk_size;
 
-    // Clamp to totalCombs boundary
     uint64_t max_steps = totalCombs - start_pos;
     if ((uint64_t)end_step > max_steps) end_step = (int)max_steps;
 
-    // Initialize walk tracking
-    uint64_t last_ec_mask = mask;
-    bool use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
-    steps_done = 1;
     int batch_count = 0;
-    const int FLUSH_INTERVAL = 16;
-    int steps_since_flush = 0;
+    steps_done = 1;
 
-    // Buffer initial point ONLY if it passes popcount
-    if (use_pcfilter) {
-        uint64_t seed_check = (mask ^ d_targetSeedLo) & seedMaskLo;
-        int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-        if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
-            Load256(buf_X[0], accX);
-            Load256(buf_Y[0], accY);
-            Load256(buf_Z[0], accZ);
-            buf_masks[0] = mask;
-            buf_steps[0] = 0;
-            batch_count = 1;
-        }
-    } else {
-        Load256(buf_X[0], accX);
-        Load256(buf_Y[0], accY);
-        Load256(buf_Z[0], accZ);
-        buf_masks[0] = mask;
-        buf_steps[0] = 0;
-        batch_count = 1;
-    }
-
-    // ═══════ TELEPORTATION-ENABLED WALK LOOP ═══════
-    // Track last EC-synced mask. When popcount fails, advance mask only (5 cycles).
-    // When popcount passes, teleport EC accumulator via seed-space XOR diff.
-    // WARP-COOPERATIVE: Flush synchronized every FLUSH_INTERVAL steps to eliminate divergence.
+    // Buffer initial point
+    Load256(buf_X[0], accX);
+    Load256(buf_Y[0], accY);
+    Load256(buf_Z[0], accZ);
+    buf_masks[0] = mask;
+    buf_steps[0] = 0;
+    batch_count = 1;
 
     while (steps_done < end_step) {
 
-        // ─── REVOLVING DOOR STEP ───
         int removed_idx, added_idx;
         if (!revdoor_step_reg(mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
             break;
         }
         mask = (mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
+
+        uint64_t dX[4], dY[4];
+        load_Dtable(removed_idx, added_idx, n, dX, dY);
+        jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
+
+        Load256(buf_X[batch_count], accX);
+        Load256(buf_Y[batch_count], accY);
+        Load256(buf_Z[batch_count], accZ);
+        buf_masks[batch_count] = mask;
+        buf_steps[batch_count] = steps_done;
+        batch_count++;
         steps_done++;
-        steps_since_flush++;
 
-        // ─── POPCOUNT PRE-FILTER ───
-        bool passes = true;
-        if (use_pcfilter) {
-            uint64_t seed_check = (mask ^ d_targetSeedLo) & seedMaskLo;
-            int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) {
-                passes = false;
-            }
-        }
+        if (batch_count >= MAX_BATCH) {
 
-        // ─── TELEPORT + BUFFER (only if passes) ───
-        if (passes) {
-            uint64_t old_seed = (last_ec_mask ^ d_targetSeedLo) & seedMaskLo;
-            uint64_t new_seed = (mask ^ d_targetSeedLo) & seedMaskLo;
+            rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
-            if (old_seed != new_seed) {
-                apply_xor_diff(accX, accY, accZ, old_seed, new_seed);
-            }
-            last_ec_mask = mask;
+            for (int b = 0; b < batch_count; b++) {
+                uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[b]);
+                _ModMult(px, Zinv_sq, buf_X[b]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+                _ModMult(py, Zinv_cb, buf_Y[b]);
 
-            Load256(buf_X[batch_count], accX);
-            Load256(buf_Y[batch_count], accY);
-            Load256(buf_Z[batch_count], accZ);
-            buf_masks[batch_count] = mask;
-            buf_steps[batch_count] = steps_done - 1;
-            batch_count++;
-        }
+                uint8_t odd_py = (uint8_t)(py[0] & 1);
+                uint32_t h[5];
+                _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
-        // ─── WARP-COOPERATIVE FLUSH ───
-        if (steps_since_flush >= FLUSH_INTERVAL || batch_count >= MAX_BATCH) {
-            steps_since_flush = 0;
-
-            if (batch_count > 0) {
-                rd_batch_invert_Z(buf_Z, Zinv, batch_count);
-
-                for (int b = 0; b < batch_count; b++) {
-                    uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
-                    _ModSqr(Zinv_sq, Zinv[b]);
-                    _ModMult(px, Zinv_sq, buf_X[b]);
-                    _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
-                    _ModMult(py, Zinv_cb, buf_Y[b]);
-
-                    uint8_t odd_py = (uint8_t)(py[0] & 1);
-                    uint32_t h[5];
-                    _GetHash160Comp(px, odd_py, (uint8_t*)h);
-
-                    if (sAddress[h[0] & 0xFFFF] != 0) {
-                        uint32_t step_idx = buf_steps[b];
-                        uint32_t pos = atomicAdd(out, 1);
-                        if (pos < 65536) {
-                            uint32_t* item = out + 1 + pos * ITEM_SIZE32;
-                            item[0] = walk_id;
-                            int16_t* ptr = (int16_t*)&item[1];
-                            ptr[0] = (int16_t)(step_idx & 0x7FFF);
-                            ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
-                            memcpy(item + 2, h, 20);
-                        }
+                if (sAddress[h[0] & 0xFFFF] != 0) {
+                    uint32_t step_idx = buf_steps[b];
+                    uint32_t pos = atomicAdd(out, 1);
+                    if (pos < 65536) {
+                        uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                        item[0] = walk_id;
+                        int16_t* ptr = (int16_t*)&item[1];
+                        ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                        ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                        memcpy(item + 2, h, 20);
                     }
                 }
-
-                // Reset accumulator to affine
-                if (steps_done < end_step) {
-                    if (!use_pcfilter) {
-                        int last = batch_count - 1;
-                        uint64_t Zinv_sq[4], Zinv_cb[4];
-                        _ModSqr(Zinv_sq, Zinv[last]);
-                        _ModMult(accX, Zinv_sq, buf_X[last]);
-                        _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
-                        _ModMult(accY, Zinv_cb, buf_Y[last]);
-                        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
-                    } else {
-                        uint64_t Zinv_reset[5];
-                        Zinv_reset[0] = accZ[0]; Zinv_reset[1] = accZ[1];
-                        Zinv_reset[2] = accZ[2]; Zinv_reset[3] = accZ[3]; Zinv_reset[4] = 0;
-                        _ModInv(Zinv_reset);
-                        uint64_t Zsq[4], Zcb[4];
-                        _ModSqr(Zsq, Zinv_reset);
-                        _ModMult(accX, accX, Zsq);
-                        _ModMult(Zcb, Zsq, Zinv_reset);
-                        _ModMult(accY, accY, Zcb);
-                        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
-                    }
-                }
-                batch_count = 0;
             }
+
+            // ═══ PHANTOM INVERSE ═══
+            if (steps_done < end_step) {
+                int last = batch_count - 1;
+                uint64_t Zinv_sq[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[last]);
+                _ModMult(accX, Zinv_sq, buf_X[last]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
+                _ModMult(accY, Zinv_cb, buf_Y[last]);
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+            }
+            batch_count = 0;
         }
     }
 
-    // ─── FLUSH REMAINING BATCH ───
+    // ─── FLUSH REMAINING ───
     if (batch_count > 0) {
         rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
@@ -1122,7 +1062,7 @@ void comp_keys_coset_revdoor(
 
     if (!pointSet) return;
 
-    // ═══════ BATCHED WALK LOOP ═══════
+    // ═══════ PHANTOM INVERSE WALK LOOP ═══════
     uint64_t buf_X[MAX_BATCH][4], buf_Y[MAX_BATCH][4], buf_Z[MAX_BATCH][4];
     uint64_t buf_masks[MAX_BATCH], Zinv[MAX_BATCH][4];
     uint32_t buf_steps[MAX_BATCH];
@@ -1134,103 +1074,108 @@ void comp_keys_coset_revdoor(
 
     int batch_count = 0;
     steps_done = 1;
-    const int FLUSH_INTERVAL = 16;
-    int steps_since_flush = 0;
-    bool use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
 
-    if (use_pcfilter) {
-        uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
-        int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-        if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
-            Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
-            buf_masks[0] = full_mask;
-            buf_steps[0] = 0;
-            batch_count = 1;
-        }
-    } else {
-        Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
-        buf_masks[0] = full_mask;
-        buf_steps[0] = 0;
-        batch_count = 1;
-    }
+    // Buffer initial point
+    Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
+    buf_masks[0] = full_mask;
+    buf_steps[0] = 0;
+    batch_count = 1;
 
     while (steps_done < end_step) {
-        
-        // PERFECT WARP SYNCHRONIZATION: Every thread executes identical state machine logic
+
         int removed_idx, added_idx;
         if (!revdoor_step_reg(p_mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
-            break; 
+            break;
         }
 
         p_mask = (p_mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
         full_mask = qi_mask | p_mask;
 
-        // PERFECT MEMORY COALESCING: All threads request the exact same D-Table index
         uint64_t dX[4], dY[4];
         load_Dtable(removed_idx, added_idx, d_numFreeBits, dX, dY);
         jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
+
+        Load256(buf_X[batch_count], accX);
+        Load256(buf_Y[batch_count], accY);
+        Load256(buf_Z[batch_count], accZ);
+        buf_masks[batch_count] = full_mask;
+        buf_steps[batch_count] = steps_done;
+        batch_count++;
         steps_done++;
-        steps_since_flush++;
 
-        // ─── POPCOUNT GATE (no continue — preserves warp sync) ───
-        bool passes = true;
-        if (use_pcfilter) {
-            uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
-            int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) {
-                passes = false;
-            }
-        }
+        if (batch_count >= MAX_BATCH) {
 
-        if (passes) {
-            Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
-            buf_masks[batch_count] = full_mask;
-            buf_steps[batch_count] = steps_done - 1;
-            batch_count++;
-        }
+            rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
-        // ─── WARP-COOPERATIVE FLUSH ───
-        if (steps_since_flush >= FLUSH_INTERVAL || batch_count >= MAX_BATCH) {
-            steps_since_flush = 0;
+            for (int b = 0; b < batch_count; b++) {
+                uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[b]);
+                _ModMult(px, Zinv_sq, buf_X[b]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+                _ModMult(py, Zinv_cb, buf_Y[b]);
 
-            if (batch_count > 0) {
-                uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
-                rd_process_batch<MAX_BATCH, false>(
-                    buf_X, buf_Y, buf_Z, buf_masks, buf_steps, Zinv,
-                    batch_count, packed_id, 0,
-                    sAddress, lookup32, out);
+                uint8_t odd_py = (uint8_t)(py[0] & 1);
+                uint32_t h[5];
+                _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
-                if (steps_done < end_step) {
-                    if (!use_pcfilter) {
-                        int last = batch_count - 1;
-                        uint64_t Zinv_sq[4], Zinv_cb[4];
-                        _ModSqr(Zinv_sq, Zinv[last]); _ModMult(accX, Zinv_sq, buf_X[last]);
-                        _ModMult(Zinv_cb, Zinv_sq, Zinv[last]); _ModMult(accY, Zinv_cb, buf_Y[last]);
-                        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
-                    } else {
-                        uint64_t Zinv_reset[5];
-                        Zinv_reset[0] = accZ[0]; Zinv_reset[1] = accZ[1];
-                        Zinv_reset[2] = accZ[2]; Zinv_reset[3] = accZ[3]; Zinv_reset[4] = 0;
-                        _ModInv(Zinv_reset);
-                        uint64_t Zsq[4], Zcb[4];
-                        _ModSqr(Zsq, Zinv_reset);
-                        _ModMult(accX, accX, Zsq);
-                        _ModMult(Zcb, Zsq, Zinv_reset);
-                        _ModMult(accY, accY, Zcb);
-                        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                if (sAddress[h[0] & 0xFFFF] != 0) {
+                    uint32_t step_idx = buf_steps[b];
+                    uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
+                    uint32_t pos = atomicAdd(out, 1);
+                    if (pos < 65536) {
+                        uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                        item[0] = packed_id;
+                        int16_t* ptr = (int16_t*)&item[1];
+                        ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                        ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                        memcpy(item + 2, h, 20);
                     }
                 }
-                batch_count = 0;
             }
+
+            // ═══ PHANTOM INVERSE ═══
+            if (steps_done < end_step) {
+                int last = batch_count - 1;
+                uint64_t Zinv_sq[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[last]);
+                _ModMult(accX, Zinv_sq, buf_X[last]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
+                _ModMult(accY, Zinv_cb, buf_Y[last]);
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+            }
+            batch_count = 0;
         }
     }
 
+    // ─── FLUSH REMAINING ───
     if (batch_count > 0) {
-        uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
-        rd_process_batch<MAX_BATCH, false>(
-            buf_X, buf_Y, buf_Z, buf_masks, buf_steps, Zinv,
-            batch_count, packed_id, 0,
-            sAddress, lookup32, out);
+        rd_batch_invert_Z(buf_Z, Zinv, batch_count);
+
+        for (int b = 0; b < batch_count; b++) {
+            uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+            _ModSqr(Zinv_sq, Zinv[b]);
+            _ModMult(px, Zinv_sq, buf_X[b]);
+            _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+            _ModMult(py, Zinv_cb, buf_Y[b]);
+
+            uint8_t odd_py = (uint8_t)(py[0] & 1);
+            uint32_t h[5];
+            _GetHash160Comp(px, odd_py, (uint8_t*)h);
+
+            if (sAddress[h[0] & 0xFFFF] != 0) {
+                uint32_t step_idx = buf_steps[b];
+                uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
+                uint32_t pos = atomicAdd(out, 1);
+                if (pos < 65536) {
+                    uint32_t* item = out + 1 + pos * ITEM_SIZE32;
+                    item[0] = packed_id;
+                    int16_t* ptr = (int16_t*)&item[1];
+                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                    memcpy(item + 2, h, 20);
+                }
+            }
+        }
     }
 }
 
@@ -1314,7 +1259,7 @@ void comp_keys_warp_packed_revdoor(
     }
     if (!pointSet) return;
 
-    // ═══════ PURE REGISTER REVOLVING DOOR LOOP ═══════
+    // ═══════ PHANTOM INVERSE WALK LOOP ═══════
     uint64_t buf_X[MAX_BATCH][4], buf_Y[MAX_BATCH][4], buf_Z[MAX_BATCH][4];
     uint64_t buf_masks[MAX_BATCH], Zinv[MAX_BATCH][4];
     uint32_t buf_steps[MAX_BATCH];
@@ -1324,32 +1269,17 @@ void comp_keys_warp_packed_revdoor(
     uint64_t max_steps = L_totalCombs - start_pos;
     if ((uint64_t)end_step > max_steps) end_step = (int)max_steps;
 
-    // Buffer the initial point (step 0)
     int batch_count = 0;
     steps_done = 1;
-    const int FLUSH_INTERVAL = 16;
-    int steps_since_flush = 0;
-    bool use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
 
-    if (use_pcfilter) {
-        uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
-        int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-        if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
-            Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
-            buf_masks[0] = full_mask;
-            buf_steps[0] = 0;
-            batch_count = 1;
-        }
-    } else {
-        Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
-        buf_masks[0] = full_mask;
-        buf_steps[0] = 0;
-        batch_count = 1;
-    }
+    // Buffer initial point
+    Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
+    buf_masks[0] = full_mask;
+    buf_steps[0] = 0;
+    batch_count = 1;
 
     while (steps_done < end_step) {
 
-        // STEP 1: Nijenhuis-Wilf state machine — identical across all 32 lanes
         int removed_idx, added_idx;
         if (!revdoor_step_reg(p_mask, p0, p1, neg_bits, &sp, &curr_n, &curr_k, &removed_idx, &added_idx)) {
             break;
@@ -1357,77 +1287,91 @@ void comp_keys_warp_packed_revdoor(
         p_mask = (p_mask & ~(1ULL << removed_idx)) | (1ULL << added_idx);
         full_mask = qi_mask | p_mask;
 
-        // STEP 2: D-Table delta fetch — all 32 lanes hit same address, L2 broadcast
         uint64_t dX[4], dY[4];
         load_Dtable(removed_idx, added_idx, d_numFreeBits, dX, dY);
-
-        // STEP 3: Pure register accumulator update — no shared memory, no sync
         jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
+
+        Load256(buf_X[batch_count], accX);
+        Load256(buf_Y[batch_count], accY);
+        Load256(buf_Z[batch_count], accZ);
+        buf_masks[batch_count] = full_mask;
+        buf_steps[batch_count] = steps_done;
+        batch_count++;
         steps_done++;
-        steps_since_flush++;
 
-        // ─── POPCOUNT GATE (no continue) ───
-        bool passes = true;
-        if (use_pcfilter) {
-            uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
-            int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) {
-                passes = false;
-            }
-        }
+        if (batch_count >= MAX_BATCH) {
 
-        if (passes) {
-            Load256(buf_X[batch_count], accX);
-            Load256(buf_Y[batch_count], accY);
-            Load256(buf_Z[batch_count], accZ);
-            buf_masks[batch_count] = full_mask;
-            buf_steps[batch_count] = steps_done - 1;
-            batch_count++;
-        }
+            rd_batch_invert_Z(buf_Z, Zinv, batch_count);
 
-        // ─── WARP-COOPERATIVE FLUSH ───
-        if (steps_since_flush >= FLUSH_INTERVAL || batch_count >= MAX_BATCH) {
-            steps_since_flush = 0;
+            for (int b = 0; b < batch_count; b++) {
+                uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[b]);
+                _ModMult(px, Zinv_sq, buf_X[b]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+                _ModMult(py, Zinv_cb, buf_Y[b]);
 
-            if (batch_count > 0) {
-                rd_process_batch<MAX_BATCH, true>(
-                    buf_X, buf_Y, buf_Z, buf_masks, buf_steps, Zinv,
-                    batch_count, global_warp_id, lane,
-                    sAddress, lookup32, out);
+                uint8_t odd_py = (uint8_t)(py[0] & 1);
+                uint32_t h[5];
+                _GetHash160Comp(px, odd_py, (uint8_t*)h);
 
-                if (steps_done < end_step) {
-                    if (!use_pcfilter) {
-                        int last = batch_count - 1;
-                        uint64_t Zinv_sq[4], Zinv_cb[4];
-                        _ModSqr(Zinv_sq, Zinv[last]);
-                        _ModMult(accX, Zinv_sq, buf_X[last]);
-                        _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
-                        _ModMult(accY, Zinv_cb, buf_Y[last]);
-                        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
-                    } else {
-                        uint64_t Zinv_reset[5];
-                        Zinv_reset[0] = accZ[0]; Zinv_reset[1] = accZ[1];
-                        Zinv_reset[2] = accZ[2]; Zinv_reset[3] = accZ[3]; Zinv_reset[4] = 0;
-                        _ModInv(Zinv_reset);
-                        uint64_t Zsq[4], Zcb[4];
-                        _ModSqr(Zsq, Zinv_reset);
-                        _ModMult(accX, accX, Zsq);
-                        _ModMult(Zcb, Zsq, Zinv_reset);
-                        _ModMult(accY, accY, Zcb);
-                        accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                if (sAddress[h[0] & 0xFFFF] != 0) {
+                    uint32_t step_idx = buf_steps[b];
+                    uint32_t pos = atomicAdd(out, 1);
+                    if (pos < 65536) {
+                        uint32_t* item = out + 1 + pos * ITEM_SIZE32_WARP;
+                        item[0] = global_warp_id;
+                        item[1] = (uint32_t)lane;
+                        int16_t* ptr = (int16_t*)&item[2];
+                        ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                        ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                        memcpy(item + 3, h, 20);
                     }
                 }
-                batch_count = 0;
             }
+
+            // ═══ PHANTOM INVERSE ═══
+            if (steps_done < end_step) {
+                int last = batch_count - 1;
+                uint64_t Zinv_sq[4], Zinv_cb[4];
+                _ModSqr(Zinv_sq, Zinv[last]);
+                _ModMult(accX, Zinv_sq, buf_X[last]);
+                _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
+                _ModMult(accY, Zinv_cb, buf_Y[last]);
+                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+            }
+            batch_count = 0;
         }
     }
 
-    // Flush remaining partial batch
+    // ─── FLUSH REMAINING ───
     if (batch_count > 0) {
-        rd_process_batch<MAX_BATCH, true>(
-            buf_X, buf_Y, buf_Z, buf_masks, buf_steps, Zinv,
-            batch_count, global_warp_id, lane,
-            sAddress, lookup32, out);
+        rd_batch_invert_Z(buf_Z, Zinv, batch_count);
+
+        for (int b = 0; b < batch_count; b++) {
+            uint64_t Zinv_sq[4], px[4], py[4], Zinv_cb[4];
+            _ModSqr(Zinv_sq, Zinv[b]);
+            _ModMult(px, Zinv_sq, buf_X[b]);
+            _ModMult(Zinv_cb, Zinv_sq, Zinv[b]);
+            _ModMult(py, Zinv_cb, buf_Y[b]);
+
+            uint8_t odd_py = (uint8_t)(py[0] & 1);
+            uint32_t h[5];
+            _GetHash160Comp(px, odd_py, (uint8_t*)h);
+
+            if (sAddress[h[0] & 0xFFFF] != 0) {
+                uint32_t step_idx = buf_steps[b];
+                uint32_t pos = atomicAdd(out, 1);
+                if (pos < 65536) {
+                    uint32_t* item = out + 1 + pos * ITEM_SIZE32_WARP;
+                    item[0] = global_warp_id;
+                    item[1] = (uint32_t)lane;
+                    int16_t* ptr = (int16_t*)&item[2];
+                    ptr[0] = (int16_t)(step_idx & 0x7FFF);
+                    ptr[1] = (int16_t)((step_idx >> 15) & 0x7FFF);
+                    memcpy(item + 3, h, 20);
+                }
+            }
+        }
     }
 }
 
