@@ -1093,9 +1093,24 @@ void comp_keys_coset_revdoor(
     if ((uint64_t)end_step > max_steps) end_step = (int)max_steps;
 
     int batch_count = 0;
-    Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
-    buf_masks[0] = full_mask;
-    batch_count = 1; steps_done = 1;
+    steps_done = 1;
+    const int FLUSH_INTERVAL = 16;
+    int steps_since_flush = 0;
+    bool use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
+
+    if (use_pcfilter) {
+        uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
+        int pc_abs = __popcll(seed_check) + d_lockedPopcount;
+        if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
+            Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
+            buf_masks[0] = full_mask;
+            batch_count = 1;
+        }
+    } else {
+        Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
+        buf_masks[0] = full_mask;
+        batch_count = 1;
+    }
 
     while (steps_done < end_step) {
         
@@ -1113,33 +1128,44 @@ void comp_keys_coset_revdoor(
         load_Dtable(removed_idx, added_idx, d_numFreeBits, dX, dY);
         jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
         steps_done++;
+        steps_since_flush++;
 
-        // ─── POPCOUNT PRE-FILTER ───
-        {
+        // ─── POPCOUNT GATE (no continue — preserves warp sync) ───
+        bool passes = true;
+        if (use_pcfilter) {
             uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
             int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) {
+                passes = false;
+            }
         }
 
-        Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
-        buf_masks[batch_count] = full_mask;
-        batch_count++;
+        if (passes) {
+            Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
+            buf_masks[batch_count] = full_mask;
+            batch_count++;
+        }
 
-        if (batch_count >= MAX_BATCH) {
-            uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
-            rd_process_batch<MAX_BATCH, false>(
-                buf_X, buf_Y, buf_Z, buf_masks, Zinv,
-                batch_count, steps_done, packed_id, 0,
-                sAddress, lookup32, out);
+        // ─── WARP-COOPERATIVE FLUSH ───
+        if (steps_since_flush >= FLUSH_INTERVAL || batch_count >= MAX_BATCH) {
+            steps_since_flush = 0;
 
-            if (steps_done < end_step) {
-                int last = batch_count - 1;
-                uint64_t Zinv_sq[4], Zinv_cb[4];
-                _ModSqr(Zinv_sq, Zinv[last]); _ModMult(accX, Zinv_sq, buf_X[last]);
-                _ModMult(Zinv_cb, Zinv_sq, Zinv[last]); _ModMult(accY, Zinv_cb, buf_Y[last]);
-                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+            if (batch_count > 0) {
+                uint32_t packed_id = (walk_id << 12) | (uint32_t)qi_idx;
+                rd_process_batch<MAX_BATCH, false>(
+                    buf_X, buf_Y, buf_Z, buf_masks, Zinv,
+                    batch_count, steps_done, packed_id, 0,
+                    sAddress, lookup32, out);
+
+                if (steps_done < end_step) {
+                    int last = batch_count - 1;
+                    uint64_t Zinv_sq[4], Zinv_cb[4];
+                    _ModSqr(Zinv_sq, Zinv[last]); _ModMult(accX, Zinv_sq, buf_X[last]);
+                    _ModMult(Zinv_cb, Zinv_sq, Zinv[last]); _ModMult(accY, Zinv_cb, buf_Y[last]);
+                    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                }
+                batch_count = 0;
             }
-            batch_count = 0;
         }
     }
 
@@ -1243,10 +1269,24 @@ void comp_keys_warp_packed_revdoor(
 
     // Buffer the initial point (step 0)
     int batch_count = 0;
-    Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
-    buf_masks[0] = full_mask;
-    batch_count = 1;
     steps_done = 1;
+    const int FLUSH_INTERVAL = 16;
+    int steps_since_flush = 0;
+    bool use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
+
+    if (use_pcfilter) {
+        uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
+        int pc_abs = __popcll(seed_check) + d_lockedPopcount;
+        if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
+            Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
+            buf_masks[0] = full_mask;
+            batch_count = 1;
+        }
+    } else {
+        Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
+        buf_masks[0] = full_mask;
+        batch_count = 1;
+    }
 
     while (steps_done < end_step) {
 
@@ -1265,39 +1305,47 @@ void comp_keys_warp_packed_revdoor(
         // STEP 3: Pure register accumulator update — no shared memory, no sync
         jacobian_add_affine_inplace(accX, accY, accZ, dX, dY);
         steps_done++;
+        steps_since_flush++;
 
-        // ─── POPCOUNT PRE-FILTER ───
-        {
+        // ─── POPCOUNT GATE (no continue) ───
+        bool passes = true;
+        if (use_pcfilter) {
             uint64_t seed_check = (full_mask ^ d_targetSeedLo) & d_seedMaskLo;
             int pc_abs = __popcll(seed_check) + d_lockedPopcount;
-            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) continue;
+            if (pc_abs < d_popcountMin || pc_abs > d_popcountMax) {
+                passes = false;
+            }
         }
 
-        // Buffer the result
-        Load256(buf_X[batch_count], accX);
-        Load256(buf_Y[batch_count], accY);
-        Load256(buf_Z[batch_count], accZ);
-        buf_masks[batch_count] = full_mask;
-        batch_count++;
+        if (passes) {
+            Load256(buf_X[batch_count], accX);
+            Load256(buf_Y[batch_count], accY);
+            Load256(buf_Z[batch_count], accZ);
+            buf_masks[batch_count] = full_mask;
+            batch_count++;
+        }
 
-        // Flush batch when full
-        if (batch_count >= MAX_BATCH) {
-            rd_process_batch<MAX_BATCH, true>(
-                buf_X, buf_Y, buf_Z, buf_masks, Zinv,
-                batch_count, steps_done, global_warp_id, lane,
-                sAddress, lookup32, out);
+        // ─── WARP-COOPERATIVE FLUSH ───
+        if (steps_since_flush >= FLUSH_INTERVAL || batch_count >= MAX_BATCH) {
+            steps_since_flush = 0;
 
-            // Renormalize accumulator to affine (Z=1) for next batch
-            if (steps_done < end_step) {
-                int last = batch_count - 1;
-                uint64_t Zinv_sq[4], Zinv_cb[4];
-                _ModSqr(Zinv_sq, Zinv[last]);
-                _ModMult(accX, Zinv_sq, buf_X[last]);
-                _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
-                _ModMult(accY, Zinv_cb, buf_Y[last]);
-                accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+            if (batch_count > 0) {
+                rd_process_batch<MAX_BATCH, true>(
+                    buf_X, buf_Y, buf_Z, buf_masks, Zinv,
+                    batch_count, steps_done, global_warp_id, lane,
+                    sAddress, lookup32, out);
+
+                if (steps_done < end_step) {
+                    int last = batch_count - 1;
+                    uint64_t Zinv_sq[4], Zinv_cb[4];
+                    _ModSqr(Zinv_sq, Zinv[last]);
+                    _ModMult(accX, Zinv_sq, buf_X[last]);
+                    _ModMult(Zinv_cb, Zinv_sq, Zinv[last]);
+                    _ModMult(accY, Zinv_cb, buf_Y[last]);
+                    accZ[0] = 1; accZ[1] = 0; accZ[2] = 0; accZ[3] = 0;
+                }
+                batch_count = 0;
             }
-            batch_count = 0;
         }
     }
 
@@ -1429,7 +1477,7 @@ void GPUEngine::LaunchWarpPackedRevDoorAsync(
 
     qi_batches_last = qi_batches;
 
-    comp_keys_warp_packed_revdoor<6><<<numBlocks, 128, 0, streams[s]>>>(
+    comp_keys_warp_packed_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
         L_bits, k2, B_top, k1,
         base_pos, totalCombs,
