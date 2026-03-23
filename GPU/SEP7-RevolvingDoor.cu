@@ -32,9 +32,9 @@
 #ifndef SEP7_REVOLVING_DOOR_CU
 #define SEP7_REVOLVING_DOOR_CU
 
-#ifndef BATCH_N
-#define BATCH_N 20   // Tier 3: Increased for warp-cooperative flush (covers ~20 steps of variance)
-#endif
+// RevDoor batch size — independent of GosperWalk's BATCH_N
+// Must be >= FLUSH_INTERVAL (16) to prevent overflow during cooperative flush
+#define RD_BATCH_N 20
 
 // Maximum recursion depth for the revolving door state machine.
 // Bounded by n (num free bits). 66 allows n up to 64 with margin.
@@ -540,7 +540,7 @@ __device__ void rd_batch_invert_Z(
         return;
     }
 
-    uint64_t prefix[BATCH_N][4];
+    uint64_t prefix[RD_BATCH_N][4];
     Load256(prefix[0], Z_buf[0]);
     for (int i = 1; i < count; i++) {
         _ModMult(prefix[i], prefix[i-1], Z_buf[i]);
@@ -1447,7 +1447,7 @@ void GPUEngine::LaunchRevDoorAsync(int hamming_h, uint64_t base_pos,
     int threadsPerBlock = 32; // <-- Restored to 32
     int numBlocks = (numWalks + threadsPerBlock - 1) / threadsPerBlock;
 
-    comp_keys_revdoor<BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
+    comp_keys_revdoor<RD_BATCH_N><<<numBlocks, threadsPerBlock, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
         hamming_h, base_pos, totalCombs, chunk_size);
 
@@ -1532,7 +1532,7 @@ void GPUEngine::LaunchRevDoorAsync(int L_bits, int k2, int B_top, int k1, uint64
     int s = currentStep % 2;
     cudaMemsetAsync(d_output[s], 0, 4, streams[s]);
     
-    comp_keys_coset_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
+    comp_keys_coset_revdoor<RD_BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
         L_bits, k2, B_top, k1, base_pos, totalCombs, chunk_size, qi_chunks, W, d_Qi_buffers[s]);
         
@@ -1550,7 +1550,7 @@ void GPUEngine::LaunchWarpPackedRevDoorAsync(
 
     qi_batches_last = qi_batches;
 
-    comp_keys_warp_packed_revdoor<BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
+    comp_keys_warp_packed_revdoor<RD_BATCH_N><<<numBlocks, 128, 0, streams[s]>>>(
         inputAddress, inputAddressLookUp, d_output[s],
         L_bits, k2, B_top, k1,
         base_pos, totalCombs,
