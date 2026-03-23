@@ -705,7 +705,7 @@ void comp_keys_revdoor(
             Load256(buf_Y[0], accY);
             Load256(buf_Z[0], accZ);
             buf_masks[0] = mask;
-            buf_steps[0] = 1;
+            buf_steps[0] = 0;
             batch_count = 1;
         }
     } else {
@@ -713,7 +713,7 @@ void comp_keys_revdoor(
         Load256(buf_Y[0], accY);
         Load256(buf_Z[0], accZ);
         buf_masks[0] = mask;
-        buf_steps[0] = 1;
+        buf_steps[0] = 0;
         batch_count = 1;
     }
 
@@ -757,7 +757,7 @@ void comp_keys_revdoor(
             Load256(buf_Y[batch_count], accY);
             Load256(buf_Z[batch_count], accZ);
             buf_masks[batch_count] = mask;
-            buf_steps[batch_count] = steps_done;
+            buf_steps[batch_count] = steps_done - 1;
             batch_count++;
         }
 
@@ -1144,13 +1144,13 @@ void comp_keys_coset_revdoor(
         if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
             Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
             buf_masks[0] = full_mask;
-            buf_steps[0] = 1;
+            buf_steps[0] = 0;
             batch_count = 1;
         }
     } else {
         Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
         buf_masks[0] = full_mask;
-        buf_steps[0] = 1;
+        buf_steps[0] = 0;
         batch_count = 1;
     }
 
@@ -1185,7 +1185,7 @@ void comp_keys_coset_revdoor(
         if (passes) {
             Load256(buf_X[batch_count], accX); Load256(buf_Y[batch_count], accY); Load256(buf_Z[batch_count], accZ);
             buf_masks[batch_count] = full_mask;
-            buf_steps[batch_count] = steps_done;
+            buf_steps[batch_count] = steps_done - 1;
             batch_count++;
         }
 
@@ -1337,13 +1337,13 @@ void comp_keys_warp_packed_revdoor(
         if (pc_abs >= d_popcountMin && pc_abs <= d_popcountMax) {
             Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
             buf_masks[0] = full_mask;
-            buf_steps[0] = 1;
+            buf_steps[0] = 0;
             batch_count = 1;
         }
     } else {
         Load256(buf_X[0], accX); Load256(buf_Y[0], accY); Load256(buf_Z[0], accZ);
         buf_masks[0] = full_mask;
-        buf_steps[0] = 1;
+        buf_steps[0] = 0;
         batch_count = 1;
     }
 
@@ -1381,7 +1381,7 @@ void comp_keys_warp_packed_revdoor(
             Load256(buf_Y[batch_count], accY);
             Load256(buf_Z[batch_count], accZ);
             buf_masks[batch_count] = full_mask;
-            buf_steps[batch_count] = steps_done;
+            buf_steps[batch_count] = steps_done - 1;
             batch_count++;
         }
 
