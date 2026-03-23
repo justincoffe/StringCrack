@@ -34,7 +34,7 @@
 
 // RevDoor batch size — independent of GosperWalk's BATCH_N
 // Must be >= FLUSH_INTERVAL (16) to prevent overflow during cooperative flush
-#define RD_BATCH_N 8   // Original size. Phantom Inverse eliminates need for extra slots.
+#define RD_BATCH_N 16
 
 // Maximum recursion depth for the revolving door state machine.
 // Bounded by n (num free bits). 66 allows n up to 64 with margin.
