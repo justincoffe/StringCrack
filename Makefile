@@ -1,5 +1,5 @@
 #---------------------------------------------------------------------
-# V3 Goldilocks Makefile for VanitySearch (CUDA 12.8 / GCC 11)
+# V3 Goldilocks Makefile  (CUDA 12.8 / GCC 11)
 #---------------------------------------------------------------------
 
 SRC = Base58.cpp IntGroup.cpp main.cpp Random.cpp \
