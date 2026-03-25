@@ -111,7 +111,14 @@ typedef struct {
     
     // SEP7: Revolving Door EC Walker
     bool useRevDoor;
-    bool useMitm;     // <-- ADD THIS LINE
+    bool useMitm;
+
+    // ═══ SHEKINAH MATRIX MODE ═══
+    bool useShekinah;                // Enable Shekinah Matrix decomposition pipeline
+    uint64_t shekinahCorridorLo[2];  // [A.lo, A.hi] — start of multiplier corridor
+    uint64_t shekinahCorridorHi[2];  // [B.lo, B.hi] — end of multiplier corridor (exclusive)
+    // These are filled by the Shekinah pipeline on the host side.
+    // Each dispatch block reconfigures lock/free bits and popcount before GPU launch.
 } StringCrackConfig;
 
 // Second level lookup
@@ -185,6 +192,12 @@ public:
   // MITM VRAM Engine (Phase 1)
   bool BuildMITMTables(Secp256K1* secp, StringCrackConfig* config, 
                        int L_baby, int k_baby, int L_giant, int k_giant);
+
+  // ═══ SHEKINAH MATRIX: Per-block GPU reconfiguration ═══
+  // Reconfigure the GPU constant memory for a new Shekinah block without
+  // re-allocating VRAM. Updates lock masks, free bit positions, base point,
+  // popcount ranges, and window tables.
+  bool ReconfigureForShekinahBlock(Secp256K1* secp, StringCrackConfig* config);
   void ShiftBabyTable(uint64_t bX[4], uint64_t bY[4], uint64_t bZ[4], uint64_t baby_size);
   void LaunchMITMChunkAsync(uint32_t qi_idx, uint64_t baby_size, uint64_t giant_size, uint64_t offset, uint64_t blocks, int s);
   uint32_t SyncMITMBatch(int s, std::vector<ITEM>& found);

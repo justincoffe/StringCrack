@@ -184,6 +184,9 @@ public:
 
 	// SEP7: Revolving Door EC Walker
 	void FindKeyGPU_RevDoor(TH_PARAM* p);
+
+	// SEPHOLY: Shekinah Matrix — Dyadic Decomposition MITM Pipeline
+	void FindKeyGPU_Shekinah(TH_PARAM* p);
 	void reconstructRevDoorKey(uint32_t walk_id, uint32_t step_idx,
 		int hamming_h, uint64_t base_pos, int chunk_size,
 		uint8_t* hash, StringCrackConfig* config,

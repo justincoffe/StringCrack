@@ -2012,3 +2012,80 @@ void GPUEngine::LaunchCosetGosperWalkAsync(
     cudaMemcpyAsync(h_outputPinned[s], d_output[s], outputSize, cudaMemcpyDeviceToHost, streams[s]);
     currentStep++;
 }
+
+// =====================================================================================
+// SHEKINAH MATRIX: Per-block GPU reconfiguration
+// Reconfigures the GPU constant memory for a new Shekinah dispatch block.
+// This is called once per block, before launching the MITM God Matrix kernel.
+// It updates: lock masks, free bit positions, base point, popcount ranges,
+// seed mask, SEP target, and the D-table for revolving door.
+// =====================================================================================
+bool GPUEngine::ReconfigureForShekinahBlock(Secp256K1* secp, StringCrackConfig* config) {
+    scConfig = *config;
+    stringCrackEnabled = config->enabled;
+    if (!stringCrackEnabled) return true;
+
+    cudaError_t err;
+
+    // Upload lock masks
+    err = cudaMemcpyToSymbol(d_lockMask, config->lockMask, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("[Shekinah] d_lockMask: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_lockVals, config->lockVals, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("[Shekinah] d_lockVals: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Upload free bit positions
+    err = cudaMemcpyToSymbol(d_freeBitPos, config->freeBitPositions, sizeof(int) * 256);
+    if (err != cudaSuccess) { printf("[Shekinah] d_freeBitPos: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_numFreeBits, &config->numFreeBits, sizeof(int));
+    if (err != cudaSuccess) { printf("[Shekinah] d_numFreeBits: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Upload popcount range
+    err = cudaMemcpyToSymbol(d_popcountMin, &config->popcountMin, sizeof(int));
+    if (err != cudaSuccess) { printf("[Shekinah] d_popcountMin: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_popcountMax, &config->popcountMax, sizeof(int));
+    if (err != cudaSuccess) { printf("[Shekinah] d_popcountMax: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Upload base point
+    err = cudaMemcpyToSymbol(d_basePointX, config->basePointX, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("[Shekinah] d_basePointX: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_basePointY, config->basePointY, sizeof(uint64_t) * 4);
+    if (err != cudaSuccess) { printf("[Shekinah] d_basePointY: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Upload locked popcount
+    err = cudaMemcpyToSymbol(d_lockedPopcount, &config->lockedPopcount, sizeof(int));
+    if (err != cudaSuccess) { printf("[Shekinah] d_lockedPopcount: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Upload SEP variables
+    err = cudaMemcpyToSymbol(d_targetSeedLo, &config->targetSeedLo, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("[Shekinah] d_targetSeedLo: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_targetSeedHi, &config->targetSeedHi, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("[Shekinah] d_targetSeedHi: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_useSEP, &config->useSEP, sizeof(bool));
+    if (err != cudaSuccess) { printf("[Shekinah] d_useSEP: %s\n", cudaGetErrorString(err)); return false; }
+
+    // Upload seed masks
+    uint64_t seedMaskLo = 0, seedMaskHi = 0;
+    if (config->numFreeBits <= 0) {
+        seedMaskLo = 0; seedMaskHi = 0;
+    } else if (config->numFreeBits < 64) {
+        seedMaskLo = (1ULL << config->numFreeBits) - 1ULL;
+        seedMaskHi = 0;
+    } else if (config->numFreeBits == 64) {
+        seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
+        seedMaskHi = 0;
+    } else if (config->numFreeBits < 128) {
+        seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
+        seedMaskHi = (1ULL << (config->numFreeBits - 64)) - 1ULL;
+    } else {
+        seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
+        seedMaskHi = 0xFFFFFFFFFFFFFFFFULL;
+    }
+    config->seedMaskLo = seedMaskLo;
+
+    err = cudaMemcpyToSymbol(d_seedMaskLo, &seedMaskLo, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("[Shekinah] d_seedMaskLo: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMemcpyToSymbol(d_seedMaskHi, &seedMaskHi, sizeof(uint64_t));
+    if (err != cudaSuccess) { printf("[Shekinah] d_seedMaskHi: %s\n", cudaGetErrorString(err)); return false; }
+
+    return true;
+}

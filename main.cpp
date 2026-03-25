@@ -129,6 +129,13 @@ void printUsage() {
 	printf(" -radiusrange min:max: Test a specific Hamming distance band.\n");
 	printf("            Jumps straight to layer 'min', skipping layers 0..min-1.\n");
 	printf("            Example: -center 10011...10110 -radiusrange 13:21\n");
+	printf("\n === SEPHOLY: Shekinah Matrix Mode (Dyadic Decomposition + MITM) ===\n");
+	printf(" -shekinah: Enable the Shekinah Matrix decomposition pipeline.\n");
+	printf("            Decomposes arbitrary key corridors into optimal power-of-2 blocks,\n");
+	printf("            each fed to the MITM God Engine for O(sqrt(N)) coverage.\n");
+	printf(" -corridorstart HEX: Start of the multiplier corridor (inclusive).\n");
+	printf(" -corridorend HEX: End of the multiplier corridor (exclusive).\n");
+	printf("            Example: -shekinah -corridorstart 1A2B3C -corridorend 1A2C00 -poprange 30:40\n");
 	exit(-1);
 
 }
@@ -699,11 +706,44 @@ int main(int argc, char* argv[]) {
 			scConfig.enabled = true;
 			a++;
 		}
-		else if (strcmp(argv[a], "-mitm") == 0) { // <-- ADD THIS BLOCK
+		else if (strcmp(argv[a], "-mitm") == 0) {
 			scConfig.useMitm = true;
 			scConfig.useRadius = true;
 			scConfig.useSEP = true;
 			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-shekinah") == 0) {
+			scConfig.useShekinah = true;
+			scConfig.useMitm = true;
+			scConfig.useRadius = true;
+			scConfig.useSEP = true;
+			scConfig.enabled = true;
+			a++;
+		}
+		else if (strcmp(argv[a], "-corridorstart") == 0) {
+			a++;
+			// Parse hex string into 128-bit corridor start
+			std::string csHex = std::string(argv[a]);
+			// Pad to 32 hex chars (128 bits)
+			while (csHex.length() < 32) csHex.insert(0, "0");
+			// Parse high and low 64 bits
+			std::string hiStr = csHex.substr(0, csHex.length() - 16);
+			std::string loStr = csHex.substr(csHex.length() - 16);
+			if (hiStr.empty()) hiStr = "0";
+			scConfig.shekinahCorridorLo[0] = strtoull(loStr.c_str(), NULL, 16);
+			scConfig.shekinahCorridorLo[1] = strtoull(hiStr.c_str(), NULL, 16);
+			a++;
+		}
+		else if (strcmp(argv[a], "-corridorend") == 0) {
+			a++;
+			std::string ceHex = std::string(argv[a]);
+			while (ceHex.length() < 32) ceHex.insert(0, "0");
+			std::string hiStr = ceHex.substr(0, ceHex.length() - 16);
+			std::string loStr = ceHex.substr(ceHex.length() - 16);
+			if (hiStr.empty()) hiStr = "0";
+			scConfig.shekinahCorridorHi[0] = strtoull(loStr.c_str(), NULL, 16);
+			scConfig.shekinahCorridorHi[1] = strtoull(hiStr.c_str(), NULL, 16);
 			a++;
 		}
 		else if (strcmp(argv[a], "-i") == 0) {
@@ -944,6 +984,30 @@ int main(int argc, char* argv[]) {
 		}
 		printf("[StringCrack] Seed count:  %s (2^%d)\n",
 				countHex.c_str(), scConfig.numFreeBits);
+
+		// ═══ SHEKINAH MATRIX VALIDATION ═══
+		if (scConfig.useShekinah) {
+			if (scConfig.shekinahCorridorLo[0] == 0 && scConfig.shekinahCorridorLo[1] == 0) {
+				fprintf(stderr, "[ERROR] -shekinah requires -corridorstart.\n");
+				exit(-1);
+			}
+			if (scConfig.shekinahCorridorHi[0] == 0 && scConfig.shekinahCorridorHi[1] == 0) {
+				fprintf(stderr, "[ERROR] -shekinah requires -corridorend.\n");
+				exit(-1);
+			}
+			printf("\n[SEPHOLY] ============================================\n");
+			printf("[SEPHOLY] SHEKINAH MATRIX MODE ENABLED\n");
+			printf("[SEPHOLY] Corridor Start: %016llX%016llX\n",
+				(unsigned long long)scConfig.shekinahCorridorLo[1],
+				(unsigned long long)scConfig.shekinahCorridorLo[0]);
+			printf("[SEPHOLY] Corridor End:   %016llX%016llX\n",
+				(unsigned long long)scConfig.shekinahCorridorHi[1],
+				(unsigned long long)scConfig.shekinahCorridorHi[0]);
+			printf("[SEPHOLY] Puzzle bits:    %d\n", scConfig.puzzleBits);
+			printf("[SEPHOLY] Popcount range: %d:%d\n", scConfig.popcountMin, scConfig.popcountMax);
+			printf("[SEPHOLY] ============================================\n\n");
+			fflush(stdout);
+		}
 	}
 
 	{
