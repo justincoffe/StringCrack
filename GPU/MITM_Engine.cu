@@ -340,12 +340,16 @@ void comp_mitm_god_matrix_v2(
         _ModMult(baseY, baseJY, Zcb);
     }
 
-    // STEP 5: Inner loop over T2 — MEMORY COLLIDER HOT PATH
-    // BATCH_SIZE=16: amortize 1 expensive ModInv (~4000 cycles) over 16 candidates
-    // Net savings: 16 individual ModInvs → 1 ModInv + 30 ModMults = ~85% reduction
+    // STEP 5: Inner loop over T2 — PURE AFFINE BATCH INVERSION
+    // Buffer raw dx = (t2X - baseX) differences, batch-invert them,
+    // then compute affine addition directly. Eliminates the Jacobian
+    // round-trip: 8 ModMult/candidate instead of 15.
+
     const int BATCH_SIZE = 16;
-    __align__(32) uint64_t buf_X[BATCH_SIZE][4], buf_Y[BATCH_SIZE][4], buf_Z[BATCH_SIZE][4];
-    __align__(32) uint64_t Zinv_buf[BATCH_SIZE][4];
+    __align__(32) uint64_t buf_dx[BATCH_SIZE][4];      // x2 - x1 (to be batch-inverted)
+    __align__(32) uint64_t buf_t2X[BATCH_SIZE][4];     // saved t2 X for affine formula
+    __align__(32) uint64_t buf_t2Y[BATCH_SIZE][4];     // saved t2 Y for affine formula
+    __align__(32) uint64_t inv_dx[BATCH_SIZE][4];      // batch-inverted dx values
     __align__(32) uint32_t buf_t2_idx[BATCH_SIZE];
     int batch_count = 0;
 
@@ -360,28 +364,43 @@ void comp_mitm_god_matrix_v2(
 
         if (t2X[0] == 0 && t2X[1] == 0 && t2X[2] == 0 && t2X[3] == 0) continue;
 
-        __align__(32) uint64_t cX[4], cY[4], cZ[4];
-        affine_add_affine_to_jacobian(baseX, baseY, t2X, t2Y, cX, cY, cZ);
+        // Buffer dx = t2X - baseX (the value to be batch-inverted)
+        ModSub256(buf_dx[batch_count], t2X, baseX);
 
-        Load256(buf_X[batch_count], cX);
-        Load256(buf_Y[batch_count], cY);
-        Load256(buf_Z[batch_count], cZ);
+        // Save t2 coordinates for the affine formula after inversion
+        Load256(buf_t2X[batch_count], t2X);
+        Load256(buf_t2Y[batch_count], t2Y);
         buf_t2_idx[batch_count] = (uint32_t)t2_idx;
         batch_count++;
 
         if (batch_count >= BATCH_SIZE || t2_idx == t2_range_end - 1) {
-            mitm_batch_invert_Z<BATCH_SIZE>(buf_Z, Zinv_buf, batch_count);
+
+            // Batch-invert all dx values: 1 ModInv + (n-1) prefix/suffix ModMults
+            mitm_batch_invert_Z<BATCH_SIZE>(buf_dx, inv_dx, batch_count);
 
             for (int i = 0; i < batch_count; i++) {
-                __align__(32) uint64_t Zsq[4], Zcb[4], aff_X[4], aff_Y[4];
-                _ModSqr(Zsq, Zinv_buf[i]);
-                _ModMult(aff_X, buf_X[i], Zsq);
-                _ModMult(Zcb, Zsq, Zinv_buf[i]);
-                _ModMult(aff_Y, buf_Y[i], Zcb);
+                // Pure affine addition: P3 = base + T2[i]
+                // lambda = (t2Y - baseY) * (t2X - baseX)^(-1)
+                __align__(32) uint64_t dy[4], lambda[4], lambda_sq[4];
+                __align__(32) uint64_t x3[4], y3[4], tmp[4];
 
+                ModSub256(dy, buf_t2Y[i], baseY);       // dy = t2Y - baseY
+                _ModMult(lambda, dy, inv_dx[i]);         // lambda = dy * inv_dx  [1 ModMult]
+                _ModSqr(lambda_sq, lambda);              // lambda² [1 ModSqr]
+
+                // x3 = lambda² - baseX - t2X
+                ModSub256(tmp, lambda_sq, baseX);
+                ModSub256(x3, tmp, buf_t2X[i]);
+
+                // y3 = lambda * (baseX - x3) - baseY
+                ModSub256(tmp, baseX, x3);
+                _ModMult(y3, lambda, tmp);               // [1 ModMult]
+                ModSub256(y3, y3, baseY);
+
+                // Hash the result (x3 is the public key X coordinate)
                 __align__(32) uint32_t hash[5];
-                uint8_t isOdd = (uint8_t)(aff_Y[0] & 1);
-                _GetHash160Comp(aff_X, isOdd, (uint8_t*)hash);
+                uint8_t isOdd = (uint8_t)(y3[0] & 1);
+                _GetHash160Comp(x3, isOdd, (uint8_t*)hash);
 
                 uint32_t pr = hash[0] & 0xFFFF;
                 if (sAddress[pr] != 0) {
@@ -408,8 +427,7 @@ void comp_mitm_god_matrix_v2(
                             out[off + 1] = g_idx;
                             out[off + 2] = b_idx;
                             out[off + 3] = hash[0]; out[off + 4] = hash[1];
-                            out[off + 5] = hash[2]; out[off + 6] = hash[3];
-                            out[off + 7] = hash[4];
+                            out[off + 5] = hash[2]; out[off + 6] = hash[3]; out[off + 7] = hash[4];
                         }
                     }
                 }
