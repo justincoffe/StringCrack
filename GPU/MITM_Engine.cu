@@ -345,7 +345,7 @@ void comp_mitm_god_matrix_v2(
     // then compute affine addition directly. Eliminates the Jacobian
     // round-trip: 8 ModMult/candidate instead of 15.
 
-    const int BATCH_SIZE = 16;
+    const int BATCH_SIZE = 32;
     __align__(32) uint64_t buf_dx[BATCH_SIZE][4];      // x2 - x1 (to be batch-inverted)
     __align__(32) uint64_t buf_t2X[BATCH_SIZE][4];     // saved t2 X for affine formula
     __align__(32) uint64_t buf_t2Y[BATCH_SIZE][4];     // saved t2 Y for affine formula
