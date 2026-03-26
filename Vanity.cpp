@@ -2879,35 +2879,16 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
     uint128_t corridorA = make_u128(scConfig->shekinahCorridorLo[0], scConfig->shekinahCorridorLo[1]);
     uint128_t corridorB = make_u128(scConfig->shekinahCorridorHi[0], scConfig->shekinahCorridorHi[1]);
 
-    // Suppress per-block diagnostic prints for non-primary GPUs
-    // by redirecting stdout temporarily (the pipeline is pure computation,
-    // produces identical results on all GPUs)
-    ShekinahPipelineResult pipeline;
-    if (sliceId == 0) {
-        pipeline = shekinah_generate_dispatch(
-            corridorA, corridorB,
-            scConfig->puzzleBits,
-            scConfig->popcountMin,
-            scConfig->popcountMax,
-            64  // max GPU free bits
-        );
-    } else {
-        // Suppress output: redirect to /dev/null equivalent
-        // Just run silently — same computation, no prints
-        fflush(stdout);
-        int saved_stdout = dup(fileno(stdout));
-        freopen("/dev/null", "w", stdout);
-        pipeline = shekinah_generate_dispatch(
-            corridorA, corridorB,
-            scConfig->puzzleBits,
-            scConfig->popcountMin,
-            scConfig->popcountMax,
-            64
-        );
-        fflush(stdout);
-        dup2(saved_stdout, fileno(stdout));
-        close(saved_stdout);
-    }
+    // Non-primary GPUs run the decomposition silently (quiet=true)
+    bool quiet = (sliceId != 0);
+    ShekinahPipelineResult pipeline = shekinah_generate_dispatch(
+        corridorA, corridorB,
+        scConfig->puzzleBits,
+        scConfig->popcountMin,
+        scConfig->popcountMax,
+        64,     // max GPU free bits
+        quiet
+    );
 
     if (pipeline.commands.empty()) {
         printf("[SEPHOLY] GPU[%d] No blocks to process (all dead from popcount pruning)\n", sliceId);

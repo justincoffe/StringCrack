@@ -515,7 +515,8 @@ static ShekinahPipelineResult shekinah_generate_dispatch(
     int       total_bits,  // e.g., 71 for puzzle 71
     int       global_pop_lo,
     int       global_pop_hi,
-    int       max_gpu_free_bits = 64)
+    int       max_gpu_free_bits = 64,
+    bool      quiet = false)
 {
     shekinah_precompute_binomials();
 
@@ -532,40 +533,42 @@ static ShekinahPipelineResult shekinah_generate_dispatch(
     result.grand_total_keys = 0;
 
     // ── Step 1: Dyadic decomposition ──
-    printf("[Shekinah] Step 1: Dyadic decomposition of [A, B)...\n");
+    if (!quiet) printf("[Shekinah] Step 1: Dyadic decomposition of [A, B)...\n");
     uint128_t range = B - A;
-    printf("[Shekinah]   Range size: ~2^%.2f\n", log2((double)range.hi * 1.8446744073709552e19 + (double)range.lo));
-    fflush(stdout);
+    if (!quiet) {
+        printf("[Shekinah]   Range size: ~2^%.2f\n", log2((double)range.hi * 1.8446744073709552e19 + (double)range.lo));
+        fflush(stdout);
+    }
 
     std::vector<ShekinahBlock> raw = shekinah_decompose_range(A, B, total_bits);
-    printf("[Shekinah]   Dyadic decomposition: %zu raw blocks\n", raw.size());
+    if (!quiet) printf("[Shekinah]   Dyadic decomposition: %zu raw blocks\n", raw.size());
 
     // ── Step 2: Annotate popcount & kill dead blocks ──
-    printf("[Shekinah] Step 2: Popcount annotation and pruning...\n");
+    if (!quiet) printf("[Shekinah] Step 2: Popcount annotation and pruning...\n");
     std::vector<ShekinahBlock> live = shekinah_annotate_popcount(raw, cfg);
-    printf("[Shekinah]   After popcount pruning: %zu live blocks (killed %zu dead)\n",
+    if (!quiet) printf("[Shekinah]   After popcount pruning: %zu live blocks (killed %zu dead)\n",
            live.size(), raw.size() - live.size());
 
     // ── Step 3: Split oversized blocks ──
-    printf("[Shekinah] Step 3: GPU capacity split (max %d free bits)...\n", cfg.max_free_bits);
+    if (!quiet) printf("[Shekinah] Step 3: GPU capacity split (max %d free bits)...\n", cfg.max_free_bits);
     std::vector<ShekinahBlock> split;
     for (const auto& blk : live) {
         auto sub = shekinah_split_for_gpu(blk, cfg);
         for (auto& s : sub) split.push_back(s);
     }
-    printf("[Shekinah]   After GPU splitting: %zu blocks\n", split.size());
+    if (!quiet) printf("[Shekinah]   After GPU splitting: %zu blocks\n", split.size());
 
     // ── Step 4: Adaptive merge tiny blocks ──
-    printf("[Shekinah] Step 4: Adaptive block merging...\n");
+    if (!quiet) printf("[Shekinah] Step 4: Adaptive block merging...\n");
     auto final_blocks = shekinah_adaptive_merge(split, cfg);
-    printf("[Shekinah]   After adaptive merge: %zu final blocks\n", final_blocks.size());
+    if (!quiet) printf("[Shekinah]   After adaptive merge: %zu final blocks\n", final_blocks.size());
 
     // ── Step 5: Sort for early termination ──
-    printf("[Shekinah] Step 5: Block ordering (center-first heuristic)...\n");
+    if (!quiet) printf("[Shekinah] Step 5: Block ordering (center-first heuristic)...\n");
     shekinah_sort_blocks(final_blocks, A, B);
 
     // ── Step 6: Generate dispatch commands ──
-    printf("[Shekinah] Step 6: Generating dispatch commands...\n");
+    if (!quiet) printf("[Shekinah] Step 6: Generating dispatch commands...\n");
     result.blocks = final_blocks;
 
     for (const auto& blk : final_blocks) {
@@ -608,44 +611,46 @@ static ShekinahPipelineResult shekinah_generate_dispatch(
     }
 
     // ── Print summary ──
-    printf("\n");
-    printf("==========================================================\n");
-    printf("  SHEKINAH MATRIX DISPATCH SUMMARY\n");
-    printf("==========================================================\n");
-    printf("  Total kernel launches:  %zu\n", result.commands.size());
-    if (result.grand_total_ops > 0)
-        printf("  Total EC operations:    ~2^%.2f\n", log2((double)result.grand_total_ops));
-    if (result.grand_total_keys > 0)
-        printf("  Total keys covered:     ~2^%.2f\n", log2((double)result.grand_total_keys));
-    printf("  Ghost combinations:     ZERO\n");
-    printf("==========================================================\n\n");
-
-    // Print first 20 and last 5 blocks for diagnostics
-    int print_count = std::min((int)result.commands.size(), 20);
-    for (int i = 0; i < print_count; i++) {
-        auto& cmd = result.commands[i];
-        auto& blk = result.blocks[i];
-        printf("# Block %d: %d free bits, %d pop sub-rounds, ",
-               i, blk.free_bits, cmd.pop_subrounds);
-        if (cmd.ec_ops > 0) printf("~2^%.1f EC ops, ", log2((double)cmd.ec_ops));
-        if (cmd.keys_covered > 0) printf("~2^%.1f keys", log2((double)cmd.keys_covered));
+    if (!quiet) {
         printf("\n");
-        printf("  -lock \"%s\" -radiusrange 0:%d -poprange %d:%d\n\n",
-               cmd.lock_string.c_str(), cmd.free_bits, cmd.pop_lo, cmd.pop_hi);
-    }
-    if ((int)result.commands.size() > 25) {
-        printf("  ... (%zu more blocks) ...\n\n", result.commands.size() - 25);
-        for (int i = (int)result.commands.size() - 5; i < (int)result.commands.size(); i++) {
+        printf("==========================================================\n");
+        printf("  SHEKINAH MATRIX DISPATCH SUMMARY\n");
+        printf("==========================================================\n");
+        printf("  Total kernel launches:  %zu\n", result.commands.size());
+        if (result.grand_total_ops > 0)
+            printf("  Total EC operations:    ~2^%.2f\n", log2((double)result.grand_total_ops));
+        if (result.grand_total_keys > 0)
+            printf("  Total keys covered:     ~2^%.2f\n", log2((double)result.grand_total_keys));
+        printf("  Ghost combinations:     ZERO\n");
+        printf("==========================================================\n\n");
+
+        // Print first 20 and last 5 blocks for diagnostics
+        int print_count = std::min((int)result.commands.size(), 20);
+        for (int i = 0; i < print_count; i++) {
             auto& cmd = result.commands[i];
             auto& blk = result.blocks[i];
-            printf("# Block %d: %d free bits, %d pop sub-rounds\n",
+            printf("# Block %d: %d free bits, %d pop sub-rounds, ",
                    i, blk.free_bits, cmd.pop_subrounds);
+            if (cmd.ec_ops > 0) printf("~2^%.1f EC ops, ", log2((double)cmd.ec_ops));
+            if (cmd.keys_covered > 0) printf("~2^%.1f keys", log2((double)cmd.keys_covered));
+            printf("\n");
             printf("  -lock \"%s\" -radiusrange 0:%d -poprange %d:%d\n\n",
                    cmd.lock_string.c_str(), cmd.free_bits, cmd.pop_lo, cmd.pop_hi);
         }
-    }
+        if ((int)result.commands.size() > 25) {
+            printf("  ... (%zu more blocks) ...\n\n", result.commands.size() - 25);
+            for (int i = (int)result.commands.size() - 5; i < (int)result.commands.size(); i++) {
+                auto& cmd = result.commands[i];
+                auto& blk = result.blocks[i];
+                printf("# Block %d: %d free bits, %d pop sub-rounds\n",
+                       i, blk.free_bits, cmd.pop_subrounds);
+                printf("  -lock \"%s\" -radiusrange 0:%d -poprange %d:%d\n\n",
+                       cmd.lock_string.c_str(), cmd.free_bits, cmd.pop_lo, cmd.pop_hi);
+            }
+        }
 
-    fflush(stdout);
+        fflush(stdout);
+    }
     return result;
 }
 
