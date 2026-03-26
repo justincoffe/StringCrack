@@ -2983,7 +2983,7 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
         }
 
         // Coset decomposition
-        int B_top = 14;
+        int B_top = 11;
         if (n <= B_top) B_top = n / 2;
         int L_bits = n - B_top;
 
