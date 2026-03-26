@@ -273,6 +273,9 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
         return;
     }
 
+    // Maximize L1 cache for register spill — hash pipeline benefits
+    cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+
     err = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
     if (err != cudaSuccess) {
         fprintf(stderr, "GPUEngine: %s\n", cudaGetErrorString(err));
