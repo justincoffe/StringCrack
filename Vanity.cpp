@@ -2873,17 +2873,41 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
 
     // ═══════════════════════════════════════════════════════════
     // STEP 1: Run the Shekinah decomposition pipeline
+    // Only GPU[0] prints the full dispatch summary to avoid
+    // 12× duplicate output in multi-GPU setups.
     // ═══════════════════════════════════════════════════════════
     uint128_t corridorA = make_u128(scConfig->shekinahCorridorLo[0], scConfig->shekinahCorridorLo[1]);
     uint128_t corridorB = make_u128(scConfig->shekinahCorridorHi[0], scConfig->shekinahCorridorHi[1]);
 
-    ShekinahPipelineResult pipeline = shekinah_generate_dispatch(
-        corridorA, corridorB,
-        scConfig->puzzleBits,
-        scConfig->popcountMin,
-        scConfig->popcountMax,
-        64  // max GPU free bits
-    );
+    // Suppress per-block diagnostic prints for non-primary GPUs
+    // by redirecting stdout temporarily (the pipeline is pure computation,
+    // produces identical results on all GPUs)
+    ShekinahPipelineResult pipeline;
+    if (sliceId == 0) {
+        pipeline = shekinah_generate_dispatch(
+            corridorA, corridorB,
+            scConfig->puzzleBits,
+            scConfig->popcountMin,
+            scConfig->popcountMax,
+            64  // max GPU free bits
+        );
+    } else {
+        // Suppress output: redirect to /dev/null equivalent
+        // Just run silently — same computation, no prints
+        fflush(stdout);
+        int saved_stdout = dup(fileno(stdout));
+        freopen("/dev/null", "w", stdout);
+        pipeline = shekinah_generate_dispatch(
+            corridorA, corridorB,
+            scConfig->puzzleBits,
+            scConfig->popcountMin,
+            scConfig->popcountMax,
+            64
+        );
+        fflush(stdout);
+        dup2(saved_stdout, fileno(stdout));
+        close(saved_stdout);
+    }
 
     if (pipeline.commands.empty()) {
         printf("[SEPHOLY] GPU[%d] No blocks to process (all dead from popcount pruning)\n", sliceId);
@@ -2919,12 +2943,14 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
         const ShekinahDispatchCommand& cmd = pipeline.commands[blkIdx];
         const ShekinahBlock& blk = pipeline.blocks[blkIdx];
 
-        printf("\n[SEPHOLY] === Block %zu/%zu: %d free bits, pop %d:%d, ",
-               blkIdx + 1, pipeline.commands.size(), cmd.free_bits, cmd.pop_lo, cmd.pop_hi);
-        if (cmd.ec_ops > 0) printf("~2^%.1f EC ops, ", log2((double)cmd.ec_ops));
-        if (cmd.keys_covered > 0) printf("~2^%.1f keys", log2((double)cmd.keys_covered));
-        printf(" ===\n");
-        fflush(stdout);
+        if (sliceId == 0) {
+            printf("\n[SEPHOLY] === Block %zu/%zu: %d free bits, pop %d:%d, ",
+                   blkIdx + 1, pipeline.commands.size(), cmd.free_bits, cmd.pop_lo, cmd.pop_hi);
+            if (cmd.ec_ops > 0) printf("~2^%.1f EC ops, ", log2((double)cmd.ec_ops));
+            if (cmd.keys_covered > 0) printf("~2^%.1f keys", log2((double)cmd.keys_covered));
+            printf(" ===\n");
+            fflush(stdout);
+        }
 
         if (cmd.free_bits <= 0) continue;
 
@@ -3213,9 +3239,11 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
         } // h
 
         grandTotalKeysAllBlocks += blockKeysProcessed;
-        printf("\n[SEPHOLY] Block %zu done: %.2f BK (total: %.2f BK)\n",
-               blkIdx+1, (double)blockKeysProcessed/1e9, (double)grandTotalKeysAllBlocks/1e9);
-        fflush(stdout);
+        if (sliceId == 0) {
+            printf("\n[SEPHOLY] Block %zu done: %.2f BK (total: %.2f BK)\n",
+                   blkIdx+1, (double)blockKeysProcessed/1e9, (double)grandTotalKeysAllBlocks/1e9);
+            fflush(stdout);
+        }
     } // block loop
 
     free(h_combTable);

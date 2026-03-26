@@ -388,12 +388,56 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     }
 
     // =========================================================================
-    // MITM VRAM ENGINE ALLOCATION (SHEKINAH-OPTIMIZED)
-    // Raised to 10M elements to handle C(26,13)=10,400,600
-    // Freed shifted buffers (unused in God Matrix v2) to reclaim ~640 MB
+    // MITM VRAM ENGINE ALLOCATION (VRAM-AWARE)
+    //
+    // Runtime sizing: query free VRAM, reserve 1.5 GB for OS/driver/other
+    // buffers, then allocate MITM tables to fill the remaining space.
+    //
+    // Budget breakdown per element:
+    //   Baby  X+Y: 64 bytes (2 × 32-byte coordinates)
+    //   Giant X+Y: 64 bytes
+    //   Baby  seedpc: 1 byte
+    //   Giant seedpc: 1 byte
+    //   T2 perm:   4 bytes
+    //   Total: 134 bytes per element
+    //
+    // On 16 GB GPU: ~14.5 GB available → ~108M elements max
+    // On 24 GB GPU: ~22.5 GB available → ~167M elements max
+    // Capped at C(27,13)=20,058,300 — beyond that the per-(k_b,k_g)
+    // sub-round tables won't exceed this for practical puzzle sizes.
     // =========================================================================
-    uint64_t max_mitm_elements = 10400600;  // C(26,13) — covers halves up to 26 bits
+    size_t vramFree = 0, vramTotal = 0;
+    cudaMemGetInfo(&vramFree, &vramTotal);
+    
+    // Reserve 1.5 GB for driver, streams, address tables, other allocations
+    size_t vramReserve = (size_t)1536 * 1024 * 1024;
+    size_t vramBudget = (vramFree > vramReserve) ? (vramFree - vramReserve) : (size_t)512 * 1024 * 1024;
+    
+    // Each element costs 134 bytes across all MITM buffers
+    // (baby_X + baby_Y + giant_X + giant_Y + baby_seedpc + giant_seedpc + t2_perm)
+    // = 4*8*4 + 4*8*4 + 1 + 1 + 4 = 64 + 64 + 1 + 1 + 4 = 134 bytes
+    size_t bytes_per_element = 4 * sizeof(uint64_t) * 4 + 2 * sizeof(uint8_t) + sizeof(uint32_t);
+    uint64_t max_mitm_from_vram = vramBudget / bytes_per_element;
+    
+    // Cap at C(27,13) = 20,058,300 — practical maximum for half-sizes up to 27 bits
+    uint64_t max_mitm_cap = 20058300ULL;
+    // Floor at C(25,12) = 5,200,300 — minimum for reasonable MITM
+    uint64_t max_mitm_floor = 5200300ULL;
+    
+    uint64_t max_mitm_elements = max_mitm_from_vram;
+    if (max_mitm_elements > max_mitm_cap) max_mitm_elements = max_mitm_cap;
+    if (max_mitm_elements < max_mitm_floor) max_mitm_elements = max_mitm_floor;
+    
     size_t mitm_bytes = max_mitm_elements * 4 * sizeof(uint64_t); // 32 bytes per coordinate
+    
+    printf("[MITM-VRAM] GPU VRAM: %.1f GB total, %.1f GB free, %.1f GB budget\n",
+           (double)vramTotal / (1024.0*1024.0*1024.0),
+           (double)vramFree / (1024.0*1024.0*1024.0),
+           (double)vramBudget / (1024.0*1024.0*1024.0));
+    printf("[MITM-VRAM] MITM table capacity: %llu elements (%.1f MB per table)\n",
+           (unsigned long long)max_mitm_elements,
+           (double)mitm_bytes / (1024.0*1024.0));
+    fflush(stdout);
 
     cudaMalloc((void**)&d_mitm_baby_X, mitm_bytes);
     cudaMalloc((void**)&d_mitm_baby_Y, mitm_bytes);
@@ -410,12 +454,12 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     // MITM popcount pre-filter arrays (1 byte per table entry)
     cudaMalloc((void**)&d_mitm_baby_seedpc, max_mitm_elements * sizeof(uint8_t));
     cudaMalloc((void**)&d_mitm_giant_seedpc, max_mitm_elements * sizeof(uint8_t));
-    cudaMalloc((void**)&d_mitm_qi_seedpc, 262144 * sizeof(uint8_t));  // Doubled for larger W
+    cudaMalloc((void**)&d_mitm_qi_seedpc, 262144 * sizeof(uint8_t));
 
     // Sorted T2 popcount infrastructure
     cudaMalloc((void**)&d_mitm_t2_perm, max_mitm_elements * sizeof(uint32_t));
 
-    // Allocate space for up to 262K Q_i points (doubled from 131K)
+    // Allocate space for up to 262K Q_i points
     if (cudaMalloc((void**)&d_Qi_points_X, 262144 * 4 * sizeof(uint64_t)) != cudaSuccess) {
         printf("Failed to allocate d_Qi_points_X\n");
     }
