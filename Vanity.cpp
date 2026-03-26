@@ -3062,8 +3062,8 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                     if (max_qi_batch > W) max_qi_batch = W;
 
                     // T2 chunking: target ~4 seconds per kernel at ~14 GK/s
-                    // = 56B candidates per launch for responsive display
-                    uint64_t target_cand = 56000000000ULL;
+                    // = 4B candidates per launch for responsive display
+                    uint64_t target_cand = 4000000000ULL;
                     uint64_t cpl = max_qi_batch * T1_size * T2_size;
                     uint64_t t2_chunk = T2_size;
                     if (cpl > target_cand && T2_size > 1) {
