@@ -232,9 +232,16 @@ __device__ __forceinline__ void mitm_batch_invert_Z(uint64_t Z_buf[][4], uint64_
 }
 
 // =====================================================================================
-// KERNEL 3: THE GOD MATRIX v2
+// KERNEL 3: THE GOD MATRIX v2 — MEMORY COLLIDER
+// Optimized for Shekinah Matrix: the EC precomputation is near-zero cost,
+// so this kernel IS the bottleneck. Every cycle counts.
+// 
+// Tuning for memory-bound workload:
+// - BATCH_SIZE=16: amortize 1 ModInv over 16 candidates (was 8)
+// - launch_bounds(256,2): 512 threads/SM = better latency hiding
+//   for L2 cache misses on T2 table reads
 // =====================================================================================
-__global__ __launch_bounds__(128, 4)
+__global__ __launch_bounds__(256, 2)
 void comp_mitm_god_matrix_v2(
     uint64_t* T1_X, uint64_t* T1_Y, uint64_t T1_size,
     uint64_t* T2_X, uint64_t* T2_Y, uint64_t T2_size,
@@ -246,7 +253,7 @@ void comp_mitm_god_matrix_v2(
     address_t* sAddress, uint32_t* lookup32, uint32_t* out,
     bool t1_is_baby)
 {
-    int blocks_per_qi = (T1_size + 127) / 128;
+    int blocks_per_qi = (T1_size + blockDim.x - 1) / blockDim.x;
     if (blocks_per_qi == 0) blocks_per_qi = 1;
 
     uint64_t qi_local = blockIdx.x / blocks_per_qi;
@@ -333,8 +340,10 @@ void comp_mitm_god_matrix_v2(
         _ModMult(baseY, baseJY, Zcb);
     }
 
-    // STEP 5: Inner loop over T2
-    const int BATCH_SIZE = 8;
+    // STEP 5: Inner loop over T2 — MEMORY COLLIDER HOT PATH
+    // BATCH_SIZE=16: amortize 1 expensive ModInv (~4000 cycles) over 16 candidates
+    // Net savings: 16 individual ModInvs → 1 ModInv + 30 ModMults = ~85% reduction
+    const int BATCH_SIZE = 16;
     __align__(32) uint64_t buf_X[BATCH_SIZE][4], buf_Y[BATCH_SIZE][4], buf_Z[BATCH_SIZE][4];
     __align__(32) uint64_t Zinv_buf[BATCH_SIZE][4];
     __align__(32) uint32_t buf_t2_idx[BATCH_SIZE];
@@ -594,7 +603,9 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
         t1_is_baby = false;
     }
 
-    int blocks_per_qi = (T1_size + 127) / 128;
+    // Use 256 threads/block to match new launch_bounds(256, 2) for memory collider mode
+    const int GOD_MATRIX_TPB = 256;
+    int blocks_per_qi = (T1_size + GOD_MATRIX_TPB - 1) / GOD_MATRIX_TPB;
     if (blocks_per_qi == 0) blocks_per_qi = 1;
     int numBlocks = qi_count * blocks_per_qi;
 
@@ -610,7 +621,7 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
 
     uint8_t* qi_seedpc_offset = d_mitm_qi_seedpc + qi_start;
 
-    comp_mitm_god_matrix_v2<<<numBlocks, 128, 0, streams[s]>>>(
+    comp_mitm_god_matrix_v2<<<numBlocks, GOD_MATRIX_TPB, 0, streams[s]>>>(
         T1_X, T1_Y, T1_size,
         T2_X, T2_Y, T2_size,
         qi_X_offset, qi_Y_offset,

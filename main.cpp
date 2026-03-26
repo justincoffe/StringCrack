@@ -719,6 +719,10 @@ int main(int argc, char* argv[]) {
 			scConfig.useRadius = true;
 			scConfig.useSEP = true;
 			scConfig.enabled = true;
+			// Auto-set center to "0" so -center is not required in Shekinah mode
+			if (strlen(scConfig.centerString) == 0) {
+				strncpy(scConfig.centerString, "0", 255);
+			}
 			a++;
 		}
 		else if (strcmp(argv[a], "-corridorstart") == 0) {

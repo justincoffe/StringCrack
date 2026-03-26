@@ -3041,15 +3041,22 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
 
                     uint64_t T1_size = (baby_size < giant_size) ? baby_size : giant_size;
                     uint64_t T2_size = (baby_size > giant_size) ? baby_size : giant_size;
-                    int blocks_per_qi = (T1_size + 127) / 128;
+                    // Match kernel launch_bounds(256, 2) — 256 threads per block
+                    int blocks_per_qi = (T1_size + 255) / 256;
                     if (blocks_per_qi == 0) blocks_per_qi = 1;
-                    uint64_t max_qi_batch = 10000;
+                    // Shekinah: push max_qi_batch higher to fill GPU
+                    // Limited by CUDA grid dimension (65535 blocks max)
+                    uint64_t max_qi_batch = 50000;
                     if (max_qi_batch * blocks_per_qi > 65535) {
                         max_qi_batch = 65535 / blocks_per_qi;
                         if (max_qi_batch == 0) max_qi_batch = 1;
                     }
+                    // Cap to actual W
+                    if (max_qi_batch > W) max_qi_batch = W;
 
-                    uint64_t target_cand = 34000000000ULL;
+                    // T2 chunking: target ~4 seconds per kernel at ~14 GK/s
+                    // = 56B candidates per launch for responsive display
+                    uint64_t target_cand = 56000000000ULL;
                     uint64_t cpl = max_qi_batch * T1_size * T2_size;
                     uint64_t t2_chunk = T2_size;
                     if (cpl > target_cand && T2_size > 1) {
@@ -3145,12 +3152,12 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                                 if (dt >= 0.5 || lt == 0.0) {
                                     uint64_t gk = 0;
                                     for (int i = 0; i < sliceCount; i++) gk += counters[i];
-                                    double spd = (dt > 0.01) ? (double)(gk - lk) / (dt * 1e6) : 0;
+                                    double spd_gk = (dt > 0.01) ? (double)(gk - lk) / (dt * 1e9) : 0;
                                     lt = ttot; lk = gk;
-                                    printf("[SEPHOLY] Blk %zu/%zu h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.1f MK/s | %.2f BK\r",
+                                    printf("[SEPHOLY] Blk %zu/%zu h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
                                         blkIdx+1, pipeline.commands.size(), h, k1, k_b, k_g,
                                         (unsigned long long)W, (unsigned long long)T1_size,
-                                        (unsigned long long)T2_size, spd, (double)gk/1e9);
+                                        (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
                                     fflush(stdout);
                                 }
                             }
@@ -3221,7 +3228,7 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
            (double)grandTotalKeysAllBlocks/1e9, (double)grandTotalKeysAllBlocks);
     printf("[SEPHOLY] Wall time: %.2f s\n", ttot);
     if (ttot > 0.01)
-        printf("[SEPHOLY] Avg speed: %.1f MK/s\n", (double)grandTotalKeysAllBlocks/(ttot*1e6));
+        printf("[SEPHOLY] Avg speed: %.2f GK/s\n", (double)grandTotalKeysAllBlocks/(ttot*1e9));
     printf("[SEPHOLY] ════════════════════════════════════════════\n\n");
     fflush(stdout);
 

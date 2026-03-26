@@ -388,18 +388,20 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     }
 
     // =========================================================================
-    // MITM VRAM ENGINE ALLOCATION (~1.0 GB Total)
-    // C(25, 12) = 5,200,300 elements maximum per layer
+    // MITM VRAM ENGINE ALLOCATION (SHEKINAH-OPTIMIZED)
+    // Raised to 10M elements to handle C(26,13)=10,400,600
+    // Freed shifted buffers (unused in God Matrix v2) to reclaim ~640 MB
     // =========================================================================
-    uint64_t max_mitm_elements = 5200300;
+    uint64_t max_mitm_elements = 10400600;  // C(26,13) — covers halves up to 26 bits
     size_t mitm_bytes = max_mitm_elements * 4 * sizeof(uint64_t); // 32 bytes per coordinate
 
     cudaMalloc((void**)&d_mitm_baby_X, mitm_bytes);
     cudaMalloc((void**)&d_mitm_baby_Y, mitm_bytes);
     cudaMalloc((void**)&d_mitm_giant_X, mitm_bytes);
     cudaMalloc((void**)&d_mitm_giant_Y, mitm_bytes);
-    cudaMalloc((void**)&d_mitm_baby_shifted_X, mitm_bytes);
-    cudaMalloc((void**)&d_mitm_baby_shifted_Y, mitm_bytes);
+    // Shifted buffers removed — unused in God Matrix v2 pipeline
+    d_mitm_baby_shifted_X = nullptr;
+    d_mitm_baby_shifted_Y = nullptr;
     
     // Allocate space for the 64 G_free points to pass to the builder
     cudaMalloc((void**)&d_mitm_Gfree_X, 64 * 4 * sizeof(uint64_t));
@@ -408,16 +410,16 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     // MITM popcount pre-filter arrays (1 byte per table entry)
     cudaMalloc((void**)&d_mitm_baby_seedpc, max_mitm_elements * sizeof(uint8_t));
     cudaMalloc((void**)&d_mitm_giant_seedpc, max_mitm_elements * sizeof(uint8_t));
-    cudaMalloc((void**)&d_mitm_qi_seedpc, 131072 * sizeof(uint8_t));
+    cudaMalloc((void**)&d_mitm_qi_seedpc, 262144 * sizeof(uint8_t));  // Doubled for larger W
 
     // Sorted T2 popcount infrastructure
     cudaMalloc((void**)&d_mitm_t2_perm, max_mitm_elements * sizeof(uint32_t));
 
-    // Allocate space for up to ~130,000 Q_i points (adjust if W gets larger)
-    if (cudaMalloc((void**)&d_Qi_points_X, 131072 * 4 * sizeof(uint64_t)) != cudaSuccess) {
+    // Allocate space for up to 262K Q_i points (doubled from 131K)
+    if (cudaMalloc((void**)&d_Qi_points_X, 262144 * 4 * sizeof(uint64_t)) != cudaSuccess) {
         printf("Failed to allocate d_Qi_points_X\n");
     }
-    if (cudaMalloc((void**)&d_Qi_points_Y, 131072 * 4 * sizeof(uint64_t)) != cudaSuccess) {
+    if (cudaMalloc((void**)&d_Qi_points_Y, 262144 * 4 * sizeof(uint64_t)) != cudaSuccess) {
         printf("Failed to allocate d_Qi_points_Y\n");
     }
 
