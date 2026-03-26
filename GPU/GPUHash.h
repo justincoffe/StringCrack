@@ -47,12 +47,27 @@ __device__ __constant__ uint32_t K[] =
 #define s1(x) (ROR(x,17) ^ ROR(x,19) ^ (x >> 10))
 
 
-//#define Maj(x,y,z) ((x&y)^(x&z)^(y&z))
-//#define Ch(x,y,z)  ((x&y)^(~x&z))
+// ═══════════════════════════════════════════════════════════════
+// LOP3.b32: Single-cycle 3-input Boolean logic (PTX intrinsic)
+// Replaces 3-4 ALU ops per call with 1 hardware instruction.
+// ═══════════════════════════════════════════════════════════════
 
-// The following functions are equivalent to the above
-#define Maj(x,y,z) ((x & y) | (z & (x | y)))
-#define Ch(x,y,z) (z ^ (x & (y ^ z)))
+// SHA256 Choose: Ch(x,y,z) = (x & y) ^ (~x & z)  — LOP3 opcode 0xCA
+__device__ __forceinline__ uint32_t _lop3_Ch(uint32_t x, uint32_t y, uint32_t z) {
+    uint32_t r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
+}
+
+// SHA256 Majority: Maj(x,y,z) = (x & y) ^ (x & z) ^ (y & z)  — LOP3 opcode 0xE8
+__device__ __forceinline__ uint32_t _lop3_Maj(uint32_t x, uint32_t y, uint32_t z) {
+    uint32_t r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xE8;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
+}
+
+#define Ch(x,y,z)  _lop3_Ch(x,y,z)
+#define Maj(x,y,z) _lop3_Maj(x,y,z)
 
 
 #define S2Round(a, b, c, d, e, f, g, h, k, w) \
@@ -193,11 +208,45 @@ __device__ void RIPEMD160Initialize(uint32_t s[5]) {
 
 #define ROL(x,n) ((x>>(32-n))|(x<<n))
 #define ROL10(x) ((x>>(22))|(x<<10))
-#define f1(x, y, z) (x ^ y ^ z)
-#define f2(x, y, z) ((x & y) | (~x & z))
-#define f3(x, y, z) ((x | ~y) ^ z)
-#define f4(x, y, z) ((x & z) | (~z & y))
-#define f5(x, y, z) (x ^ (y | ~z))
+// ═══════════════════════════════════════════════════════════════
+// RIPEMD160 LOP3.b32 Logic Functions — 1 hardware cycle each
+// ═══════════════════════════════════════════════════════════════
+
+__device__ __forceinline__ uint32_t _lop3_f1(uint32_t x, uint32_t y, uint32_t z) {
+    uint32_t r;
+    asm("lop3.b32 %0, %1, %2, %3, 0x96;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
+}
+
+__device__ __forceinline__ uint32_t _lop3_f2(uint32_t x, uint32_t y, uint32_t z) {
+    uint32_t r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
+}
+
+__device__ __forceinline__ uint32_t _lop3_f3(uint32_t x, uint32_t y, uint32_t z) {
+    uint32_t r;
+    asm("lop3.b32 %0, %1, %2, %3, 0x59;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
+}
+
+__device__ __forceinline__ uint32_t _lop3_f4(uint32_t x, uint32_t y, uint32_t z) {
+    uint32_t r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xE4;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
+}
+
+__device__ __forceinline__ uint32_t _lop3_f5(uint32_t x, uint32_t y, uint32_t z) {
+    uint32_t r;
+    asm("lop3.b32 %0, %1, %2, %3, 0x2D;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
+}
+
+#define f1(x, y, z) _lop3_f1(x, y, z)
+#define f2(x, y, z) _lop3_f2(x, y, z)
+#define f3(x, y, z) _lop3_f3(x, y, z)
+#define f4(x, y, z) _lop3_f4(x, y, z)
+#define f5(x, y, z) _lop3_f5(x, y, z)
 
 #define RPRound(a,b,c,d,e,f,x,k,r) \
   u = a + f + x + k; \
