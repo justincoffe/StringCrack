@@ -770,7 +770,8 @@ void* _FindKeyGPU(void* lpParam) {
 	}
 	// Route to radius mode if enabled
 	else if (p->obj->scConfig && p->obj->scConfig->useRadius) {
-		if (p->obj->scConfig->useRevDoor) {
+		if (p->obj->scConfig->useRevDoor ||
+		    p->obj->scConfig->useMitm) {
 			p->obj->FindKeyGPU_RevDoor(p);
 		} else {
 			p->obj->FindKeyGPU_Radius(p);
@@ -1702,7 +1703,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     else g.SetAddress(usedAddress);
     
     if (!g.SetStringCrackConfig(secp, scConfig)) return;
-    if (!g.ComputeDTable(secp, scConfig)) return;
+    // D-Table is only needed for RevDoor walk kernels (n <= 64).
+    // For n > 64, only MITM runs — skip D-Table entirely.
+    if (scConfig->numFreeBits <= 64) {
+        if (!g.ComputeDTable(secp, scConfig)) return;
+    }
     if (!g.ComputeGfreeTables(secp, scConfig)) return;
     
     int n          = scConfig->numFreeBits;
@@ -1792,7 +1797,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
             
             // Route to MITM if the bottom space is fat enough to justify VRAM allocation.
             // 250,000 is the mathematical crossover where ILP beats Register Caching.
-            if (scConfig->useMitm && L_totalCombs >= 250000) {
+            // For n > 64: ALWAYS use MITM (RevDoor walk can't handle >64 free bits).
+            if (scConfig->useMitm && (L_totalCombs >= 250000 || n > 64)) {
                 route_to_mitm = true;
             }
 
@@ -2034,6 +2040,13 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     } // closes qi_start loop
                     } // closes t2_off loop (T2 chunking)
 
+                continue;
+            }
+
+            // Safety: skip RevDoor walk tiers if n > 64 (D-table not available)
+            if (n > 64) {
+                printf("[SEP7] WARNING: n=%d > 64, skipping RevDoor walk (L_totalCombs=%llu too small for MITM)\n",
+                       n, (unsigned long long)L_totalCombs);
                 continue;
             }
 
@@ -3051,9 +3064,12 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
             printf("[SEPHOLY] Block %zu: reconfigure failed\n", blkIdx);
             continue;
         }
-        if (!g.ComputeDTable(secp, &blockConfig)) {
-            printf("[SEPHOLY] Block %zu: D-table failed\n", blkIdx);
-            continue;
+        // D-Table only needed for RevDoor walks (n <= 64)
+        if (blockConfig.numFreeBits <= 64) {
+            if (!g.ComputeDTable(secp, &blockConfig)) {
+                printf("[SEPHOLY] Block %zu: D-table failed\n", blkIdx);
+                continue;
+            }
         }
         if (!g.ComputeGfreeTables(secp, &blockConfig)) {
             printf("[SEPHOLY] Block %zu: Gfree failed\n", blkIdx);
