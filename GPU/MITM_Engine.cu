@@ -232,17 +232,40 @@ __device__ __forceinline__ void mitm_batch_invert_Z(uint64_t Z_buf[][4], uint64_
 }
 
 // =====================================================================================
-// KERNEL 3: THE GOD MATRIX v2 — MEMORY COLLIDER
-// Optimized for Shekinah Matrix: the EC precomputation is near-zero cost,
-// so this kernel IS the bottleneck. Every cycle counts.
-// 
-// Tuning for memory-bound workload:
-// - BATCH_SIZE=16: amortize 1 ModInv over 16 candidates (was 8)
-// - launch_bounds(256,2): 512 threads/SM = better latency hiding
-//   for L2 cache misses on T2 table reads
+// MITM_Engine_v3 — TWO-PASS MEMORY COLLIDER (Drop-in replacement for v2 kernel)
+//
+// Replace comp_mitm_god_matrix_v2 with comp_mitm_god_matrix_v3.
+// No changes needed to host-side launch code (same parameters minus scratch buffer).
+//
+// Principle: batch 512 inversions per ModInv instead of 16.
+// The prefix chain lives in thread-local stack memory (L1/L2 cached).
+//
+// ModMult-eq per candidate:
+//   v2: 8.7    (batch=16: 5.9 inv + 2.8 affine)
+//   v3: 5.9    (batch=512: 3.1 inv + 2.8 affine)
+//
+// Expected speedup: ~1.48× → 2.94 GK/s → ~4.3 GK/s
 // =====================================================================================
+
+#ifndef MITM_ENGINE_V3_CU
+#define MITM_ENGINE_V3_CU
+
+#include <stdint.h>
+
+// T2 popcount bucket offsets (shared with existing code)
+__device__ __constant__ uint32_t d_t2_pc_offsets[66];
+
+// Reuse existing affine_add_affine_to_jacobian from v2 (defined earlier in compilation unit)
+
+// =====================================================================================
+// Tunable: max prefix chain length per chunk.
+// 512 = same as FixedPaul's GRP_SIZE/2. Proven to work with L1-cached local memory.
+// Memory: 512 × 36 bytes = 18 KB per thread in local memory stack.
+// =====================================================================================
+#define TWOPASS_CHAIN_LEN 512
+
 __global__ __launch_bounds__(256, 2)
-void comp_mitm_god_matrix_v2(
+void comp_mitm_god_matrix_v3(
     uint64_t* T1_X, uint64_t* T1_Y, uint64_t T1_size,
     uint64_t* T2_X, uint64_t* T2_Y, uint64_t T2_size,
     uint64_t* Qi_X, uint64_t* Qi_Y,
@@ -260,74 +283,55 @@ void comp_mitm_god_matrix_v2(
     uint64_t t1_idx = (blockIdx.x % blocks_per_qi) * blockDim.x + threadIdx.x;
 
     if (qi_local >= qi_count || t1_idx >= T1_size) return;
-
     uint64_t qi_idx = qi_start + qi_local;
 
-    // ═══ POPCOUNT-AWARE T2 RANGE (sorted T2 table) ═══
+    // ═══ T2 range computation (identical to v2) ═══
     uint64_t t2_range_start = t2_start;
     uint64_t t2_range_end = t2_end;
 
     bool _use_pcfilter = (d_popcountMin > 0 || d_popcountMax < 256);
     if (_use_pcfilter) {
         int _partial_pc = d_lockedPopcount + (int)Qi_seedpc[qi_local] + (int)T1_seedpc[t1_idx];
-
-        // Compute which T2 seedpc values are valid
         int valid_lo = d_popcountMin - _partial_pc;
         int valid_hi = d_popcountMax - _partial_pc;
-
-        // Clamp to [0, 65)
         if (valid_lo < 0) valid_lo = 0;
         if (valid_hi > 64) valid_hi = 64;
-
-        // If no valid range, kill thread entirely
         if (valid_lo > 64 || valid_hi < 0 || valid_lo > valid_hi) return;
 
-        // Look up contiguous range in sorted T2 table
         uint32_t bucket_start = d_t2_pc_offsets[valid_lo];
         uint32_t bucket_end = d_t2_pc_offsets[valid_hi + 1];
-
-        // Intersect with the T2 chunk range (from t2_start/t2_end)
         t2_range_start = (t2_start > bucket_start) ? t2_start : bucket_start;
         t2_range_end = (t2_end < bucket_end) ? t2_end : bucket_end;
-
-        // Nothing to do
         if (t2_range_start >= t2_range_end) return;
     }
 
-    // STEP 1: Load precomputed Q_i point (affine)
-    __align__(32) uint64_t qiX[4];
-    __align__(32) uint64_t qiY[4];
-    qiX[0] = __ldg(&Qi_X[qi_local * 4 + 0]); qiX[1] = __ldg(&Qi_X[qi_local * 4 + 1]);
-    qiX[2] = __ldg(&Qi_X[qi_local * 4 + 2]); qiX[3] = __ldg(&Qi_X[qi_local * 4 + 3]);
-    qiY[0] = __ldg(&Qi_Y[qi_local * 4 + 0]); qiY[1] = __ldg(&Qi_Y[qi_local * 4 + 1]);
-    qiY[2] = __ldg(&Qi_Y[qi_local * 4 + 2]); qiY[3] = __ldg(&Qi_Y[qi_local * 4 + 3]);
+    // ═══ Load Q_i + T1, compute base point (identical to v2) ═══
+    __align__(32) uint64_t qiX[4], qiY[4];
+    qiX[0] = __ldg(&Qi_X[qi_local*4+0]); qiX[1] = __ldg(&Qi_X[qi_local*4+1]);
+    qiX[2] = __ldg(&Qi_X[qi_local*4+2]); qiX[3] = __ldg(&Qi_X[qi_local*4+3]);
+    qiY[0] = __ldg(&Qi_Y[qi_local*4+0]); qiY[1] = __ldg(&Qi_Y[qi_local*4+1]);
+    qiY[2] = __ldg(&Qi_Y[qi_local*4+2]); qiY[3] = __ldg(&Qi_Y[qi_local*4+3]);
 
-    // STEP 2: Load T1[t1_idx] point (affine)
-    __align__(32) uint64_t t1X[4];
-    __align__(32) uint64_t t1Y[4];
-    t1X[0] = __ldg(&T1_X[t1_idx * 4 + 0]); t1X[1] = __ldg(&T1_X[t1_idx * 4 + 1]);
-    t1X[2] = __ldg(&T1_X[t1_idx * 4 + 2]); t1X[3] = __ldg(&T1_X[t1_idx * 4 + 3]);
-    t1Y[0] = __ldg(&T1_Y[t1_idx * 4 + 0]); t1Y[1] = __ldg(&T1_Y[t1_idx * 4 + 1]);
-    t1Y[2] = __ldg(&T1_Y[t1_idx * 4 + 2]); t1Y[3] = __ldg(&T1_Y[t1_idx * 4 + 3]);
+    __align__(32) uint64_t t1X[4], t1Y[4];
+    t1X[0] = __ldg(&T1_X[t1_idx*4+0]); t1X[1] = __ldg(&T1_X[t1_idx*4+1]);
+    t1X[2] = __ldg(&T1_X[t1_idx*4+2]); t1X[3] = __ldg(&T1_X[t1_idx*4+3]);
+    t1Y[0] = __ldg(&T1_Y[t1_idx*4+0]); t1Y[1] = __ldg(&T1_Y[t1_idx*4+1]);
+    t1Y[2] = __ldg(&T1_Y[t1_idx*4+2]); t1Y[3] = __ldg(&T1_Y[t1_idx*4+3]);
 
-    // STEP 3: Compute base = Q_i + T1
     __align__(32) uint64_t baseJX[4], baseJY[4], baseJZ[4];
-
-    bool qi_zero = (qiX[0] == 0 && qiX[1] == 0 && qiX[2] == 0 && qiX[3] == 0);
-    bool t1_zero = (t1X[0] == 0 && t1X[1] == 0 && t1X[2] == 0 && t1X[3] == 0);
-
+    bool qi_zero = (qiX[0]==0 && qiX[1]==0 && qiX[2]==0 && qiX[3]==0);
+    bool t1_zero = (t1X[0]==0 && t1X[1]==0 && t1X[2]==0 && t1X[3]==0);
     if (qi_zero && t1_zero) return;
     if (qi_zero) {
         Load256(baseJX, t1X); Load256(baseJY, t1Y);
-        baseJZ[0] = 1; baseJZ[1] = 0; baseJZ[2] = 0; baseJZ[3] = 0;
+        baseJZ[0]=1; baseJZ[1]=0; baseJZ[2]=0; baseJZ[3]=0;
     } else if (t1_zero) {
         Load256(baseJX, qiX); Load256(baseJY, qiY);
-        baseJZ[0] = 1; baseJZ[1] = 0; baseJZ[2] = 0; baseJZ[3] = 0;
+        baseJZ[0]=1; baseJZ[1]=0; baseJZ[2]=0; baseJZ[3]=0;
     } else {
         affine_add_affine_to_jacobian(qiX, qiY, t1X, t1Y, baseJX, baseJY, baseJZ);
     }
 
-    // STEP 4: Convert base to affine (1 ModInv)
     __align__(32) uint64_t baseX[4], baseY[4];
     {
         __align__(32) uint64_t Zinv[5];
@@ -340,102 +344,176 @@ void comp_mitm_god_matrix_v2(
         _ModMult(baseY, baseJY, Zcb);
     }
 
-    // STEP 5: Inner loop over T2 — PURE AFFINE BATCH INVERSION
-    // Buffer raw dx = (t2X - baseX) differences, batch-invert them,
-    // then compute affine addition directly. Eliminates the Jacobian
-    // round-trip: 8 ModMult/candidate instead of 15.
+    // ═══════════════════════════════════════════════════════════════
+    // LOCAL MEMORY ARRAYS
+    // 512 × 32 bytes (prefix) + 512 × 4 bytes (indices) = 18 KB
+    // Same footprint as FixedPaul's subp[512][4] = 16 KB.
+    // Compiler places these in L1-cached local memory (stack frame).
+    // ═══════════════════════════════════════════════════════════════
+    uint64_t chain_prefix[TWOPASS_CHAIN_LEN][4]; // cumulative dx products
+    uint32_t chain_t2idx[TWOPASS_CHAIN_LEN];     // T2 table indices
 
-    const int BATCH_SIZE = 16;
-    __align__(32) uint64_t buf_dx[BATCH_SIZE][4];      // x2 - x1 (to be batch-inverted)
-    __align__(32) uint64_t buf_t2X[BATCH_SIZE][4];     // saved t2 X for affine formula
-    __align__(32) uint64_t buf_t2Y[BATCH_SIZE][4];     // saved t2 Y for affine formula
-    __align__(32) uint64_t inv_dx[BATCH_SIZE][4];      // batch-inverted dx values
-    __align__(32) uint32_t buf_t2_idx[BATCH_SIZE];
-    int batch_count = 0;
+    // ═══════════════════════════════════════════════════════════════
+    // OUTER LOOP: process T2 in chunks of TWOPASS_CHAIN_LEN
+    // ═══════════════════════════════════════════════════════════════
+    uint64_t t2_cursor = t2_range_start;
 
-    for (uint64_t t2_idx = t2_range_start; t2_idx < t2_range_end; t2_idx++) {
+    while (t2_cursor < t2_range_end) {
 
-        __align__(32) uint64_t t2X[4];
-        __align__(32) uint64_t t2Y[4];
-        t2X[0] = __ldg(&T2_X[t2_idx * 4 + 0]); t2X[1] = __ldg(&T2_X[t2_idx * 4 + 1]);
-        t2X[2] = __ldg(&T2_X[t2_idx * 4 + 2]); t2X[3] = __ldg(&T2_X[t2_idx * 4 + 3]);
-        t2Y[0] = __ldg(&T2_Y[t2_idx * 4 + 0]); t2Y[1] = __ldg(&T2_Y[t2_idx * 4 + 1]);
-        t2Y[2] = __ldg(&T2_Y[t2_idx * 4 + 2]); t2Y[3] = __ldg(&T2_Y[t2_idx * 4 + 3]);
+        // ──────────────────────────────────────────────
+        // PASS 1: FORWARD — accumulate prefix products
+        // Cost: 1 ModMult per valid T2 entry
+        // ──────────────────────────────────────────────
+        __align__(32) uint64_t running[4];
+        int count = 0;
 
-        if (t2X[0] == 0 && t2X[1] == 0 && t2X[2] == 0 && t2X[3] == 0) continue;
+        for (uint64_t t2_idx = t2_cursor;
+             t2_idx < t2_range_end && count < TWOPASS_CHAIN_LEN;
+             t2_idx++)
+        {
+            __align__(32) uint64_t t2X[4];
+            t2X[0] = __ldg(&T2_X[t2_idx*4+0]);
+            t2X[1] = __ldg(&T2_X[t2_idx*4+1]);
+            t2X[2] = __ldg(&T2_X[t2_idx*4+2]);
+            t2X[3] = __ldg(&T2_X[t2_idx*4+3]);
 
-        // Buffer dx = t2X - baseX (the value to be batch-inverted)
-        ModSub256(buf_dx[batch_count], t2X, baseX);
+            // Skip zero entries
+            if (t2X[0]==0 && t2X[1]==0 && t2X[2]==0 && t2X[3]==0) continue;
 
-        // Save t2 coordinates for the affine formula after inversion
-        Load256(buf_t2X[batch_count], t2X);
-        Load256(buf_t2Y[batch_count], t2Y);
-        buf_t2_idx[batch_count] = (uint32_t)t2_idx;
-        batch_count++;
+            // dx = t2X - baseX
+            __align__(32) uint64_t dx[4];
+            ModSub256(dx, t2X, baseX);
 
-        if (batch_count >= BATCH_SIZE || t2_idx == t2_range_end - 1) {
+            if (count == 0) {
+                Load256(running, dx);
+            } else {
+                _ModMult(running, running, dx);
+            }
 
-            // Batch-invert all dx values: 1 ModInv + (n-1) prefix/suffix ModMults
-            mitm_batch_invert_Z<BATCH_SIZE>(buf_dx, inv_dx, batch_count);
+            // Store to local memory
+            Load256(chain_prefix[count], running);
+            chain_t2idx[count] = (uint32_t)t2_idx;
+            count++;
 
-            for (int i = 0; i < batch_count; i++) {
-                // Pure affine addition: P3 = base + T2[i]
-                // lambda = (t2Y - baseY) * (t2X - baseX)^(-1)
-                __align__(32) uint64_t dy[4], lambda[4], lambda_sq[4];
-                __align__(32) uint64_t x3[4], y3[4], tmp[4];
+            t2_cursor = t2_idx + 1;
+        }
 
-                ModSub256(dy, buf_t2Y[i], baseY);       // dy = t2Y - baseY
-                _ModMult(lambda, dy, inv_dx[i]);         // lambda = dy * inv_dx  [1 ModMult]
-                _ModSqr(lambda_sq, lambda);              // lambda² [1 ModSqr]
+        // If no valid entries in this chunk, we've exhausted T2
+        if (count == 0) break;
 
-                // x3 = lambda² - baseX - t2X
-                ModSub256(tmp, lambda_sq, baseX);
-                ModSub256(x3, tmp, buf_t2X[i]);
+        // ──────────────────────────────────────────────
+        // SINGLE MODINV on the final product
+        // Cost: ~50 ModMult-eq, amortized over `count`
+        // At count=512: 50/512 = 0.098 ModMult/candidate
+        // ──────────────────────────────────────────────
+        __align__(32) uint64_t total_inv[5];
+        Load256(total_inv, running);
+        total_inv[4] = 0;
+        _ModInv(total_inv);
 
-                // y3 = lambda * (baseX - x3) - baseY
-                ModSub256(tmp, baseX, x3);
-                _ModMult(y3, lambda, tmp);               // [1 ModMult]
-                ModSub256(y3, y3, baseY);
+        // ──────────────────────────────────────────────
+        // PASS 2: BACKWARD — extract, add, hash
+        //
+        // For each entry i (from last to first):
+        //   dx_inv[i] = prefix[i-1] * total_inv    [1 ModMult]
+        //   total_inv *= dx[i]                       [1 ModMult]
+        //   lambda = dy * dx_inv                     [1 ModMult]
+        //   lambda^2                                 [1 ModSqr]
+        //   y3_partial = lambda * (baseX - x3)       [1 ModMult]
+        //   parity = y3_partial[0] & 1 after ModSub  [FREE]
+        //   hash + check                             [SHA256 + RIPEMD160]
+        //
+        // Total per candidate: 2 + 1 + 0.8 + 1 = 4.8 ModMult-eq
+        //                    + pass 1's 1.0 = 5.8 total
+        // ──────────────────────────────────────────────
+        for (int i = count - 1; i >= 0; i--) {
 
-                // Hash the result (x3 is the public key X coordinate)
-                __align__(32) uint32_t hash[5];
-                uint8_t isOdd = (uint8_t)(y3[0] & 1);
-                _GetHash160Comp(x3, isOdd, (uint8_t*)hash);
+            // Extract individual dx^-1
+            __align__(32) uint64_t dx_inv[4];
+            if (i == 0) {
+                Load256(dx_inv, total_inv);
+            } else {
+                // dx_inv[i] = prefix[i-1] * total_inv
+                _ModMult(dx_inv, chain_prefix[i-1], total_inv);
+            }
 
-                uint32_t pr = hash[0] & 0xFFFF;
-                if (sAddress[pr] != 0) {
-                    bool reportHit = false;
-                    if (lookup32 != NULL) {
-                        uint32_t offset = lookup32[pr];
-                        uint16_t count = sAddress[pr];
-                        uint32_t la = hash[0];
-                        for (uint16_t c = 0; c < count; c++) {
-                            if (lookup32[offset + c] == la) { reportHit = true; break; }
-                        }
-                    } else {
-                        reportHit = true;
+            // Re-load T2 point from VRAM (hits L2 cache since pass 1 just read it)
+            uint32_t t2_idx = chain_t2idx[i];
+            __align__(32) uint64_t t2X[4], t2Y[4];
+            t2X[0] = __ldg(&T2_X[t2_idx*4+0]);
+            t2X[1] = __ldg(&T2_X[t2_idx*4+1]);
+            t2X[2] = __ldg(&T2_X[t2_idx*4+2]);
+            t2X[3] = __ldg(&T2_X[t2_idx*4+3]);
+            t2Y[0] = __ldg(&T2_Y[t2_idx*4+0]);
+            t2Y[1] = __ldg(&T2_Y[t2_idx*4+1]);
+            t2Y[2] = __ldg(&T2_Y[t2_idx*4+2]);
+            t2Y[3] = __ldg(&T2_Y[t2_idx*4+3]);
+
+            // Update running inverse for next (earlier) entry
+            if (i > 0) {
+                __align__(32) uint64_t dx_re[4];
+                ModSub256(dx_re, t2X, baseX);
+                __align__(32) uint64_t new_inv[4];
+                _ModMult(new_inv, total_inv, dx_re);
+                Load256(total_inv, new_inv);
+            }
+
+            // ═══ AFFINE ADDITION: result = base + T2[i] ═══
+            __align__(32) uint64_t dy[4], lambda[4], lambda_sq[4];
+            __align__(32) uint64_t x3[4], y3p[4], tmp[4];
+
+            ModSub256(dy, t2Y, baseY);
+            _ModMult(lambda, dy, dx_inv);
+            _ModSqr(lambda_sq, lambda);
+
+            // x3 = lambda^2 - baseX - t2X
+            ModSub256(tmp, lambda_sq, baseX);
+            ModSub256(x3, tmp, t2X);
+
+            // y3 = lambda * (baseX - x3) - baseY  
+            ModSub256(tmp, baseX, x3);
+            _ModMult(y3p, lambda, tmp);
+            ModSub256(y3p, y3p, baseY);
+            uint8_t isOdd = (uint8_t)(y3p[0] & 1);
+
+            // ═══ HASH AND CHECK (identical to v2) ═══
+            __align__(32) uint32_t hash[5];
+            _GetHash160Comp(x3, isOdd, (uint8_t*)hash);
+
+            uint32_t pr = hash[0] & 0xFFFF;
+            if (sAddress[pr] != 0) {
+                bool reportHit = false;
+                if (lookup32 != NULL) {
+                    uint32_t offset = lookup32[pr];
+                    uint16_t cnt = sAddress[pr];
+                    uint32_t la = hash[0];
+                    for (uint16_t c = 0; c < cnt; c++) {
+                        if (lookup32[offset + c] == la) { reportHit = true; break; }
                     }
-                    if (reportHit) {
-                        int id = atomicAdd(&out[0], 1);
-                        if (id < 256) {
-                            int off = 1 + (id * 8);
-                            uint32_t raw_t2 = buf_t2_idx[i];
-                            uint32_t orig_t2 = T2_perm[raw_t2];
-                            uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : orig_t2;
-                            uint32_t g_idx = t1_is_baby ? orig_t2 : (uint32_t)t1_idx;
-                            out[off + 0] = (uint32_t)qi_idx;
-                            out[off + 1] = g_idx;
-                            out[off + 2] = b_idx;
-                            out[off + 3] = hash[0]; out[off + 4] = hash[1];
-                            out[off + 5] = hash[2]; out[off + 6] = hash[3]; out[off + 7] = hash[4];
-                        }
+                } else {
+                    reportHit = true;
+                }
+                if (reportHit) {
+                    int id = atomicAdd(&out[0], 1);
+                    if (id < 256) {
+                        int off = 1 + (id * 8);
+                        uint32_t orig_t2 = T2_perm[t2_idx];
+                        uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : orig_t2;
+                        uint32_t g_idx = t1_is_baby ? orig_t2 : (uint32_t)t1_idx;
+                        out[off+0] = (uint32_t)qi_idx;
+                        out[off+1] = g_idx;
+                        out[off+2] = b_idx;
+                        out[off+3] = hash[0]; out[off+4] = hash[1];
+                        out[off+5] = hash[2]; out[off+6] = hash[3];
+                        out[off+7] = hash[4];
                     }
                 }
             }
-            batch_count = 0;
         }
-    }
+    } // end while chunks
 }
+
+#endif // MITM_ENGINE_V3_CU
 
 // =====================================================================================
 // HOST LAUNCHERS
@@ -639,7 +717,7 @@ void GPUEngine::LaunchMITMGodMatrixAsync(
 
     uint8_t* qi_seedpc_offset = d_mitm_qi_seedpc + qi_start;
 
-    comp_mitm_god_matrix_v2<<<numBlocks, GOD_MATRIX_TPB, 0, streams[s]>>>(
+    comp_mitm_god_matrix_v3<<<numBlocks, GOD_MATRIX_TPB, 0, streams[s]>>>(
         T1_X, T1_Y, T1_size,
         T2_X, T2_Y, T2_size,
         qi_X_offset, qi_Y_offset,
