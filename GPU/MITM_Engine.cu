@@ -250,10 +250,7 @@ __device__ __forceinline__ void mitm_batch_invert_Z(uint64_t Z_buf[][4], uint64_
 #ifndef MITM_ENGINE_V3_CU
 #define MITM_ENGINE_V3_CU
 
-#include <stdint.h>
-
-// T2 popcount bucket offsets (shared with existing code)
-__device__ __constant__ uint32_t d_t2_pc_offsets[66];
+// T2 popcount bucket offsets already declared at line 16 (shared with existing code)
 
 // Reuse existing affine_add_affine_to_jacobian from v2 (defined earlier in compilation unit)
 
