@@ -101,7 +101,8 @@ typedef struct {
     char centerString[256];
     uint64_t targetSeedLo;
     uint64_t targetSeedHi;
-    uint64_t seedMaskLo;        // Mask for valid seed bits
+    uint64_t seedMaskLo;        // Mask for valid seed bits (lower 64)
+    uint64_t seedMaskHi;        // Mask for valid seed bits (upper bits, >64 free bits)
     int sepMin;
     int sepMax;
     

@@ -28,6 +28,85 @@
 
 using namespace std;
 
+// ─── 128-bit seed helpers for >64 free bits ───
+static inline uint64_t extract_seed_slice(uint64_t seedLo, uint64_t seedHi,
+                                           int lo_bit, int width) {
+    uint64_t shifted_lo, shifted_hi;
+    if (lo_bit == 0) {
+        shifted_lo = seedLo;
+        shifted_hi = seedHi;
+    } else if (lo_bit < 64) {
+        shifted_lo = (seedLo >> lo_bit) | (seedHi << (64 - lo_bit));
+        shifted_hi = seedHi >> lo_bit;
+    } else {
+        shifted_lo = seedHi >> (lo_bit - 64);
+        shifted_hi = 0;
+    }
+    if (width >= 64) return shifted_lo;
+    return shifted_lo & ((1ULL << width) - 1ULL);
+}
+
+static inline void assemble_full_mask_128(
+    uint64_t baby_lo, uint64_t giant_lo, uint64_t qi_lo,
+    int L_baby, int L_giant, int L_bits, int B_top,
+    uint64_t& out_lo, uint64_t& out_hi)
+{
+    out_lo = baby_lo;
+    out_hi = 0;
+
+    if (L_baby < 64) {
+        out_lo |= (giant_lo << L_baby);
+        if (L_baby > 0)
+            out_hi |= (giant_lo >> (64 - L_baby));
+    } else {
+        out_hi |= (giant_lo << (L_baby - 64));
+    }
+
+    if (L_bits < 64) {
+        out_lo |= (qi_lo << L_bits);
+        if (L_bits > 0)
+            out_hi |= (qi_lo >> (64 - L_bits));
+    } else {
+        out_hi |= (qi_lo << (L_bits - 64));
+    }
+}
+
+static inline void reconstruct_key_128(
+    uint64_t full_mask_lo, uint64_t full_mask_hi,
+    uint64_t centerLo, uint64_t centerHi,
+    int n_free, const int* freeBitPositions,
+    const uint64_t lockVals[4],
+    uint64_t fk_out[4])
+{
+    uint64_t seed_lo = full_mask_lo ^ centerLo;
+    uint64_t seed_hi = full_mask_hi ^ centerHi;
+
+    if (n_free < 64) {
+        seed_lo &= ((1ULL << n_free) - 1ULL);
+        seed_hi = 0;
+    } else if (n_free < 128) {
+        seed_hi &= ((1ULL << (n_free - 64)) - 1ULL);
+    }
+
+    fk_out[0] = lockVals[0];
+    fk_out[1] = lockVals[1];
+    fk_out[2] = lockVals[2];
+    fk_out[3] = lockVals[3];
+
+    for (int fb = 0; fb < n_free; fb++) {
+        uint64_t bit;
+        if (fb < 64)
+            bit = (seed_lo >> fb) & 1ULL;
+        else
+            bit = (seed_hi >> (fb - 64)) & 1ULL;
+
+        if (bit) {
+            int pos = freeBitPositions[fb];
+            fk_out[pos >> 6] |= (1ULL << (pos & 63));
+        }
+    }
+}
+
 //Point Gn[GRP_SIZE / 2];
 //Point _2Gn;
 
@@ -1746,7 +1825,9 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                 // ─── Precompute Q_i points for this k1 ───
                 // Built once, reused across all (k_b, k_g) splits for this k1
                 // Compute qi center slice: bits [L_bits, L_bits+B_top-1] of targetSeedLo
-                uint64_t qi_center_slice = (scConfig->targetSeedLo >> L_bits) & ((B_top < 64) ? ((1ULL << B_top) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+                uint64_t qi_center_slice = extract_seed_slice(
+                    scConfig->targetSeedLo, scConfig->targetSeedHi,
+                    L_bits, B_top);
 
                 g.BuildQiPoints(
                     P_locked.x.bits64[0], P_locked.x.bits64[1],
@@ -1856,22 +1937,17 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                                 cpu_unrank_combination(actual_qi, B_top, k1,
                                     qi_lo, qi_hi, h_combTable, tableK);
  
-                                uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
-                                uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-                                uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
- 
-                                uint64_t finalKey[4] = {
-                                    scConfig->lockVals[0], scConfig->lockVals[1],
-                                    scConfig->lockVals[2], scConfig->lockVals[3]
-                                };
-                                for (int fb = 0; fb < n && fb < 64; fb++) {
-                                    if (seed_lo_final & 1ULL) {
-                                        int pos = scConfig->freeBitPositions[fb];
-                                        finalKey[pos >> 6] |= (1ULL << (pos & 63));
-                                    }
-                                    seed_lo_final >>= 1;
-                                }
- 
+                                uint64_t full_mask_lo, full_mask_hi;
+                                assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
+                                    L_baby, L_giant, L_bits, B_top,
+                                    full_mask_lo, full_mask_hi);
+
+                                uint64_t finalKey[4];
+                                reconstruct_key_128(full_mask_lo, full_mask_hi,
+                                    scConfig->targetSeedLo, scConfig->targetSeedHi,
+                                    n, scConfig->freeBitPositions,
+                                    scConfig->lockVals, finalKey);
+
                                 Int k; k.SetInt32(0);
                                 k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
                                 k.bits64[2] = finalKey[2]; k.bits64[3] = finalKey[3];
@@ -1931,21 +2007,16 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                             cpu_unrank_combination(actual_qi, B_top, k1,
                                 qi_lo, qi_hi, h_combTable, tableK);
 
-                            uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
-                            uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-                            uint64_t seed_lo_final = (full_mask ^ scConfig->targetSeedLo) & seedMaskLo;
+                            uint64_t full_mask_lo, full_mask_hi;
+                            assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
+                                L_baby, L_giant, L_bits, B_top,
+                                full_mask_lo, full_mask_hi);
 
-                            uint64_t finalKey[4] = {
-                                scConfig->lockVals[0], scConfig->lockVals[1],
-                                scConfig->lockVals[2], scConfig->lockVals[3]
-                            };
-                            for (int fb = 0; fb < n && fb < 64; fb++) {
-                                if (seed_lo_final & 1ULL) {
-                                    int pos = scConfig->freeBitPositions[fb];
-                                    finalKey[pos >> 6] |= (1ULL << (pos & 63));
-                                }
-                                seed_lo_final >>= 1;
-                            }
+                            uint64_t finalKey[4];
+                            reconstruct_key_128(full_mask_lo, full_mask_hi,
+                                scConfig->targetSeedLo, scConfig->targetSeedHi,
+                                n, scConfig->freeBitPositions,
+                                scConfig->lockVals, finalKey);
 
                             Int k; k.SetInt32(0);
                             k.bits64[0] = finalKey[0]; k.bits64[1] = finalKey[1];
@@ -2964,9 +3035,16 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
         }
 
         // The center in Shekinah mode is all-zeros (base_key IS the center)
+        // For Hamming sphere mode: center is the model prediction's free bits
         blockConfig.targetSeedLo = 0;
         blockConfig.targetSeedHi = 0;
-        blockConfig.seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+        if (n <= 64) {
+            blockConfig.seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+            blockConfig.seedMaskHi = 0;
+        } else {
+            blockConfig.seedMaskLo = 0xFFFFFFFFFFFFFFFFULL;
+            blockConfig.seedMaskHi = (1ULL << (n - 64)) - 1ULL;
+        }
 
         // Upload to GPU
         if (!g.ReconfigureForShekinahBlock(secp, &blockConfig)) {
@@ -3013,8 +3091,9 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                 lockedInt.bits64[2] = lockedKey[2]; lockedInt.bits64[3] = lockedKey[3];
                 Point P_locked = secp->ComputePublicKey(&lockedInt);
 
-                uint64_t qi_center_slice = (blockConfig.targetSeedLo >> L_bits) &
-                    ((B_top < 64) ? ((1ULL << B_top) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+                uint64_t qi_center_slice = extract_seed_slice(
+                    blockConfig.targetSeedLo, blockConfig.targetSeedHi,
+                    L_bits, B_top);
 
                 g.BuildQiPoints(
                     P_locked.x.bits64[0], P_locked.x.bits64[1],
@@ -3117,22 +3196,16 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                                     cpu_unrank_combination(it.thId, B_top, k1,
                                         qi_lo, qi_hi, h_combTable, tableK);
 
-                                    uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
-                                    uint64_t seedMask = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-                                    uint64_t seed_final = (full_mask ^ blockConfig.targetSeedLo) & seedMask;
+                                    uint64_t full_mask_lo, full_mask_hi;
+                                    assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
+                                        L_baby, L_giant, L_bits, B_top,
+                                        full_mask_lo, full_mask_hi);
 
-                                    uint64_t fk[4] = {
-                                        blockConfig.lockVals[0], blockConfig.lockVals[1],
-                                        blockConfig.lockVals[2], blockConfig.lockVals[3]
-                                    };
-                                    uint64_t stmp = seed_final;
-                                    for (int fb = 0; fb < n && fb < 64; fb++) {
-                                        if (stmp & 1ULL) {
-                                            int pos = blockConfig.freeBitPositions[fb];
-                                            fk[pos >> 6] |= (1ULL << (pos & 63));
-                                        }
-                                        stmp >>= 1;
-                                    }
+                                    uint64_t fk[4];
+                                    reconstruct_key_128(full_mask_lo, full_mask_hi,
+                                        blockConfig.targetSeedLo, blockConfig.targetSeedHi,
+                                        n, blockConfig.freeBitPositions,
+                                        blockConfig.lockVals, fk);
 
                                     Int pk; pk.SetInt32(0);
                                     pk.bits64[0] = fk[0]; pk.bits64[1] = fk[1];
@@ -3187,22 +3260,16 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                             cpu_unrank_combination(it.thId, B_top, k1,
                                 qi_lo, qi_hi, h_combTable, tableK);
 
-                            uint64_t full_mask = (qi_lo << L_bits) | baby_lo | (giant_lo << L_baby);
-                            uint64_t seedMask = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-                            uint64_t seed_final = (full_mask ^ blockConfig.targetSeedLo) & seedMask;
+                            uint64_t full_mask_lo, full_mask_hi;
+                            assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
+                                L_baby, L_giant, L_bits, B_top,
+                                full_mask_lo, full_mask_hi);
 
-                            uint64_t fk[4] = {
-                                blockConfig.lockVals[0], blockConfig.lockVals[1],
-                                blockConfig.lockVals[2], blockConfig.lockVals[3]
-                            };
-                            uint64_t stmp = seed_final;
-                            for (int fb = 0; fb < n && fb < 64; fb++) {
-                                if (stmp & 1ULL) {
-                                    int pos = blockConfig.freeBitPositions[fb];
-                                    fk[pos >> 6] |= (1ULL << (pos & 63));
-                                }
-                                stmp >>= 1;
-                            }
+                            uint64_t fk[4];
+                            reconstruct_key_128(full_mask_lo, full_mask_hi,
+                                blockConfig.targetSeedLo, blockConfig.targetSeedHi,
+                                n, blockConfig.freeBitPositions,
+                                blockConfig.lockVals, fk);
 
                             Int pk; pk.SetInt32(0);
                             pk.bits64[0] = fk[0]; pk.bits64[1] = fk[1];

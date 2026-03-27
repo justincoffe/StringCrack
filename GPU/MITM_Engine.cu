@@ -568,8 +568,21 @@ bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
     if (giant_blocks < 1) giant_blocks = 1;
 
     // Extract center bit slices for popcount computation
-    uint64_t baby_center_slice = config->targetSeedLo & ((L_baby < 64) ? ((1ULL << L_baby) - 1) : 0xFFFFFFFFFFFFFFFFULL);
-    uint64_t giant_center_slice = (config->targetSeedLo >> L_baby) & ((L_giant < 64) ? ((1ULL << L_giant) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+    uint64_t baby_center_slice;
+    if (L_baby <= 64) {
+        baby_center_slice = config->targetSeedLo & ((L_baby < 64) ? ((1ULL << L_baby) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+    } else {
+        baby_center_slice = config->targetSeedLo;
+    }
+
+    uint64_t giant_center_slice;
+    if (L_baby < 64) {
+        uint64_t shifted = (config->targetSeedLo >> L_baby) | (config->targetSeedHi << (64 - L_baby));
+        giant_center_slice = shifted & ((L_giant < 64) ? ((1ULL << L_giant) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+    } else {
+        uint64_t shifted = config->targetSeedHi >> (L_baby - 64);
+        giant_center_slice = shifted & ((L_giant < 64) ? ((1ULL << L_giant) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+    }
 
     comp_build_mitm_table<<<baby_blocks, tpb>>>(
         L_baby, k_baby, 0,
