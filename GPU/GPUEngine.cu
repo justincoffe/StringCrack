@@ -450,9 +450,9 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound, int smMultiplier) {
     d_mitm_baby_shifted_X = nullptr;
     d_mitm_baby_shifted_Y = nullptr;
     
-    // Allocate space for the 64 G_free points to pass to the builder
-    cudaMalloc((void**)&d_mitm_Gfree_X, 64 * 4 * sizeof(uint64_t));
-    cudaMalloc((void**)&d_mitm_Gfree_Y, 64 * 4 * sizeof(uint64_t));
+    // Allocate space for G_free points (up to 128 to support >64 free bits)
+    cudaMalloc((void**)&d_mitm_Gfree_X, 128 * 4 * sizeof(uint64_t));
+    cudaMalloc((void**)&d_mitm_Gfree_Y, 128 * 4 * sizeof(uint64_t));
 
     // MITM popcount pre-filter arrays (1 byte per table entry)
     cudaMalloc((void**)&d_mitm_baby_seedpc, max_mitm_elements * sizeof(uint8_t));
