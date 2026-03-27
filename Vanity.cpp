@@ -1716,8 +1716,18 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     if (maxRadius > n) maxRadius = n;
     
     // ─── COSET-DELTA SETUP ───
-    int B_top = 14;  // THE VOLUME DOMINATION LIMIT
-    if (n <= B_top) B_top = n / 2;
+    // Adaptive B_top: ensure L_half fits within VRAM table capacity.
+    // max_L_half = 27 guarantees C(27,13) = 20M ≤ VRAM cap.
+    // For n ≤ 64: B_top = 14 (original value, L_half ≤ 25 → safe).
+    // For n > 64: B_top increases to keep L_half ≤ 27.
+    int max_L_half = 27;  // C(27,13) = 20,058,300 ≤ max_mitm_elements
+    int B_top = 14;
+    if (n <= B_top) {
+        B_top = n / 2;
+    } else if (n > 2 * max_L_half) {
+        B_top = n - 2 * max_L_half;  // e.g., 70 - 54 = 16
+        if (B_top < 14) B_top = 14;
+    }
     int L_bits = n - B_top;
     
     const int tableN = 129, tableK = 129;
@@ -3076,9 +3086,15 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
             continue;
         }
 
-        // Coset decomposition
+        // Coset decomposition (adaptive for >64 free bits)
+        int max_L_half = 27;
         int B_top = 14;
-        if (n <= B_top) B_top = n / 2;
+        if (n <= B_top) {
+            B_top = n / 2;
+        } else if (n > 2 * max_L_half) {
+            B_top = n - 2 * max_L_half;
+            if (B_top < 14) B_top = 14;
+        }
         int L_bits = n - B_top;
 
         uint64_t blockKeysProcessed = 0;
