@@ -349,7 +349,6 @@ void comp_mitm_god_matrix_v3(
     // ═══════════════════════════════════════════════════════════════
     uint64_t chain_prefix[TWOPASS_CHAIN_LEN][4]; // cumulative dx products
     uint32_t chain_t2idx[TWOPASS_CHAIN_LEN];     // T2 table indices
-    uint64_t x3_buf[TWOPASS_CHAIN_LEN][4];       // deferred hash results
 
     // ═══════════════════════════════════════════════════════════════
     // OUTER LOOP: process T2 in chunks of TWOPASS_CHAIN_LEN
@@ -410,17 +409,20 @@ void comp_mitm_god_matrix_v3(
         _ModInv(total_inv);
 
         // ──────────────────────────────────────────────
-        // PASS 2A: BACKWARD — extract inverses + affine EC math (NO hash)
+        // PASS 2: BACKWARD — extract, add, hash
         //
-        // This phase runs ONLY ModMult/ModSqr (INT64 pipeline).
-        // The compiler can allocate all registers to EC math
-        // without reserving any for the SHA256/RIPEMD160 state.
+        // For each entry i (from last to first):
+        //   dx_inv[i] = prefix[i-1] * total_inv    [1 ModMult]
+        //   total_inv *= dx[i]                       [1 ModMult]
+        //   lambda = dy * dx_inv                     [1 ModMult]
+        //   lambda^2                                 [1 ModSqr]
+        //   y3_partial = lambda * (baseX - x3)       [1 ModMult]
+        //   parity = y3_partial[0] & 1 after ModSub  [FREE]
+        //   hash + check                             [SHA256 + RIPEMD160]
+        //
+        // Total per candidate: 2 + 1 + 0.8 + 1 = 4.8 ModMult-eq
+        //                    + pass 1's 1.0 = 5.8 total
         // ──────────────────────────────────────────────
-
-        // Store affine X results + parity for deferred hashing
-        // x3_buf lives in local memory (L2-backed, warp-coalesced)
-        // chain_t2idx[i] = (isOdd << 31) | original_t2_idx
-
         for (int i = count - 1; i >= 0; i--) {
 
             // Extract individual dx^-1
@@ -428,20 +430,21 @@ void comp_mitm_god_matrix_v3(
             if (i == 0) {
                 Load256(dx_inv, total_inv);
             } else {
-                _ModMult(dx_inv, chain_prefix[i - 1], total_inv);
+                // dx_inv[i] = prefix[i-1] * total_inv
+                _ModMult(dx_inv, chain_prefix[i-1], total_inv);
             }
 
-            // Re-load T2 point (L2-warm from pass 1)
-            uint32_t t2_idx = chain_t2idx[i] & 0x7FFFFFFF; // mask out isOdd bit
+            // Re-load T2 point from VRAM (hits L2 cache since pass 1 just read it)
+            uint32_t t2_idx = chain_t2idx[i];
             __align__(32) uint64_t t2X[4], t2Y[4];
-            t2X[0] = __ldg(&T2_X[t2_idx * 4 + 0]);
-            t2X[1] = __ldg(&T2_X[t2_idx * 4 + 1]);
-            t2X[2] = __ldg(&T2_X[t2_idx * 4 + 2]);
-            t2X[3] = __ldg(&T2_X[t2_idx * 4 + 3]);
-            t2Y[0] = __ldg(&T2_Y[t2_idx * 4 + 0]);
-            t2Y[1] = __ldg(&T2_Y[t2_idx * 4 + 1]);
-            t2Y[2] = __ldg(&T2_Y[t2_idx * 4 + 2]);
-            t2Y[3] = __ldg(&T2_Y[t2_idx * 4 + 3]);
+            t2X[0] = __ldg(&T2_X[t2_idx*4+0]);
+            t2X[1] = __ldg(&T2_X[t2_idx*4+1]);
+            t2X[2] = __ldg(&T2_X[t2_idx*4+2]);
+            t2X[3] = __ldg(&T2_X[t2_idx*4+3]);
+            t2Y[0] = __ldg(&T2_Y[t2_idx*4+0]);
+            t2Y[1] = __ldg(&T2_Y[t2_idx*4+1]);
+            t2Y[2] = __ldg(&T2_Y[t2_idx*4+2]);
+            t2Y[3] = __ldg(&T2_Y[t2_idx*4+3]);
 
             // Update running inverse for next (earlier) entry
             if (i > 0) {
@@ -452,7 +455,7 @@ void comp_mitm_god_matrix_v3(
                 Load256(total_inv, new_inv);
             }
 
-            // ═══ AFFINE ADDITION (EC math only, no hash) ═══
+            // ═══ AFFINE ADDITION: result = base + T2[i] ═══
             __align__(32) uint64_t dy[4], lambda[4], lambda_sq[4];
             __align__(32) uint64_t x3[4], y3p[4], tmp[4];
 
@@ -460,37 +463,17 @@ void comp_mitm_god_matrix_v3(
             _ModMult(lambda, dy, dx_inv);
             _ModSqr(lambda_sq, lambda);
 
+            // x3 = lambda^2 - baseX - t2X
             ModSub256(tmp, lambda_sq, baseX);
             ModSub256(x3, tmp, t2X);
 
+            // y3 = lambda * (baseX - x3) - baseY  
             ModSub256(tmp, baseX, x3);
             _ModMult(y3p, lambda, tmp);
             ModSub256(y3p, y3p, baseY);
             uint8_t isOdd = (uint8_t)(y3p[0] & 1);
 
-            // Store x3 to local memory buffer for deferred hashing
-            Load256(x3_buf[i], x3);
-            // Pack isOdd into bit 31 of the t2 index
-            chain_t2idx[i] = (((uint32_t)isOdd) << 31) | (chain_t2idx[i] & 0x7FFFFFFF);
-        }
-
-        // ──────────────────────────────────────────────
-        // PASS 2B: FORWARD — hash sweep (LOGIC pipeline only)
-        //
-        // All EC math is done. Registers freed from ModMult state.
-        // The compiler can now allocate full register file to
-        // SHA256 W[16] array + RIPEMD160 state without spilling.
-        // ──────────────────────────────────────────────
-        for (int i = 0; i < count; i++) {
-
-            // Load x3 from local memory (L2-warm from pass 2A)
-            __align__(32) uint64_t x3[4];
-            Load256(x3, x3_buf[i]);
-            uint32_t packed = chain_t2idx[i];
-            uint8_t isOdd = (uint8_t)(packed >> 31);
-            uint32_t t2_idx = packed & 0x7FFFFFFF;
-
-            // ═══ HASH AND CHECK ═══
+            // ═══ HASH AND CHECK (identical to v2) ═══
             __align__(32) uint32_t hash[5];
             _GetHash160Comp(x3, isOdd, (uint8_t*)hash);
 
@@ -514,12 +497,12 @@ void comp_mitm_god_matrix_v3(
                         uint32_t orig_t2 = T2_perm[t2_idx];
                         uint32_t b_idx = t1_is_baby ? (uint32_t)t1_idx : orig_t2;
                         uint32_t g_idx = t1_is_baby ? orig_t2 : (uint32_t)t1_idx;
-                        out[off + 0] = (uint32_t)qi_idx;
-                        out[off + 1] = g_idx;
-                        out[off + 2] = b_idx;
-                        out[off + 3] = hash[0]; out[off + 4] = hash[1];
-                        out[off + 5] = hash[2]; out[off + 6] = hash[3];
-                        out[off + 7] = hash[4];
+                        out[off+0] = (uint32_t)qi_idx;
+                        out[off+1] = g_idx;
+                        out[off+2] = b_idx;
+                        out[off+3] = hash[0]; out[off+4] = hash[1];
+                        out[off+5] = hash[2]; out[off+6] = hash[3];
+                        out[off+7] = hash[4];
                     }
                 }
             }
