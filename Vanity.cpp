@@ -1742,8 +1742,10 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     }
     
     // Compute Q_i offsets for the block threads
-    // Support massive W up to 8192
-    uint64_t* h_Qi_array = (uint64_t*)malloc(8192 * sizeof(uint64_t));
+    // Max W = C(B_top, B_top/2). Must fit in Qi array.
+    uint64_t max_W = h_combTable[B_top * tableK + B_top / 2];
+    uint64_t qi_alloc = (max_W > 8192) ? max_W : 8192;
+    uint64_t* h_Qi_array = (uint64_t*)malloc(qi_alloc * sizeof(uint64_t));
     for (int k1 = 0; k1 <= B_top; k1++) {
         uint64_t W = h_combTable[B_top * tableK + k1];
         for (uint64_t rank = 0; rank < W; rank++) {
