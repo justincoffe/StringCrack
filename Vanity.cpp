@@ -107,6 +107,56 @@ static inline void reconstruct_key_128(
     }
 }
 
+// ─── Shekinah v2: Project global center onto a block's free bits ───
+static void shekinah_v2_project_center(
+    const StringCrackConfig* scConfig,
+    const StringCrackConfig* blockConfig,
+    uint64_t& out_seedLo, uint64_t& out_seedHi,
+    int& out_locked_distance)
+{
+    uint64_t centerKey[4] = {
+        scConfig->lockVals[0], scConfig->lockVals[1],
+        scConfig->lockVals[2], scConfig->lockVals[3]
+    };
+
+    for (int i = 0; i < scConfig->numFreeBits; i++) {
+        uint64_t bit;
+        if (i < 64) bit = (scConfig->targetSeedLo >> i) & 1ULL;
+        else        bit = (scConfig->targetSeedHi >> (i - 64)) & 1ULL;
+
+        if (bit) {
+            int pos = scConfig->freeBitPositions[i];
+            centerKey[pos >> 6] |= (1ULL << (pos & 63));
+        }
+    }
+
+    out_seedLo = 0;
+    out_seedHi = 0;
+
+    for (int i = 0; i < blockConfig->numFreeBits; i++) {
+        int pos = blockConfig->freeBitPositions[i];
+        int limb = pos >> 6;
+        int bit_in_limb = pos & 63;
+
+        if ((centerKey[limb] >> bit_in_limb) & 1ULL) {
+            if (i < 64) out_seedLo |= (1ULL << i);
+            else        out_seedHi |= (1ULL << (i - 64));
+        }
+    }
+
+    out_locked_distance = 0;
+
+    for (int i = 0; i < blockConfig->numLockedBits; i++) {
+        int pos = blockConfig->lockedBits[i].position;
+        int locked_val = blockConfig->lockedBits[i].value;
+        int limb = pos >> 6;
+        int bit_in_limb = pos & 63;
+        int center_val = (centerKey[limb] >> bit_in_limb) & 1;
+
+        if (locked_val != center_val) out_locked_distance++;
+    }
+}
+
 //Point Gn[GRP_SIZE / 2];
 //Point _2Gn;
 
@@ -3021,6 +3071,72 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
            sliceId, pipeline.commands.size());
     fflush(stdout);
 
+    // ─── Shekinah v2: Sort blocks by locked_distance ───
+    if (scConfig->useRadius && scConfig->radius > 0) {
+        uint64_t globalCenterKey[4] = {
+            scConfig->lockVals[0], scConfig->lockVals[1],
+            scConfig->lockVals[2], scConfig->lockVals[3]
+        };
+        for (int fb = 0; fb < scConfig->numFreeBits; fb++) {
+            uint64_t bit;
+            if (fb < 64) bit = (scConfig->targetSeedLo >> fb) & 1ULL;
+            else         bit = (scConfig->targetSeedHi >> (fb - 64)) & 1ULL;
+            if (bit) {
+                int pos = scConfig->freeBitPositions[fb];
+                globalCenterKey[pos >> 6] |= (1ULL << (pos & 63));
+            }
+        }
+
+        size_t numBlocks = pipeline.commands.size();
+        std::vector<std::pair<int, size_t>> distIdx(numBlocks);
+
+        for (size_t b = 0; b < numBlocks; b++) {
+            const ShekinahDispatchCommand& cmd = pipeline.commands[b];
+            int d = 0;
+            for (int i = 0; i < cmd.num_locked_positions; i++) {
+                int pos = cmd.locked_positions[i];
+                int lv = cmd.locked_values[i];
+                int cv = (globalCenterKey[pos >> 6] >> (pos & 63)) & 1;
+                if (lv != cv) d++;
+            }
+            distIdx[b] = {d, b};
+        }
+
+        std::sort(distIdx.begin(), distIdx.end());
+
+        std::vector<ShekinahDispatchCommand> sorted_cmds(numBlocks);
+        std::vector<ShekinahBlock> sorted_blks(numBlocks);
+        int dead_count = 0;
+
+        for (size_t i = 0; i < numBlocks; i++) {
+            size_t orig = distIdx[i].second;
+            sorted_cmds[i] = pipeline.commands[orig];
+            sorted_blks[i] = pipeline.blocks[orig];
+            if (distIdx[i].first > scConfig->radius) dead_count++;
+        }
+
+        pipeline.commands = sorted_cmds;
+        pipeline.blocks = sorted_blks;
+
+        if (sliceId == 0) {
+            printf("[SEPHOLY-v2] Blocks sorted by locked_distance (closest to center first)\n");
+            printf("[SEPHOLY-v2] Live blocks: %zu, Dead blocks: %d (will be skipped)\n",
+                   numBlocks - dead_count, dead_count);
+            for (size_t i = 0; i < std::min((size_t)5, numBlocks); i++) {
+                printf("[SEPHOLY-v2]   Block %zu: locked_d=%d, free=%d bits\n",
+                       i, distIdx[i].first, pipeline.commands[i].free_bits);
+            }
+            if (numBlocks > 7) printf("[SEPHOLY-v2]   ... (%zu more) ...\n", numBlocks - 7);
+            if (numBlocks > 5) {
+                for (size_t i = numBlocks - 2; i < numBlocks; i++) {
+                    printf("[SEPHOLY-v2]   Block %zu: locked_d=%d, free=%d bits\n",
+                           i, distIdx[i].first, pipeline.commands[i].free_bits);
+                }
+            }
+            fflush(stdout);
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════
     // COMBINATORIAL TABLE (for unranking in key reconstruction)
     // ═══════════════════════════════════════════════════════════
@@ -3084,10 +3200,34 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
             continue;
         }
 
-        // The center in Shekinah mode is all-zeros (base_key IS the center)
-        // For Hamming sphere mode: center is the model prediction's free bits
-        blockConfig.targetSeedLo = 0;
-        blockConfig.targetSeedHi = 0;
+        // ─── SHEKINAH v2: Center Projection + Radius Adjustment ───
+        bool has_v2_center = (scConfig->useRadius && scConfig->radius > 0);
+        int locked_distance = 0;
+
+        if (has_v2_center) {
+            shekinah_v2_project_center(scConfig, &blockConfig,
+                blockConfig.targetSeedLo, blockConfig.targetSeedHi,
+                locked_distance);
+
+            int global_maxH = scConfig->radius;
+            if (locked_distance > global_maxH) {
+                if (sliceId == 0) {
+                    printf("[SEPHOLY-v2] Block %zu: DEAD (locked_d=%d > radius=%d)\n",
+                           blkIdx, locked_distance, global_maxH);
+                }
+                continue;
+            }
+
+            if (sliceId == 0) {
+                printf("[SEPHOLY-v2] Block %zu: locked_d=%d, center projected (seedLo=%016llX)\n",
+                       blkIdx, locked_distance,
+                       (unsigned long long)blockConfig.targetSeedLo);
+            }
+        } else {
+            blockConfig.targetSeedLo = 0;
+            blockConfig.targetSeedHi = 0;
+        }
+
         if (n <= 64) {
             blockConfig.seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
             blockConfig.seedMaskHi = 0;
@@ -3130,10 +3270,47 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
         int L_bits = n - B_top;
 
         uint64_t blockKeysProcessed = 0;
-        int minH = blk.free_pop_lo;
-        int maxH = blk.free_pop_hi;
+        int minH, maxH;
 
-        for (int h = minH; h <= maxH && !endOfSearch; h++) {
+        if (has_v2_center) {
+            int global_minH = scConfig->sepMin;
+            int global_maxH = scConfig->radius;
+            minH = global_minH - locked_distance;
+            maxH = global_maxH - locked_distance;
+            if (minH < 0) minH = 0;
+            if (maxH > n) maxH = n;
+            if (maxH < 0) continue;
+        } else {
+            minH = blk.free_pop_lo;
+            maxH = blk.free_pop_hi;
+        }
+
+        std::vector<int> h_order;
+
+        if (has_v2_center && maxH >= minH) {
+            int internal_expected = (int)round(n * (1.0 / 3.0));
+            int peak = internal_expected;
+            if (peak < minH) peak = minH;
+            if (peak > maxH) peak = maxH;
+
+            std::vector<bool> used(n + 1, false);
+            for (int delta = 0; delta <= n; delta++) {
+                for (int sign = 0; sign <= 1; sign++) {
+                    int h = peak + (sign == 0 ? delta : -delta);
+                    if (h < minH || h > maxH) continue;
+                    if (used[h]) continue;
+                    used[h] = true;
+                    h_order.push_back(h);
+                }
+            }
+        } else {
+            for (int h = minH; h <= maxH; h++) {
+                h_order.push_back(h);
+            }
+        }
+
+        for (int h_idx = 0; h_idx < (int)h_order.size() && !endOfSearch; h_idx++) {
+            int h = h_order[h_idx];
             for (int k1 = 0; k1 <= B_top && k1 <= h && !endOfSearch; k1++) {
                 int k2 = h - k1;
                 if (k2 > L_bits || k2 < 0) continue;
@@ -3298,10 +3475,17 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                                     for (int i = 0; i < sliceCount; i++) gk += counters[i];
                                     double spd_gk = (dt > 0.01) ? (double)(gk - lk) / (dt * 1e9) : 0;
                                     lt = ttot; lk = gk;
-                                    printf("[SEPHOLY] Blk %zu/%zu h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
-                                        blkIdx+1, pipeline.commands.size(), h, k1, k_b, k_g,
-                                        (unsigned long long)W, (unsigned long long)T1_size,
-                                        (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
+                                    if (has_v2_center) {
+                                        printf("[SEPHOLY-v2] Blk %zu/%zu ld=%d h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
+                                            blkIdx+1, pipeline.commands.size(), locked_distance, h, k1, k_b, k_g,
+                                            (unsigned long long)W, (unsigned long long)T1_size,
+                                            (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
+                                    } else {
+                                        printf("[SEPHOLY] Blk %zu/%zu h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
+                                            blkIdx+1, pipeline.commands.size(), h, k1, k_b, k_g,
+                                            (unsigned long long)W, (unsigned long long)T1_size,
+                                            (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
+                                    }
                                     fflush(stdout);
                                 }
                             }
