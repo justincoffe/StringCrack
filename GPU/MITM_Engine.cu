@@ -518,6 +518,9 @@ void comp_mitm_god_matrix_v3(
 bool GPUEngine::BuildMITMTables(Secp256K1* secp, StringCrackConfig* config,
                                 int L_baby, int k_baby, int L_giant, int k_giant)
 {
+    // Clear any stale CUDA error from previous operations
+    cudaGetLastError();
+
     auto nCr = [](int n, int k) -> uint64_t {
         if (k < 0 || k > n) return 0;
         if (k == 0 || k == n) return 1;

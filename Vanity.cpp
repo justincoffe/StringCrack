@@ -1831,8 +1831,11 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
                     scConfig->lockVals[0], scConfig->lockVals[1],
                     scConfig->lockVals[2], scConfig->lockVals[3]
                 };
-                for (int fb = 0; fb < n && fb < 64; fb++) {
-                    if ((scConfig->targetSeedLo >> fb) & 1ULL) {
+                for (int fb = 0; fb < n; fb++) {
+                    uint64_t bit;
+                    if (fb < 64) bit = (scConfig->targetSeedLo >> fb) & 1ULL;
+                    else         bit = (scConfig->targetSeedHi >> (fb - 64)) & 1ULL;
+                    if (bit) {
                         int pos = scConfig->freeBitPositions[fb];
                         lockedKey[pos >> 6] |= (1ULL << (pos & 63));
                     }
@@ -2847,10 +2850,13 @@ void VanitySearch::reconstructCosetKey(
         }
     }
 
-    uint64_t full_mask = qi_mask | p_mask;
+    uint64_t full_mask_lo = qi_mask | p_mask;
     int n = config->numFreeBits;
     uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
-    uint64_t seed_lo = (full_mask ^ config->targetSeedLo) & seedMaskLo;
+    uint64_t seedMaskHi = 0;
+    if (n > 64) seedMaskHi = ((1ULL << (n - 64)) - 1ULL);
+    uint64_t seed_lo = (full_mask_lo ^ config->targetSeedLo) & seedMaskLo;
+    uint64_t seed_hi = config->targetSeedHi & seedMaskHi;
 
     uint64_t keyBits[4] = { config->lockVals[0], config->lockVals[1], config->lockVals[2], config->lockVals[3] };
     for (int fb = 0; fb < n && fb < 64; fb++) {
@@ -2859,6 +2865,13 @@ void VanitySearch::reconstructCosetKey(
             keyBits[pos >> 6] |= (1ULL << (pos & 63));
         }
         seed_lo >>= 1;
+    }
+    for (int fb = 64; fb < n; fb++) {
+        if (seed_hi & 1ULL) {
+            int pos = config->freeBitPositions[fb];
+            keyBits[pos >> 6] |= (1ULL << (pos & 63));
+        }
+        seed_hi >>= 1;
     }
 
     Int privkey; privkey.SetInt32(0);
@@ -2910,7 +2923,10 @@ void VanitySearch::reconstructCosetGosperKey(
     uint64_t full_mask = qi_mask | mask;
     int n = config->numFreeBits;
     uint64_t seedMaskLo = (n < 64) ? ((1ULL << n) - 1ULL) : 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t seedMaskHi = 0;
+    if (n > 64) seedMaskHi = ((1ULL << (n - 64)) - 1ULL);
     uint64_t seed_lo = (full_mask ^ config->targetSeedLo) & seedMaskLo;
+    uint64_t seed_hi = config->targetSeedHi & seedMaskHi;
 
     // 5. Expand and verify
     uint64_t keyBits[4] = { config->lockVals[0], config->lockVals[1], config->lockVals[2], config->lockVals[3] };
@@ -2920,6 +2936,13 @@ void VanitySearch::reconstructCosetGosperKey(
             keyBits[pos >> 6] |= (1ULL << (pos & 63));
         }
         seed_lo >>= 1;
+    }
+    for (int fb = 64; fb < n; fb++) {
+        if (seed_hi & 1ULL) {
+            int pos = config->freeBitPositions[fb];
+            keyBits[pos >> 6] |= (1ULL << (pos & 63));
+        }
+        seed_hi >>= 1;
     }
 
     Int privkey; privkey.SetInt32(0);
