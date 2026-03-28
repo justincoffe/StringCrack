@@ -3327,6 +3327,16 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                     blockConfig.lockVals[0], blockConfig.lockVals[1],
                     blockConfig.lockVals[2], blockConfig.lockVals[3]
                 };
+                // v2: Add center's free-bit contributions to the base point
+                for (int fb = 0; fb < n; fb++) {
+                    uint64_t bit;
+                    if (fb < 64) bit = (blockConfig.targetSeedLo >> fb) & 1ULL;
+                    else         bit = (blockConfig.targetSeedHi >> (fb - 64)) & 1ULL;
+                    if (bit) {
+                        int pos = blockConfig.freeBitPositions[fb];
+                        lockedKey[pos >> 6] |= (1ULL << (pos & 63));
+                    }
+                }
                 Int lockedInt; lockedInt.SetInt32(0);
                 lockedInt.bits64[0] = lockedKey[0]; lockedInt.bits64[1] = lockedKey[1];
                 lockedInt.bits64[2] = lockedKey[2]; lockedInt.bits64[3] = lockedKey[3];
