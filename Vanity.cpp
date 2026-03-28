@@ -157,6 +157,99 @@ static void shekinah_v2_project_center(
     }
 }
 
+struct ShekinahSplit {
+    int k1, k_b, k_g;
+    uint64_t W, baby_size, giant_size;
+    double product;
+};
+
+static std::vector<ShekinahSplit> build_fat_first_splits(
+    int h, int B_top, int L_baby, int L_giant,
+    const uint64_t* combTable, int tableK)
+{
+    int L_bits = L_baby + L_giant;
+    std::vector<ShekinahSplit> splits;
+
+    for (int k1 = 0; k1 <= B_top && k1 <= h; k1++) {
+        int k2 = h - k1;
+        if (k2 < 0 || k2 > L_bits) continue;
+
+        uint64_t W = combTable[B_top * tableK + k1];
+        if (W == 0) continue;
+
+        uint64_t L_total = combTable[L_bits * tableK + k2];
+        if (L_total == 0) continue;
+
+        for (int k_b = 0; k_b <= k2 && k_b <= L_baby; k_b++) {
+            int k_g = k2 - k_b;
+            if (k_g < 0 || k_g > L_giant) continue;
+
+            uint64_t baby = combTable[L_baby * tableK + k_b];
+            uint64_t giant = combTable[L_giant * tableK + k_g];
+            if (baby == 0 || giant == 0) continue;
+
+            ShekinahSplit s;
+            s.k1 = k1;
+            s.k_b = k_b;
+            s.k_g = k_g;
+            s.W = W;
+            s.baby_size = baby;
+            s.giant_size = giant;
+            uint64_t T1 = (baby <= giant) ? baby : giant;
+            uint64_t T2 = (baby > giant) ? baby : giant;
+            s.product = (double)T1 * (double)T2;
+            splits.push_back(s);
+        }
+    }
+
+    std::sort(splits.begin(), splits.end(),
+        [](const ShekinahSplit& a, const ShekinahSplit& b) {
+            return a.product > b.product;
+        });
+
+    return splits;
+}
+
+static std::vector<ShekinahSplit> build_sequential_splits(
+    int h, int B_top, int L_baby, int L_giant,
+    const uint64_t* combTable, int tableK)
+{
+    int L_bits = L_baby + L_giant;
+    std::vector<ShekinahSplit> splits;
+
+    for (int k1 = 0; k1 <= B_top && k1 <= h; k1++) {
+        int k2 = h - k1;
+        if (k2 < 0 || k2 > L_bits) continue;
+
+        uint64_t W = combTable[B_top * tableK + k1];
+        if (W == 0) continue;
+
+        uint64_t L_total = combTable[L_bits * tableK + k2];
+        if (L_total == 0) continue;
+
+        for (int k_b = 0; k_b <= k2 && k_b <= L_baby; k_b++) {
+            int k_g = k2 - k_b;
+            if (k_g < 0 || k_g > L_giant) continue;
+
+            uint64_t baby = combTable[L_baby * tableK + k_b];
+            uint64_t giant = combTable[L_giant * tableK + k_g];
+            if (baby == 0 || giant == 0) continue;
+
+            ShekinahSplit s;
+            s.k1 = k1;
+            s.k_b = k_b;
+            s.k_g = k_g;
+            s.W = W;
+            s.baby_size = baby;
+            s.giant_size = giant;
+            s.product = 0;
+            splits.push_back(s);
+        }
+    }
+
+    return splits;
+}
+
 //Point Gn[GRP_SIZE / 2];
 //Point _2Gn;
 
@@ -3052,13 +3145,15 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
 
     // Non-primary GPUs run the decomposition silently (quiet=true)
     bool quiet = (sliceId != 0);
+    bool is_v2 = (scConfig->useRadius && scConfig->radius > 0);
     ShekinahPipelineResult pipeline = shekinah_generate_dispatch(
         corridorA, corridorB,
         scConfig->puzzleBits,
         scConfig->popcountMin,
         scConfig->popcountMax,
         64,     // max GPU free bits
-        quiet
+        quiet,
+        is_v2
     );
 
     if (pipeline.commands.empty()) {
@@ -3311,201 +3406,41 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
 
         for (int h_idx = 0; h_idx < (int)h_order.size() && !endOfSearch; h_idx++) {
             int h = h_order[h_idx];
-            for (int k1 = 0; k1 <= B_top && k1 <= h && !endOfSearch; k1++) {
-                int k2 = h - k1;
-                if (k2 > L_bits || k2 < 0) continue;
 
-                uint64_t W = h_combTable[B_top * tableK + k1];
-                if (W == 0) continue;
+            // ─── Build split vector for this h ───
+            int L_baby = L_bits / 2;
+            int L_giant = L_bits - L_baby;
 
-                uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2];
-                if (L_totalCombs == 0) continue;
-                if (L_totalCombs == 0) continue;
+            std::vector<ShekinahSplit> splits;
+            if (has_v2_center) {
+                splits = build_fat_first_splits(h, B_top, L_baby, L_giant,
+                                                h_combTable, tableK);
+            } else {
+                splits = build_sequential_splits(h, B_top, L_baby, L_giant,
+                                                 h_combTable, tableK);
+            }
 
-                // Compute P_locked
-                uint64_t lockedKey[4] = {
-                    blockConfig.lockVals[0], blockConfig.lockVals[1],
-                    blockConfig.lockVals[2], blockConfig.lockVals[3]
-                };
-                // v2: Add center's free-bit contributions to the base point
-                for (int fb = 0; fb < n; fb++) {
-                    uint64_t bit;
-                    if (fb < 64) bit = (blockConfig.targetSeedLo >> fb) & 1ULL;
-                    else         bit = (blockConfig.targetSeedHi >> (fb - 64)) & 1ULL;
-                    if (bit) {
-                        int pos = blockConfig.freeBitPositions[fb];
-                        lockedKey[pos >> 6] |= (1ULL << (pos & 63));
-                    }
-                }
-                Int lockedInt; lockedInt.SetInt32(0);
-                lockedInt.bits64[0] = lockedKey[0]; lockedInt.bits64[1] = lockedKey[1];
-                lockedInt.bits64[2] = lockedKey[2]; lockedInt.bits64[3] = lockedKey[3];
-                Point P_locked = secp->ComputePublicKey(&lockedInt);
+            int prev_k1 = -1;
+            bool firstBatch = true;
+            uint32_t active_qi[2] = {0};
+            int active_kb[2] = {0}, active_kg[2] = {0};
+            Point P_locked_saved;
 
-                uint64_t qi_center_slice = extract_seed_slice(
-                    blockConfig.targetSeedLo, blockConfig.targetSeedHi,
-                    L_bits, B_top);
+            for (int sp_idx = 0; sp_idx < (int)splits.size() && !endOfSearch; sp_idx++) {
+                const ShekinahSplit& sp = splits[sp_idx];
+                int k1 = sp.k1;
+                int k_b = sp.k_b;
+                int k_g = sp.k_g;
+                uint64_t W = sp.W;
+                uint64_t baby_size = sp.baby_size;
+                uint64_t giant_size = sp.giant_size;
 
-                g.BuildQiPoints(
-                    P_locked.x.bits64[0], P_locked.x.bits64[1],
-                    P_locked.x.bits64[2], P_locked.x.bits64[3],
-                    P_locked.y.bits64[0], P_locked.y.bits64[1],
-                    P_locked.y.bits64[2], P_locked.y.bits64[3],
-                    L_bits, B_top, k1, W, qi_center_slice);
-
-                // MITM split
-                int L_baby = L_bits / 2;
-                int L_giant = L_bits - L_baby;
-
-                bool firstBatch = true;
-                uint32_t active_qi[2] = {0};
-                int active_kb[2] = {0}, active_kg[2] = {0};
-
-                for (int k_b = 0; k_b <= k2 && k_b <= L_baby && !endOfSearch; k_b++) {
-                    int k_g = k2 - k_b;
-                    if (k_g < 0 || k_g > L_giant) continue;
-
-                    uint64_t baby_size = h_combTable[L_baby * tableK + k_b];
-                    uint64_t giant_size = h_combTable[L_giant * tableK + k_g];
-                    if (baby_size == 0 || giant_size == 0) continue;
-
-                    g.BuildMITMTables(secp, &blockConfig, L_baby, k_b, L_giant, k_g);
-
-                    uint64_t sliceSz = (W + sliceCount - 1) / sliceCount;
-                    uint64_t sliceStart = sliceId * sliceSz;
-                    uint64_t sliceEnd = sliceStart + sliceSz;
-                    if (sliceEnd > W) sliceEnd = W;
-
-                    uint64_t T1_size = (baby_size < giant_size) ? baby_size : giant_size;
-                    uint64_t T2_size = (baby_size > giant_size) ? baby_size : giant_size;
-                    // Match kernel launch_bounds(256, 2) — 256 threads per block
-                    int blocks_per_qi = (T1_size + 255) / 256;
-                    if (blocks_per_qi == 0) blocks_per_qi = 1;
-                    // Shekinah: push max_qi_batch higher to fill GPU
-                    // Limited by CUDA grid dimension (65535 blocks max)
-                    uint64_t max_qi_batch = 50000;
-                    if (max_qi_batch * blocks_per_qi > 65535) {
-                        max_qi_batch = 65535 / blocks_per_qi;
-                        if (max_qi_batch == 0) max_qi_batch = 1;
-                    }
-                    // Cap to actual W
-                    if (max_qi_batch > W) max_qi_batch = W;
-
-                    // T2 chunking: target ~4 seconds per kernel at ~14 GK/s
-                    // = 12B candidates per launch for responsive display
-                    uint64_t target_cand = 12000000000ULL;
-                    uint64_t cpl = max_qi_batch * T1_size * T2_size;
-                    uint64_t t2_chunk = T2_size;
-                    if (cpl > target_cand && T2_size > 1) {
-                        t2_chunk = target_cand / (max_qi_batch * T1_size);
-                        if (t2_chunk < 1) t2_chunk = 1;
-                    }
-
-                    for (uint64_t t2_off = 0; t2_off < T2_size && !endOfSearch; t2_off += t2_chunk) {
-                        uint64_t t2_start = t2_off;
-                        uint64_t t2_end = t2_off + t2_chunk;
-                        if (t2_end > T2_size) t2_end = T2_size;
-
-                        for (uint64_t qi_start = sliceStart; qi_start < sliceEnd && !endOfSearch; qi_start += max_qi_batch) {
-                            if (Pause) {
-                                Paused = true;
-                                t_Paused = Timer::get_tick() - t0 + t_Paused;
-                                while (Pause && !endOfSearch) Timer::SleepMillis(100);
-                                if (endOfSearch) break;
-                                endOfSearch = true; break;
-                            }
-
-                            uint64_t qi_count = max_qi_batch;
-                            if (qi_start + qi_count > sliceEnd) qi_count = sliceEnd - qi_start;
-
-                            int s = g.currentStep % 2;
-                            active_qi[s] = qi_start;
-                            active_kb[s] = k_b;
-                            active_kg[s] = k_g;
-
-                            g.LaunchMITMGodMatrixAsync(
-                                baby_size, giant_size, L_bits, B_top, k1,
-                                qi_start, qi_count, t2_start, t2_end,
-                                P_locked.x.bits64[0], P_locked.x.bits64[1],
-                                P_locked.x.bits64[2], P_locked.x.bits64[3],
-                                P_locked.y.bits64[0], P_locked.y.bits64[1],
-                                P_locked.y.bits64[2], P_locked.y.bits64[3], s);
-
-                            if (!firstBatch) {
-                                int prev_s = (g.currentStep - 2) % 2;
-                                uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
-                                int sync_kb = active_kb[prev_s];
-                                int sync_kg = active_kg[prev_s];
-
-                                for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
-                                    ITEM& it = found[fi];
-                                    uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
-                                    cpu_unrank_combination(it.incr, L_baby, sync_kb,
-                                        baby_lo, baby_hi, h_combTable, tableK);
-                                    cpu_unrank_combination(it.endo, L_giant, sync_kg,
-                                        giant_lo, giant_hi, h_combTable, tableK);
-                                    cpu_unrank_combination(it.thId, B_top, k1,
-                                        qi_lo, qi_hi, h_combTable, tableK);
-
-                                    uint64_t full_mask_lo, full_mask_hi;
-                                    assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
-                                        L_baby, L_giant, L_bits, B_top,
-                                        full_mask_lo, full_mask_hi);
-
-                                    uint64_t fk[4];
-                                    reconstruct_key_128(full_mask_lo, full_mask_hi,
-                                        blockConfig.targetSeedLo, blockConfig.targetSeedHi,
-                                        n, blockConfig.freeBitPositions,
-                                        blockConfig.lockVals, fk);
-
-                                    Int pk; pk.SetInt32(0);
-                                    pk.bits64[0] = fk[0]; pk.bits64[1] = fk[1];
-                                    pk.bits64[2] = fk[2]; pk.bits64[3] = fk[3];
-                                    Point Pc = secp->ComputePublicKey(&pk);
-                                    uint8_t hc[20];
-                                    secp->GetHash160(SEARCH_COMPRESSED, true, Pc, hc);
-                                    checkAddr(*(address_t*)(hc), hc, pk, 0, 0, true);
-                                }
-                                found.clear();
-                            }
-                            firstBatch = false;
-
-                            uint64_t ck = qi_count * T1_size * (t2_end - t2_start);
-                            blockKeysProcessed += ck;
-                            totalKeysProcessed += ck;
-                            counters[thId] = totalKeysProcessed;
-
-                            if (sliceId == 0) {
-                                ttot = Timer::get_tick() - t0 + t_Paused;
-                                static double lt = 0.0;
-                                static uint64_t lk = 0;
-                                double dt = ttot - lt;
-                                if (dt >= 0.5 || lt == 0.0) {
-                                    uint64_t gk = 0;
-                                    for (int i = 0; i < sliceCount; i++) gk += counters[i];
-                                    double spd_gk = (dt > 0.01) ? (double)(gk - lk) / (dt * 1e9) : 0;
-                                    lt = ttot; lk = gk;
-                                    if (has_v2_center) {
-                                        printf("[SEPHOLY-v2] Blk %zu/%zu ld=%d h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
-                                            blkIdx+1, pipeline.commands.size(), locked_distance, h, k1, k_b, k_g,
-                                            (unsigned long long)W, (unsigned long long)T1_size,
-                                            (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
-                                    } else {
-                                        printf("[SEPHOLY] Blk %zu/%zu h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
-                                            blkIdx+1, pipeline.commands.size(), h, k1, k_b, k_g,
-                                            (unsigned long long)W, (unsigned long long)T1_size,
-                                            (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
-                                    }
-                                    fflush(stdout);
-                                }
-                            }
-                        }
-                    }
-
-                    // Drain final batch
+                // ─── Rebuild Q_i points when k1 changes ───
+                if (k1 != prev_k1) {
+                    // Drain the previous k1's last in-flight batch
                     if (!firstBatch) {
                         int prev_s = (g.currentStep - 1) % 2;
-                        uint32_t nbFound = g.SyncMITMBatch(prev_s, found);
+                        g.SyncMITMBatch(prev_s, found);
                         int sync_kb = active_kb[prev_s];
                         int sync_kg = active_kg[prev_s];
                         for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
@@ -3515,33 +3450,225 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                                 baby_lo, baby_hi, h_combTable, tableK);
                             cpu_unrank_combination(it.endo, L_giant, sync_kg,
                                 giant_lo, giant_hi, h_combTable, tableK);
-                            cpu_unrank_combination(it.thId, B_top, k1,
+                            cpu_unrank_combination(it.thId, B_top, prev_k1,
                                 qi_lo, qi_hi, h_combTable, tableK);
-
                             uint64_t full_mask_lo, full_mask_hi;
                             assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
                                 L_baby, L_giant, L_bits, B_top,
                                 full_mask_lo, full_mask_hi);
-
                             uint64_t fk[4];
                             reconstruct_key_128(full_mask_lo, full_mask_hi,
                                 blockConfig.targetSeedLo, blockConfig.targetSeedHi,
                                 n, blockConfig.freeBitPositions,
                                 blockConfig.lockVals, fk);
-
                             Int pk; pk.SetInt32(0);
                             pk.bits64[0] = fk[0]; pk.bits64[1] = fk[1];
                             pk.bits64[2] = fk[2]; pk.bits64[3] = fk[3];
                             Point Pc = secp->ComputePublicKey(&pk);
                             uint8_t hc[20];
                             secp->GetHash160(SEARCH_COMPRESSED, true, Pc, hc);
-                            checkAddr(*(address_t*)(hc), hc, pk, SEARCH_COMPRESSED, thId, true);
+                            checkAddr(*(address_t*)(hc), hc, pk, 0, 0, true);
                         }
                         found.clear();
+                        firstBatch = true;
                     }
-                    firstBatch = true;
-                } // k_b
-            } // k1
+
+                    // Compute P_locked (with center free bits for v2)
+                    uint64_t lockedKey[4] = {
+                        blockConfig.lockVals[0], blockConfig.lockVals[1],
+                        blockConfig.lockVals[2], blockConfig.lockVals[3]
+                    };
+                    for (int fb = 0; fb < n; fb++) {
+                        uint64_t bit;
+                        if (fb < 64) bit = (blockConfig.targetSeedLo >> fb) & 1ULL;
+                        else         bit = (blockConfig.targetSeedHi >> (fb - 64)) & 1ULL;
+                        if (bit) {
+                            int pos = blockConfig.freeBitPositions[fb];
+                            lockedKey[pos >> 6] |= (1ULL << (pos & 63));
+                        }
+                    }
+                    Int lockedInt; lockedInt.SetInt32(0);
+                    lockedInt.bits64[0] = lockedKey[0]; lockedInt.bits64[1] = lockedKey[1];
+                    lockedInt.bits64[2] = lockedKey[2]; lockedInt.bits64[3] = lockedKey[3];
+                    P_locked_saved = secp->ComputePublicKey(&lockedInt);
+
+                    uint64_t qi_center_slice = extract_seed_slice(
+                        blockConfig.targetSeedLo, blockConfig.targetSeedHi,
+                        L_bits, B_top);
+
+                    g.BuildQiPoints(
+                        P_locked_saved.x.bits64[0], P_locked_saved.x.bits64[1],
+                        P_locked_saved.x.bits64[2], P_locked_saved.x.bits64[3],
+                        P_locked_saved.y.bits64[0], P_locked_saved.y.bits64[1],
+                        P_locked_saved.y.bits64[2], P_locked_saved.y.bits64[3],
+                        L_bits, B_top, k1, W, qi_center_slice);
+
+                    prev_k1 = k1;
+                }
+
+                // ─── MITM table build + kernel launch ───
+                g.BuildMITMTables(secp, &blockConfig, L_baby, k_b, L_giant, k_g);
+
+                uint64_t sliceSz = (W + sliceCount - 1) / sliceCount;
+                uint64_t sliceStart = sliceId * sliceSz;
+                uint64_t sliceEnd = sliceStart + sliceSz;
+                if (sliceEnd > W) sliceEnd = W;
+
+                uint64_t T1_size = (baby_size < giant_size) ? baby_size : giant_size;
+                uint64_t T2_size = (baby_size > giant_size) ? baby_size : giant_size;
+                int blocks_per_qi = (T1_size + 255) / 256;
+                if (blocks_per_qi == 0) blocks_per_qi = 1;
+                uint64_t max_qi_batch = 50000;
+                if (max_qi_batch * blocks_per_qi > 65535) {
+                    max_qi_batch = 65535 / blocks_per_qi;
+                    if (max_qi_batch == 0) max_qi_batch = 1;
+                }
+                if (max_qi_batch > W) max_qi_batch = W;
+
+                uint64_t target_cand = 12000000000ULL;
+                uint64_t cpl = max_qi_batch * T1_size * T2_size;
+                uint64_t t2_chunk = T2_size;
+                if (cpl > target_cand && T2_size > 1) {
+                    t2_chunk = target_cand / (max_qi_batch * T1_size);
+                    if (t2_chunk < 1) t2_chunk = 1;
+                }
+
+                for (uint64_t t2_off = 0; t2_off < T2_size && !endOfSearch; t2_off += t2_chunk) {
+                    uint64_t t2_start = t2_off;
+                    uint64_t t2_end = t2_off + t2_chunk;
+                    if (t2_end > T2_size) t2_end = T2_size;
+
+                    for (uint64_t qi_start = sliceStart; qi_start < sliceEnd && !endOfSearch; qi_start += max_qi_batch) {
+                        if (Pause) {
+                            Paused = true;
+                            t_Paused = Timer::get_tick() - t0 + t_Paused;
+                            while (Pause && !endOfSearch) Timer::SleepMillis(100);
+                            if (endOfSearch) break;
+                            endOfSearch = true; break;
+                        }
+
+                        uint64_t qi_count = max_qi_batch;
+                        if (qi_start + qi_count > sliceEnd) qi_count = sliceEnd - qi_start;
+
+                        int s = g.currentStep % 2;
+                        active_qi[s] = qi_start;
+                        active_kb[s] = k_b;
+                        active_kg[s] = k_g;
+
+                        g.LaunchMITMGodMatrixAsync(
+                            baby_size, giant_size, L_bits, B_top, k1,
+                            qi_start, qi_count, t2_start, t2_end,
+                            P_locked_saved.x.bits64[0], P_locked_saved.x.bits64[1],
+                            P_locked_saved.x.bits64[2], P_locked_saved.x.bits64[3],
+                            P_locked_saved.y.bits64[0], P_locked_saved.y.bits64[1],
+                            P_locked_saved.y.bits64[2], P_locked_saved.y.bits64[3], s);
+
+                        if (!firstBatch) {
+                            int prev_s = (g.currentStep - 2) % 2;
+                            g.SyncMITMBatch(prev_s, found);
+                            int sync_kb = active_kb[prev_s];
+                            int sync_kg = active_kg[prev_s];
+
+                            for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                                ITEM& it = found[fi];
+                                uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
+                                cpu_unrank_combination(it.incr, L_baby, sync_kb,
+                                    baby_lo, baby_hi, h_combTable, tableK);
+                                cpu_unrank_combination(it.endo, L_giant, sync_kg,
+                                    giant_lo, giant_hi, h_combTable, tableK);
+                                cpu_unrank_combination(it.thId, B_top, k1,
+                                    qi_lo, qi_hi, h_combTable, tableK);
+
+                                uint64_t full_mask_lo, full_mask_hi;
+                                assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
+                                    L_baby, L_giant, L_bits, B_top,
+                                    full_mask_lo, full_mask_hi);
+
+                                uint64_t fk[4];
+                                reconstruct_key_128(full_mask_lo, full_mask_hi,
+                                    blockConfig.targetSeedLo, blockConfig.targetSeedHi,
+                                    n, blockConfig.freeBitPositions,
+                                    blockConfig.lockVals, fk);
+
+                                Int pk; pk.SetInt32(0);
+                                pk.bits64[0] = fk[0]; pk.bits64[1] = fk[1];
+                                pk.bits64[2] = fk[2]; pk.bits64[3] = fk[3];
+                                Point Pc = secp->ComputePublicKey(&pk);
+                                uint8_t hc[20];
+                                secp->GetHash160(SEARCH_COMPRESSED, true, Pc, hc);
+                                checkAddr(*(address_t*)(hc), hc, pk, 0, 0, true);
+                            }
+                            found.clear();
+                        }
+                        firstBatch = false;
+
+                        uint64_t ck = qi_count * T1_size * (t2_end - t2_start);
+                        blockKeysProcessed += ck;
+                        totalKeysProcessed += ck;
+                        counters[thId] = totalKeysProcessed;
+
+                        if (sliceId == 0) {
+                            ttot = Timer::get_tick() - t0 + t_Paused;
+                            static double lt = 0.0;
+                            static uint64_t lk = 0;
+                            double dt = ttot - lt;
+                            if (dt >= 0.5 || lt == 0.0) {
+                                uint64_t gk = 0;
+                                for (int i = 0; i < sliceCount; i++) gk += counters[i];
+                                double spd_gk = (dt > 0.01) ? (double)(gk - lk) / (dt * 1e9) : 0;
+                                lt = ttot; lk = gk;
+                                if (has_v2_center) {
+                                    printf("[SEPHOLY-v2] Blk %zu/%zu ld=%d h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
+                                        blkIdx+1, pipeline.commands.size(), locked_distance, h, k1, k_b, k_g,
+                                        (unsigned long long)W, (unsigned long long)T1_size,
+                                        (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
+                                } else {
+                                    printf("[SEPHOLY] Blk %zu/%zu h=%d k1=%d kb=%d kg=%d | W=%llu T1=%llu T2=%llu | %.2f GK/s | %.2f BK\r",
+                                        blkIdx+1, pipeline.commands.size(), h, k1, k_b, k_g,
+                                        (unsigned long long)W, (unsigned long long)T1_size,
+                                        (unsigned long long)T2_size, spd_gk, (double)gk/1e9);
+                                }
+                                fflush(stdout);
+                            }
+                        }
+                    }
+                }
+            } // end split loop
+
+            // ─── Final drain for the last k1 in this h ───
+            if (!firstBatch) {
+                int prev_s = (g.currentStep - 1) % 2;
+                g.SyncMITMBatch(prev_s, found);
+                int sync_kb = active_kb[prev_s];
+                int sync_kg = active_kg[prev_s];
+                for (int fi = 0; fi < (int)found.size() && !endOfSearch; fi++) {
+                    ITEM& it = found[fi];
+                    uint64_t baby_lo, baby_hi, giant_lo, giant_hi, qi_lo, qi_hi;
+                    cpu_unrank_combination(it.incr, L_baby, sync_kb,
+                        baby_lo, baby_hi, h_combTable, tableK);
+                    cpu_unrank_combination(it.endo, L_giant, sync_kg,
+                        giant_lo, giant_hi, h_combTable, tableK);
+                    cpu_unrank_combination(it.thId, B_top, prev_k1,
+                        qi_lo, qi_hi, h_combTable, tableK);
+                    uint64_t full_mask_lo, full_mask_hi;
+                    assemble_full_mask_128(baby_lo, giant_lo, qi_lo,
+                        L_baby, L_giant, L_bits, B_top,
+                        full_mask_lo, full_mask_hi);
+                    uint64_t fk[4];
+                    reconstruct_key_128(full_mask_lo, full_mask_hi,
+                        blockConfig.targetSeedLo, blockConfig.targetSeedHi,
+                        n, blockConfig.freeBitPositions,
+                        blockConfig.lockVals, fk);
+                    Int pk; pk.SetInt32(0);
+                    pk.bits64[0] = fk[0]; pk.bits64[1] = fk[1];
+                    pk.bits64[2] = fk[2]; pk.bits64[3] = fk[3];
+                    Point Pc = secp->ComputePublicKey(&pk);
+                    uint8_t hc[20];
+                    secp->GetHash160(SEARCH_COMPRESSED, true, Pc, hc);
+                    checkAddr(*(address_t*)(hc), hc, pk, 0, 0, true);
+                }
+                found.clear();
+            }
         } // h
 
         grandTotalKeysAllBlocks += blockKeysProcessed;
