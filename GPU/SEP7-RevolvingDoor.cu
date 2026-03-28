@@ -797,10 +797,61 @@ void comp_keys_revdoor(
 // Host-side: D-Table Computation and Upload
 // =====================================================================================
 
+// ─── Upload C(n,k) table for device-side unranking (ALWAYS called) ───
+bool GPUEngine::UploadCombTable(int n) {
+    int maxN = n + 1;   // rows: 0..n
+    int maxK = n + 1;   // cols: 0..n (k can be up to n)
+    size_t combEntries = (size_t)maxN * maxK;
+    size_t combBytes   = combEntries * sizeof(uint64_t);
+
+    uint64_t* h_comb = (uint64_t*)calloc(combEntries, sizeof(uint64_t));
+    if (!h_comb) {
+        printf("[SEP7] C(n,k) table host alloc failed\n");
+        return false;
+    }
+
+    // Pascal's triangle
+    for (int i = 0; i < maxN; i++) {
+        h_comb[i * maxK + 0] = 1;
+        for (int j = 1; j <= i && j < maxK; j++) {
+            uint64_t a = h_comb[(i - 1) * maxK + (j - 1)];
+            uint64_t b = h_comb[(i - 1) * maxK + j];
+            h_comb[i * maxK + j] = (a > 0xFFFFFFFFFFFFFFFFULL - b)
+                                   ? 0xFFFFFFFFFFFFFFFFULL : a + b;
+        }
+    }
+
+    // Free old table if any
+    uint64_t* old_comb = nullptr;
+    cudaMemcpyFromSymbol(&old_comb, d_rdCombTable, sizeof(uint64_t*));
+    if (old_comb) cudaFree(old_comb);
+
+    uint64_t* dd_comb = nullptr;
+    cudaError_t err = cudaMalloc((void**)&dd_comb, combBytes);
+    if (err != cudaSuccess) {
+        printf("[SEP7] C(n,k) GPU alloc: %s\n", cudaGetErrorString(err));
+        free(h_comb);
+        return false;
+    }
+
+    cudaMemcpy(dd_comb, h_comb, combBytes, cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(d_rdCombTable, &dd_comb, sizeof(uint64_t*));
+
+    int stride = maxK;
+    cudaMemcpyToSymbol(d_rdCombStride, &stride, sizeof(int));
+
+    printf("[SEP7] C(n,k) table uploaded: %d x %d (%.1f KB)\n",
+           maxN, maxK, (float)combBytes / 1024.0f);
+    fflush(stdout);
+
+    free(h_comb);
+    return true;
+}
+
 bool GPUEngine::ComputeDTable(Secp256K1* secp, StringCrackConfig* config) {
     int n = config->numFreeBits;
     if (n <= 0 || n > 64) {
-        printf("[SEP7-RD] D-Table: invalid numFreeBits %d (must be 1..64)\n", n);
+        printf("[SEP7-RD] D-Table: skipped for n=%d (>64, MITM-only mode)\n", n);
         return false;
     }
 
@@ -888,51 +939,6 @@ bool GPUEngine::ComputeDTable(Secp256K1* secp, StringCrackConfig* config) {
 
     free(h_DX);
     free(h_DY);
-
-    // ─── Also upload the C(n,k) table for device-side unranking ───
-    {
-        int maxN = n + 1;   // rows: 0..n
-        int maxK = n + 1;   // cols: 0..n (k can be up to n)
-        size_t combEntries = (size_t)maxN * maxK;
-        size_t combBytes   = combEntries * sizeof(uint64_t);
-
-        uint64_t* h_comb = (uint64_t*)calloc(combEntries, sizeof(uint64_t));
-        if (!h_comb) {
-            printf("[SEP7-RD] C(n,k) table host alloc failed\n");
-            return false;
-        }
-
-        // Pascal's triangle
-        for (int i = 0; i < maxN; i++) {
-            h_comb[i * maxK + 0] = 1;
-            for (int j = 1; j <= i && j < maxK; j++) {
-                uint64_t a = h_comb[(i - 1) * maxK + (j - 1)];
-                uint64_t b = h_comb[(i - 1) * maxK + j];
-                h_comb[i * maxK + j] = (a > 0xFFFFFFFFFFFFFFFFULL - b)
-                                       ? 0xFFFFFFFFFFFFFFFFULL : a + b;
-            }
-        }
-
-        uint64_t* dd_comb = nullptr;
-        err = cudaMalloc((void**)&dd_comb, combBytes);
-        if (err != cudaSuccess) {
-            printf("[SEP7-RD] C(n,k) GPU alloc: %s\n", cudaGetErrorString(err));
-            free(h_comb);
-            return false;
-        }
-
-        cudaMemcpy(dd_comb, h_comb, combBytes, cudaMemcpyHostToDevice);
-        cudaMemcpyToSymbol(d_rdCombTable, &dd_comb, sizeof(uint64_t*));
-
-        int stride = maxK;
-        cudaMemcpyToSymbol(d_rdCombStride, &stride, sizeof(int));
-
-        printf("[SEP7-RD] C(n,k) table uploaded: %d x %d (%.1f KB)\n",
-               maxN, maxK, (float)combBytes / 1024.0f);
-        fflush(stdout);
-
-        free(h_comb);
-    }
 
     return true;
 

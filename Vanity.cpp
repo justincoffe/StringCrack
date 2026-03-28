@@ -1703,6 +1703,8 @@ void VanitySearch::FindKeyGPU_RevDoor(TH_PARAM* ph) {
     else g.SetAddress(usedAddress);
     
     if (!g.SetStringCrackConfig(secp, scConfig)) return;
+    // Always upload the C(n,k) table (needed by MITM table builder).
+    if (!g.UploadCombTable(scConfig->numFreeBits)) return;
     // D-Table is only needed for RevDoor walk kernels (n <= 64).
     // For n > 64, only MITM runs — skip D-Table entirely.
     if (scConfig->numFreeBits <= 64) {
@@ -3074,6 +3076,11 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
         // Upload to GPU
         if (!g.ReconfigureForShekinahBlock(secp, &blockConfig)) {
             printf("[SEPHOLY] Block %zu: reconfigure failed\n", blkIdx);
+            continue;
+        }
+        // Always upload the C(n,k) table (needed by MITM table builder).
+        if (!g.UploadCombTable(blockConfig.numFreeBits)) {
+            printf("[SEPHOLY] Block %zu: combTable upload failed\n", blkIdx);
             continue;
         }
         // D-Table only needed for RevDoor walks (n <= 64)

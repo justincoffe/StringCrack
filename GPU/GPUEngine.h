@@ -170,6 +170,7 @@ public:
                              uint64_t totalCombs, int chunk_size, int numWalks);
 
   // SEP7: Revolving Door EC Walker
+  bool UploadCombTable(int n);
   bool ComputeDTable(Secp256K1* secp, StringCrackConfig* config);
   void LaunchRevDoorAsync(int hamming_h, uint64_t base_pos,
                           uint64_t totalCombs, int chunk_size, int numWalks);
