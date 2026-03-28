@@ -3424,6 +3424,7 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
             bool firstBatch = true;
             uint32_t active_qi[2] = {0};
             int active_kb[2] = {0}, active_kg[2] = {0};
+            int active_k1[2] = {0, 0};
             Point P_locked_saved;
 
             for (int sp_idx = 0; sp_idx < (int)splits.size() && !endOfSearch; sp_idx++) {
@@ -3554,6 +3555,7 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                         active_qi[s] = qi_start;
                         active_kb[s] = k_b;
                         active_kg[s] = k_g;
+                        active_k1[s] = k1;
 
                         g.LaunchMITMGodMatrixAsync(
                             baby_size, giant_size, L_bits, B_top, k1,
@@ -3576,7 +3578,7 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                                     baby_lo, baby_hi, h_combTable, tableK);
                                 cpu_unrank_combination(it.endo, L_giant, sync_kg,
                                     giant_lo, giant_hi, h_combTable, tableK);
-                                cpu_unrank_combination(it.thId, B_top, k1,
+                                cpu_unrank_combination(it.thId, B_top, active_k1[prev_s],
                                     qi_lo, qi_hi, h_combTable, tableK);
 
                                 uint64_t full_mask_lo, full_mask_hi;
