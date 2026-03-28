@@ -3320,7 +3320,7 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
 
                 uint64_t L_totalCombs = h_combTable[L_bits * tableK + k2];
                 if (L_totalCombs == 0) continue;
-                if (L_totalCombs < 4) continue;
+                if (L_totalCombs == 0) continue;
 
                 // Compute P_locked
                 uint64_t lockedKey[4] = {
