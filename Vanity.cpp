@@ -3469,6 +3469,7 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                             uint8_t hc[20];
                             secp->GetHash160(SEARCH_COMPRESSED, true, Pc, hc);
                             checkAddr(*(address_t*)(hc), hc, pk, 0, 0, true);
+                            if (endOfSearch) break;
                         }
                         found.clear();
                         firstBatch = true;
@@ -3599,7 +3600,9 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                                 uint8_t hc[20];
                                 secp->GetHash160(SEARCH_COMPRESSED, true, Pc, hc);
                                 checkAddr(*(address_t*)(hc), hc, pk, 0, 0, true);
+                                if (endOfSearch) break;
                             }
+                            if (endOfSearch) break;
                             found.clear();
                         }
                         firstBatch = false;
@@ -3668,7 +3671,9 @@ void VanitySearch::FindKeyGPU_Shekinah(TH_PARAM* ph) {
                     uint8_t hc[20];
                     secp->GetHash160(SEARCH_COMPRESSED, true, Pc, hc);
                     checkAddr(*(address_t*)(hc), hc, pk, 0, 0, true);
+                    if (endOfSearch) break;
                 }
+                if (endOfSearch) break;
                 found.clear();
             }
         } // h
