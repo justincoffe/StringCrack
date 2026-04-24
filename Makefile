@@ -1,7 +1,6 @@
 #---------------------------------------------------------------------
-# Makefile for vanitysearch
-#
-# Author : Jean-Luc PONS
+# V3 Goldilocks Makefile  (CUDA 12.8 / GCC 11)
+#---------------------------------------------------------------------
 
 SRC = Base58.cpp IntGroup.cpp main.cpp Random.cpp \
       Timer.cpp Int.cpp IntMod.cpp Point.cpp SECP256K1.cpp \
@@ -18,36 +17,44 @@ OBJET = $(addprefix $(OBJDIR)/, \
         hash/ripemd160_sse.o hash/sha256_sse.o \
         GPU/GPUEngine.o Bech32.o Wildcard.o)
 
-CXX        = g++-9
+CXX        = g++-11
 CUDA       = /usr/local/cuda
-CXXCUDA    = /usr/bin/g++-9
+CXXCUDA    = g++-11
 NVCC       = $(CUDA)/bin/nvcc
 
+# CPU Optimization: -O2 and -fno-strict-aliasing are MANDATORY to protect 
+# the legacy pointer punning in Int.cpp and SECP256K1.cpp from breaking.
+# We also restore -mssse3 to protect the native SSE hash files.
 ifdef debug
-CXXFLAGS   = -mssse3 -Wno-write-strings -g -I. -I$(CUDA)/include
+CXXFLAGS   = -g -Wno-write-strings -I. -I$(CUDA)/include
 else
-CXXFLAGS   = -mssse3 -Wno-write-strings -O2 -I. -I$(CUDA)/include
+CXXFLAGS   = -O2 -march=native -fno-strict-aliasing -mssse3 -Wno-write-strings -I. -I$(CUDA)/include
 endif
 LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart
+
+# GPU Architecture Targets (Ada, Hopper, Blackwell)
+GENCODE    = -gencode=arch=compute_89,code=sm_89 \
+             -gencode=arch=compute_90,code=sm_90 \
+             -gencode=arch=compute_120,code=sm_120
 
 #--------------------------------------------------------------------
 
 ifdef debug
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -gencode=arch=compute_89,code=sm_89 -gencode=arch=compute_89,code=compute_89 -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
+	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include $(GENCODE) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 else
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(CUDA)/include -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -gencode=arch=compute_89,code=sm_89 -gencode=arch=compute_89,code=compute_89 -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
+	$(NVCC) -maxrregcount=0 -Xptxas -O3 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O3 -I$(CUDA)/include $(GENCODE) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 endif
 
 $(OBJDIR)/%.o : %.cpp
 	$(CXX) $(CXXFLAGS) -o $@ -c $<
 
-all: VanitySearch
+all: stringcrack
 
-VanitySearch: $(OBJET)
-	@echo Making VanitySearch...
-	$(CXX) $(OBJET) $(LFLAGS) -o vanitysearch
+stringcrack: $(OBJET)
+	@echo "Linking V3 Goldilocks VanitySearch..."
+	$(CXX) $(OBJET) $(LFLAGS) -o stringcrack
 
 $(OBJET): | $(OBJDIR) $(OBJDIR)/GPU $(OBJDIR)/hash
 
@@ -55,14 +62,14 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 $(OBJDIR)/GPU: $(OBJDIR)
-	cd $(OBJDIR) &&	mkdir -p GPU
+	cd $(OBJDIR) && mkdir -p GPU
 
 $(OBJDIR)/hash: $(OBJDIR)
-	cd $(OBJDIR) &&	mkdir -p hash
+	cd $(OBJDIR) && mkdir -p hash
 
 clean:
-	@echo Cleaning...
+	@echo "Cleaning up..."
 	@rm -f obj/*.o
 	@rm -f obj/GPU/*.o
 	@rm -f obj/hash/*.o
-
+	@rm -f stringcrack
